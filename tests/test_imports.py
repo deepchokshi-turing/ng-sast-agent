@@ -32,7 +32,7 @@ def _closure(dist: str) -> set[str]:
 
 def test_agent_imports_only_stdlib_and_harbor():
     code = (
-        "import json, sys; import sast.semgrep.agent; "
+        "import json, sys; import sast.semgrep.agent, sast.codeql.agent; "
         "print(json.dumps(sorted({m.split('.')[0] for m in sys.modules})))"
     )
     out = subprocess.run([sys.executable, "-c", code], cwd=ROOT, check=True, capture_output=True, text=True)

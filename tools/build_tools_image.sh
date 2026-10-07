@@ -27,7 +27,9 @@ CONTEXT="$(mktemp -d)"
 trap 'rm -rf "$CONTEXT"' EXIT
 
 cp "$ROOT/images/sast-tools/Dockerfile" "$ROOT/sast/semgrep/install.py" "$ROOT/sast/semgrep/merge_rules.py" "$CONTEXT/"
+cp "$ROOT/sast/codeql/install.py" "$CONTEXT/codeql_install.py"
 PYTHONPATH="$ROOT" python3 -c "import json, sast.semgrep.pins as p; print(json.dumps(p.as_dict()))" > "$CONTEXT/pins.json"
+PYTHONPATH="$ROOT" python3 -c "import json, sast.codeql.pins as p; print(json.dumps(p.as_dict()))" > "$CONTEXT/codeql-pins.json"
 
 if [[ $# -eq 0 ]]; then
   docker build -t "sast-tools:$VERSION" "$CONTEXT"

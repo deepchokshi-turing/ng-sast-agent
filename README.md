@@ -8,7 +8,7 @@ tool inside the task sandbox, scans `/app/repo`, and writes
 | Agent | Import path | Status |
 |---|---|---|
 | Semgrep OSS 1.179.0 | `sast.semgrep.agent:SemgrepAgent` | ready |
-| CodeQL | `sast.codeql.agent:CodeQLAgent` | planned |
+| CodeQL CLI 2.27.1 | `sast.codeql.agent:CodeQLAgent` | ready: see [docs/codeql-agent.md](docs/codeql-agent.md) |
 | SonarQube | `sast.sonarqube.agent:SonarQubeAgent` | planned |
 
 The design, and the red-team review behind it, is in
@@ -26,6 +26,11 @@ Settings → Agents → add a custom agent:
 | Source | `git+https://github.com/<org>/<repo>@<commit sha>`. Pin a commit, not a branch |
 | Public repository | on if the repo is public, so no token is sent |
 | Delivers effort | leave `unknown` |
+
+For CodeQL, add a second agent with name `codeql-sast`, display name
+`CodeQL 2.27.1` and import path `sast.codeql.agent:CodeQLAgent`, from the same
+source. Its bundle is about 650 MB, so task images should copy it from the
+`sast-tools` image (below); installing it at setup takes about 100 s.
 
 The platform fetches the repository at that commit and puts its root on Harbor's
 `PYTHONPATH`. It installs nothing, so `sast/` imports only the standard library

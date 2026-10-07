@@ -16,7 +16,6 @@ run; it is accepted and never called.
 
 from __future__ import annotations
 
-import fnmatch
 import json
 import shlex
 import time
@@ -28,6 +27,7 @@ from harbor.environments.base import BaseEnvironment
 from ..base import REPO_DIR, ScannerAgent
 from ..errors import ScannerError
 from ..findings import Finding
+from ..scope import ALWAYS_EXCLUDE, in_scope  # noqa: F401  (re-exported for older imports)
 from ..task_config import TaskSettings, repo_relative
 from . import pins
 from .normalise import normalise
@@ -35,12 +35,6 @@ from .options import SemgrepOptions
 
 _INSTALL_SCRIPT = Path(__file__).with_name("install.py")
 _MERGE_SCRIPT = Path(__file__).with_name("merge_rules.py")
-
-
-#: Always skipped: compiled bytecode is a build output, not source. Task images
-#: that run tests or compileall at build time are full of it, and the secrets
-#: rules would regex-scan the binaries.
-ALWAYS_EXCLUDE = ("__pycache__", "*.pyc", "*.pyo")
 
 
 def scope_args(roots: list[str], excludes: list[str]) -> list[str]:
@@ -59,25 +53,6 @@ def scope_args(roots: list[str], excludes: list[str]) -> list[str]:
     for path in [*excludes, *ALWAYS_EXCLUDE]:
         args += ["--exclude", ("/" + path.strip("/")) if "/" in path.strip("/") else path]
     return args
-
-
-def in_scope(file: str, roots: list[str], excludes: list[str]) -> bool:
-    """Whether a repo-relative file is inside the roots and outside the excludes."""
-    def under(path: str, prefix: str) -> bool:
-        prefix = prefix.strip("/")
-        return prefix in (".", "") or path == prefix or path.startswith(prefix + "/")
-
-    if not any(under(file, r) for r in roots):
-        return False
-    parts = file.split("/")
-    for ex in [*excludes, *ALWAYS_EXCLUDE]:
-        ex = ex.strip("/")
-        if "/" in ex:
-            if under(file, ex):
-                return False
-        elif any(fnmatch.fnmatchcase(part, ex) for part in parts):
-            return False
-    return True
 
 
 class SemgrepAgent(ScannerAgent):
@@ -213,25 +188,3 @@ class SemgrepAgent(ScannerAgent):
         messages = [" ".join(str(e.get("message") or e.get("type") or "").split())[:300]
                     for e in document.get("errors") or [] if isinstance(e, dict)]
         return "; ".join(messages[:3]) or "no error details in its output"
-
-    async def _existing_roots(self, environment: BaseEnvironment, roots: list[str], meta: dict[str, Any]) -> list[str]:
-        if roots == ["."]:
-            return roots
-        checks = "; ".join(
-            f"if [ -e {shlex.quote(p)} ]; then echo OK {shlex.quote(p)}; else echo MISSING {shlex.quote(p)}; fi"
-            for p in roots
-        )
-        result = await self._exec(environment, checks, timeout_sec=60, what="checking scan roots", cwd=REPO_DIR)
-        present = [line[3:] for line in (result.stdout or "").splitlines() if line.startswith("OK ")]
-        missing = [p for p in roots if p not in present]
-        meta["scan_roots_missing"] = missing
-        if not present:
-            raise ScannerError(f"none of the scan roots exist in {REPO_DIR}: {', '.join(roots)}")
-        return [p for p in roots if p in present]
-
-    async def _nproc(self, environment: BaseEnvironment) -> int:
-        result = await self._exec(environment, "nproc 2>/dev/null || echo 1", timeout_sec=60, what="counting CPUs")
-        try:
-            return max(1, int((result.stdout or "1").strip().splitlines()[0]))
-        except (ValueError, IndexError):
-            return 1

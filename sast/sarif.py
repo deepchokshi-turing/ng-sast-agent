@@ -5,10 +5,13 @@ What each field is built from:
 - ``ruleId``: the CWE table (``sast.cwe_map.task_rule``). An LLM02 result is
   HIGH when one of its CWEs shows data leaving its boundary, else MEDIUM.
 - ``locations[0]``: the match.
-- ``codeFlows``: never emitted. A code flow may only come from a dataflow trace
-  the tool itself reported, and Semgrep OSS 1.179.0 puts no trace in its JSON
-  output without a login. A one-step flow made from the match alone would earn
-  path credit through the grader's line tolerance with nothing behind it.
+- ``codeFlows``: only a dataflow path the tool itself reported
+  (``Finding.flow``), step by step, source first. CodeQL's path queries report
+  one; Semgrep OSS 1.179.0 does not (no trace in its JSON without a login), so
+  Semgrep results never carry one. The first step is marked ``source`` and the
+  last ``sink``; steps in between get no role, since the tool does not say what
+  they are. A flow is never made up from the match alone: that would earn path
+  credit through the grader's line tolerance with nothing behind it.
 - ``properties.cwe``: every CWE of every rule merged into the result.
 - ``properties.heuristics``: ``controlStatus``, ``residualRisk`` and
   ``recommendations`` from ``sast.heuristics`` (fixed tables, not analysis),
@@ -63,6 +66,7 @@ def _group(findings: list[Finding]) -> tuple[dict[tuple[str, int, str], dict[str
                 "cwes": list(f.cwes),
                 "tool_rule_ids": [f.tool_rule_id],
                 "residual_risk": f.residual_risk,
+                "flow": f.flow,
                 "members": [f],
             }
             continue
@@ -76,10 +80,27 @@ def _group(findings: list[Finding]) -> tuple[dict[tuple[str, int, str], dict[str
         group["cwes"] += [c for c in f.cwes if c not in group["cwes"]]
         if f.tool_rule_id not in group["tool_rule_ids"]:
             group["tool_rule_ids"].append(f.tool_rule_id)
+        if not group["flow"] and f.flow:
+            group["flow"] = f.flow
         group["members"].append(f)
     for group in groups.values():
         group["rule"] = cwe_map.task_rule(group["cwes"])
     return groups, dropped_by_cwe, mapped
+
+
+def _code_flows(flow: tuple[tuple[str, int, int, str], ...]) -> list[dict[str, Any]]:
+    """The tool's own path as one SARIF threadFlow."""
+    steps = []
+    for i, (file, start, end, message) in enumerate(flow):
+        step: dict[str, Any] = {"location": {"physicalLocation": _region(file, start, end)}}
+        if message:
+            step["location"]["message"] = {"text": message}
+        if i == 0 and len(flow) > 1:
+            step["properties"] = {"role": "source"}
+        elif i == len(flow) - 1:
+            step["properties"] = {"role": "sink"}
+        steps.append(step)
+    return [{"threadFlows": [{"locations": steps}]}]
 
 
 def emitted_rules(findings: list[Finding]) -> list[str | None]:
@@ -97,7 +118,7 @@ def build(findings: list[Finding], *, tool_name: str, tool_version: str) -> tupl
     for (file, start, _family), g in sorted(groups.items(), key=lambda kv: (kv[0][0], kv[0][1], kv[1]["rule"])):
         rule = g["rule"]
         end = max(g["end_line"], start)
-        results.append({
+        result: dict[str, Any] = {
             "ruleId": rule,
             "level": g["level"],
             "message": {"text": g["message"] or rule},
@@ -113,7 +134,10 @@ def build(findings: list[Finding], *, tool_name: str, tool_version: str) -> tupl
                     "version": heuristics.VERSION,
                 },
             },
-        })
+        }
+        if g["flow"]:
+            result["codeFlows"] = _code_flows(g["flow"])
+        results.append(result)
 
     used = sorted({r["ruleId"] for r in results})
     sarif = {
@@ -139,6 +163,7 @@ def build(findings: list[Finding], *, tool_name: str, tool_version: str) -> tupl
         "findings_unmapped": sum(dropped_by_cwe.values()),
         "unmapped_by_cwe": dict(sorted(dropped_by_cwe.items())),
         "results_emitted": len(results),
+        "results_with_tool_flow": sum("codeFlows" in r for r in results),
         "results_by_rule": dict(sorted(Counter(r["ruleId"] for r in results).items())),
     }
     return sarif, stats

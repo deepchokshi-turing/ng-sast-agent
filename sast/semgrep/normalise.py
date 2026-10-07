@@ -15,6 +15,7 @@ from typing import Any
 
 from .. import heuristics
 from ..findings import Finding
+from ..scope import repo_path  # noqa: F401  (re-exported for older imports)
 
 _CWE = re.compile(r"\bCWE-(\d+)\b", re.IGNORECASE)
 
@@ -43,16 +44,6 @@ def cwes_of(metadata: dict[str, Any]) -> tuple[str, ...]:
             if cwe not in seen:
                 seen.append(cwe)
     return tuple(seen)
-
-
-def repo_path(path: str, repo_dir: str = "/app/repo") -> str:
-    """A result path relative to the repository root, "/"-separated."""
-    path = path.replace("\\", "/")
-    if path.startswith(repo_dir.rstrip("/") + "/"):
-        path = path[len(repo_dir.rstrip("/")) + 1:]
-    while path.startswith("./"):
-        path = path[2:]
-    return path.lstrip("/")
 
 
 def normalise(output: dict[str, Any]) -> tuple[list[Finding], dict[str, Any]]:

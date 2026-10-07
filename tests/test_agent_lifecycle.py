@@ -10,6 +10,7 @@ import pytest
 from harbor.environments.base import ExecResult
 from harbor.models.agent.context import AgentContext
 
+from sast import __version__
 from sast.errors import ScannerError
 from sast.semgrep.agent import SemgrepAgent
 from tests.conftest import SAMPLE_TASKS, FIXTURES
@@ -88,7 +89,7 @@ def test_happy_path_writes_sarif_logs_and_metadata(tmp_path):
     assert meta["model_ignored"] == "openai/gpt-5"
     assert meta["cwe_map"] == "cwe-map-3"
     assert meta["heuristics"] == "heuristics-1"
-    assert meta["agent_version"] == "0.3.0+semgrep-1.179.0"
+    assert meta["agent_version"] == f"{__version__}+semgrep-1.179.0"
     assert meta["scan_budget_sec"] == 780
     assert meta["results_emitted"] == 2  # the eval() and the merged shell=True pair
     assert meta["findings_compact"][0][-1] == "LLM03.EA.FUNCTIONALITY"

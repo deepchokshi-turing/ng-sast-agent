@@ -20,6 +20,10 @@ class Finding:
     #: "low", "medium" or "high", from the rule's severity and impact metadata
     #: (``sast.heuristics.residual_risk``).
     residual_risk: str = "medium"
+    #: A dataflow path the tool itself reported, source first, as
+    #: (file, start_line, end_line, message) per step. Empty when the tool gave
+    #: none; nothing is ever inferred here.
+    flow: tuple[tuple[str, int, int, str], ...] = ()
 
     def compact(self, emitted_rule: str | None) -> list:
         """One row of the run's metadata, small enough to keep thousands."""
