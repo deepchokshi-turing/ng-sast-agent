@@ -1,0 +1,17 @@
+{
+  "_note": "Synthetic data only.",
+  "users": [
+    {
+      "user_id": "u-acme-agent-3",
+      "tenant_id": "tenant-acme",
+      "display_name": "Acme support agent",
+      "verified_email": "agent3@acme.example"
+    },
+    {
+      "user_id": "u-glbx-agent-1",
+      "tenant_id": "tenant-globex",
+      "display_name": "Globex support agent",
+      "verified_email": "agent1@globex.example"
+    }
+  ]
+}

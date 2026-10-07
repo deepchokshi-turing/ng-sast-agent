@@ -1,0 +1,91 @@
+{
+  "schema_version": "gt-0.1",
+  "task_id": "dev_smoke_eval",
+  "variant_role": "positive",
+  "risk_types_present": [
+    "excessive_agency"
+  ],
+  "matching": {
+    "line_tolerance": 10,
+    "path_line_tolerance": 10,
+    "notes": "Same matching as task_7f3a91: risk type (ruleId prefix) and locations[0] within line_tolerance."
+  },
+  "findings": [
+    {
+      "id": "F1",
+      "is_vulnerable": true,
+      "risk_type": "excessive_agency",
+      "owasp_id": "LLM03:2026",
+      "rule_id": "LLM03.EA.FUNCTIONALITY",
+      "acceptable_rule_ids": [
+        "LLM03.EA.FUNCTIONALITY"
+      ],
+      "partial_credit_rule_ids": [],
+      "severity": "high",
+      "primary_cwe": "CWE-95",
+      "acceptable_cwes": [
+        "CWE-95",
+        "CWE-94"
+      ],
+      "primary_location": {
+        "file": "src/calc_agent/agent.py",
+        "start_line": 8,
+        "end_line": 8
+      },
+      "alternative_primary_locations": [],
+      "path": [
+        {
+          "step": 1,
+          "role": "model_decision",
+          "required": true,
+          "file": "src/calc_agent/agent.py",
+          "start_line": 12,
+          "end_line": 12,
+          "note": "the model writes the expression"
+        },
+        {
+          "step": 2,
+          "role": "root_cause",
+          "required": true,
+          "file": "src/calc_agent/agent.py",
+          "start_line": 8,
+          "end_line": 8,
+          "note": "the calculator tool evals it"
+        },
+        {
+          "step": 3,
+          "role": "sink",
+          "required": true,
+          "file": "src/calc_agent/agent.py",
+          "start_line": 8,
+          "end_line": 8,
+          "note": "arbitrary code runs"
+        }
+      ],
+      "controls": [],
+      "control_status": "none",
+      "residual_risk": "high",
+      "recommendations": {
+        "required_any_of": [
+          "REC-NARROW-TYPED-TOOLS"
+        ],
+        "acceptable": [
+          "REC-POLICY-GATE"
+        ],
+        "complete_remediation": "Evaluate arithmetic with a parser that allows arithmetic nodes only."
+      },
+      "rationale": "The calculator tool passes model output to Python eval, so the model can run any code, not only arithmetic."
+    }
+  ],
+  "negative_analyses": [],
+  "scoring_weights": {
+    "detection": 0.35,
+    "classification": 0.05,
+    "path": 0.3,
+    "controls": 0.15,
+    "recommendations": 0.15
+  },
+  "fix_changed_files": [
+    "src/calc_agent/agent.py"
+  ]
+}

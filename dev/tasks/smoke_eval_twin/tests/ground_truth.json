@@ -1,0 +1,28 @@
+{
+  "schema_version": "gt-0.1",
+  "task_id": "dev_smoke_eval_twin",
+  "variant_role": "fixed_twin",
+  "risk_types_present": [],
+  "matching": {
+    "line_tolerance": 10,
+    "path_line_tolerance": 10,
+    "notes": "Same matching as task_7f3a91: risk type (ruleId prefix) and locations[0] within line_tolerance."
+  },
+  "findings": [],
+  "negative_analyses": [],
+  "scoring_weights": {
+    "detection": 0.35,
+    "classification": 0.05,
+    "path": 0.3,
+    "controls": 0.15,
+    "recommendations": 0.15
+  },
+  "fixed_locations": [
+    {
+      "file": "src/calc_agent/agent.py",
+      "start_line": 33,
+      "end_line": 36,
+      "why": "calculate(): eval() replaced by the arithmetic-only parser"
+    }
+  ]
+}
