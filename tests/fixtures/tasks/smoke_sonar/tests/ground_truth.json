@@ -1,0 +1,270 @@
+{
+  "schema_version": "gt-0.1",
+  "task_id": "dev_smoke_sonar",
+  "variant_role": "positive",
+  "risk_types_present": [
+    "excessive_agency",
+    "sensitive_information_disclosure"
+  ],
+  "matching": {
+    "line_tolerance": 2,
+    "path_line_tolerance": 2,
+    "notes": "Tolerance 2 so the four findings, five to seven lines apart, never overlap."
+  },
+  "findings": [
+    {
+      "id": "F1",
+      "is_vulnerable": true,
+      "risk_type": "excessive_agency",
+      "owasp_id": "LLM03:2026",
+      "rule_id": "LLM03.EA.FUNCTIONALITY",
+      "acceptable_rule_ids": [
+        "LLM03.EA.FUNCTIONALITY"
+      ],
+      "partial_credit_rule_ids": [],
+      "severity": "high",
+      "primary_cwe": "CWE-89",
+      "acceptable_cwes": [
+        "CWE-89"
+      ],
+      "primary_location": {
+        "file": "src/notes_agent/agent.py",
+        "start_line": 16,
+        "end_line": 16
+      },
+      "alternative_primary_locations": [],
+      "path": [
+        {
+          "step": 1,
+          "role": "model_decision",
+          "required": true,
+          "file": "src/notes_agent/agent.py",
+          "start_line": 40,
+          "end_line": 40,
+          "note": "the model picks the title"
+        },
+        {
+          "step": 2,
+          "role": "root_cause",
+          "required": true,
+          "file": "src/notes_agent/agent.py",
+          "start_line": 16,
+          "end_line": 16,
+          "note": "the title is formatted into the SQL text"
+        },
+        {
+          "step": 3,
+          "role": "sink",
+          "required": true,
+          "file": "src/notes_agent/agent.py",
+          "start_line": 16,
+          "end_line": 16,
+          "note": "any query runs"
+        }
+      ],
+      "controls": [],
+      "control_status": "none",
+      "residual_risk": "high",
+      "recommendations": {
+        "required_any_of": [
+          "REC-NARROW-TYPED-TOOLS"
+        ],
+        "acceptable": [],
+        "complete_remediation": "Pass the title as a query parameter."
+      },
+      "rationale": "The model's title is formatted into the SQL text, so it can run any query, not only a lookup of one note."
+    },
+    {
+      "id": "F2",
+      "is_vulnerable": true,
+      "risk_type": "excessive_agency",
+      "owasp_id": "LLM03:2026",
+      "rule_id": "LLM03.EA.FUNCTIONALITY",
+      "acceptable_rule_ids": [
+        "LLM03.EA.FUNCTIONALITY"
+      ],
+      "partial_credit_rule_ids": [],
+      "severity": "high",
+      "primary_cwe": "CWE-78",
+      "acceptable_cwes": [
+        "CWE-78",
+        "CWE-88"
+      ],
+      "primary_location": {
+        "file": "src/notes_agent/agent.py",
+        "start_line": 23,
+        "end_line": 23
+      },
+      "alternative_primary_locations": [],
+      "path": [
+        {
+          "step": 1,
+          "role": "model_decision",
+          "required": true,
+          "file": "src/notes_agent/agent.py",
+          "start_line": 40,
+          "end_line": 40,
+          "note": "the model picks the note name"
+        },
+        {
+          "step": 2,
+          "role": "root_cause",
+          "required": true,
+          "file": "src/notes_agent/agent.py",
+          "start_line": 23,
+          "end_line": 23,
+          "note": "the name goes into a shell command"
+        },
+        {
+          "step": 3,
+          "role": "sink",
+          "required": true,
+          "file": "src/notes_agent/agent.py",
+          "start_line": 23,
+          "end_line": 23,
+          "note": "any command runs"
+        }
+      ],
+      "controls": [],
+      "control_status": "none",
+      "residual_risk": "high",
+      "recommendations": {
+        "required_any_of": [
+          "REC-NARROW-TYPED-TOOLS"
+        ],
+        "acceptable": [],
+        "complete_remediation": "Count words in Python, or call wc with an argument list and no shell."
+      },
+      "rationale": "The word count tool runs a shell command built from the model's argument, so the model can run any command."
+    },
+    {
+      "id": "F3",
+      "is_vulnerable": true,
+      "risk_type": "excessive_agency",
+      "owasp_id": "LLM03:2026",
+      "rule_id": "LLM03.EA.PERMISSIONS",
+      "acceptable_rule_ids": [
+        "LLM03.EA.PERMISSIONS"
+      ],
+      "partial_credit_rule_ids": [],
+      "severity": "high",
+      "primary_cwe": "CWE-732",
+      "acceptable_cwes": [
+        "CWE-732",
+        "CWE-276"
+      ],
+      "primary_location": {
+        "file": "src/notes_agent/agent.py",
+        "start_line": 29,
+        "end_line": 29
+      },
+      "alternative_primary_locations": [],
+      "path": [
+        {
+          "step": 1,
+          "role": "root_cause",
+          "required": true,
+          "file": "src/notes_agent/agent.py",
+          "start_line": 29,
+          "end_line": 29,
+          "note": "the notes folder is made world-writable"
+        },
+        {
+          "step": 2,
+          "role": "sink",
+          "required": true,
+          "file": "src/notes_agent/agent.py",
+          "start_line": 29,
+          "end_line": 29,
+          "note": "any local user can change the notes"
+        }
+      ],
+      "controls": [],
+      "control_status": "none",
+      "residual_risk": "high",
+      "recommendations": {
+        "required_any_of": [
+          "REC-LEAST-PRIVILEGE"
+        ],
+        "acceptable": [],
+        "complete_remediation": "Keep the folder at mode 700."
+      },
+      "rationale": "The notes folder is made writable by every user, more than reading and counting notes needs."
+    },
+    {
+      "id": "F4",
+      "is_vulnerable": true,
+      "risk_type": "sensitive_information_disclosure",
+      "owasp_id": "LLM02:2026",
+      "rule_id": "LLM02.SID.HIGH",
+      "acceptable_rule_ids": [
+        "LLM02.SID.HIGH",
+        "LLM02.SID.MEDIUM"
+      ],
+      "partial_credit_rule_ids": [],
+      "severity": "high",
+      "primary_cwe": "CWE-319",
+      "acceptable_cwes": [
+        "CWE-319",
+        "CWE-200"
+      ],
+      "primary_location": {
+        "file": "src/notes_agent/agent.py",
+        "start_line": 11,
+        "end_line": 11
+      },
+      "alternative_primary_locations": [],
+      "path": [
+        {
+          "step": 1,
+          "role": "source",
+          "required": true,
+          "file": "src/notes_agent/agent.py",
+          "start_line": 33,
+          "end_line": 33,
+          "note": "every note body is read"
+        },
+        {
+          "step": 2,
+          "role": "root_cause",
+          "required": true,
+          "file": "src/notes_agent/agent.py",
+          "start_line": 11,
+          "end_line": 11,
+          "note": "the backup endpoint is plain HTTP"
+        },
+        {
+          "step": 3,
+          "role": "sink",
+          "required": true,
+          "file": "src/notes_agent/agent.py",
+          "start_line": 35,
+          "end_line": 35,
+          "note": "the notes cross the network unencrypted"
+        }
+      ],
+      "controls": [],
+      "control_status": "none",
+      "residual_risk": "high",
+      "recommendations": {
+        "required_any_of": [
+          "REC-SINK-SIDE-IFC"
+        ],
+        "acceptable": [],
+        "complete_remediation": "Send the backup over HTTPS only."
+      },
+      "rationale": "The user's personal notes are sent to the backup server over clear-text HTTP."
+    }
+  ],
+  "negative_analyses": [],
+  "scoring_weights": {
+    "detection": 0.35,
+    "classification": 0.05,
+    "path": 0.3,
+    "controls": 0.15,
+    "recommendations": 0.15
+  },
+  "fix_changed_files": [
+    "src/notes_agent/agent.py"
+  ]
+}

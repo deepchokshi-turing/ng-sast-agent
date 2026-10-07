@@ -1,21 +1,31 @@
-sonarqube_26.9_<task>.json
+SonarQube recordings
 
 Server: SonarQube Community Build 26.9.0.129388 (sonarqube:26.9.0.129388-community), local Docker.
 Scanner: sonar-scanner CLI 8.1.0.6389.
-Recorded on 2026-10-07 by the agent's own fetch.py during a real Harbor run of
-four trials (task_4da5ab and task_dc4b7a, positive and negative), all with status ok.
-The files are the trials' artifacts/logs/artifacts/sast/sonarqube.json, unchanged.
+All files are the trials' artifacts/logs/artifacts/sast/sonarqube.json, unchanged.
 
-They use the OLD fetch format (fetch_format 1). It has rules/show only and no
-rules/search cwe facet, so the normaliser finds no CWE in them and reports
-nothing from them, which the tests check.
+sonarqube_26.9-f2_<task>.json (fetch_format 2)
+Recorded on 2026-10-08 by the agent's own fetch.py during a real Harbor run
+(harbor-jobs/sonarqube-v040b, four trials of task_4da5ab and task_dc4b7a,
+positive and negative, all status ok, token file removed, token found in no
+artifact). They include the per-rule cwe facet from api/rules/search. This is
+the format the agent accepts. They predate the api/measures/component call
+and the default-profile fallback, so they have no "measures" key. Tests that
+need one add a measures answer in the documented shape and say so.
 
-TODO (main session): add a fresh recording with the cwe facet (fetch_format 2)
-after the next real run, as sonarqube_26.9_<task>.json next to these.
+sonarqube_26.9_<task>.json (fetch_format 1)
+Recorded on 2026-10-07 in an earlier real Harbor run of the same four tasks.
+This OLD format has rules/show only and no rules/search cwe facet, so it holds
+no CWE. The normaliser refuses it unless a test passes allow_old_format=True.
 
-Fresh recordings, fetch_format 2 (files sonarqube_26.9-f2_<task>.json):
-SonarQube Community Build 26.9.0.129388 in Docker, sonar-scanner 8.1.0.6389,
-recorded on 2026-10-08 by the agent's own fetch.py during a real Harbor run
-(harbor-jobs/sonarqube-v040b, four trials, all status ok, token file removed,
-token found in no artifact). They include the per-rule cwe facet from
-api/rules/search. Unedited.
+No recording yet holds a Security Hotspot or a result from a mapped rule other
+than python:S5332. tests/fixtures/tasks/smoke_sonar is a small task made to
+produce both, for the next real recording.
+
+sonarqube_26.9-f2_smoke_sonar.json: recorded 2026-10-08 from a real Harbor run
+of the sample task tests/fixtures/tasks/smoke_sonar against the same server
+(harbor-jobs/sonarqube-smoke-040d, status ok, reward 0.2583). It is the first
+recording with mapped results: python:S5332 (CWE-200, CWE-319, reported as
+LLM02.SID.HIGH under cwe-map-4) and python:S2612 (CWE-266, CWE-732, reported as
+LLM03.EA.PERMISSIONS). The server returned no Security Hotspots for this code.
+Unedited.

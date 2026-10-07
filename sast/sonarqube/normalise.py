@@ -6,22 +6,23 @@ Security Hotspots. For each one:
 - CWEs come from the ``cwe`` facet of ``api/rules/search?rule_key=<key>``,
   which fetch.py stores per rule under ``rule_facets``. SonarQube Community
   Build 26.9 does not return ``securityStandards`` from ``api/rules/show``
-  (only sysTags such as ``cwe``), so the facet is the one source. A rule whose
-  lookup failed or came back empty has no CWE, and so has every rule in a
-  ``fetch_format`` 1 document, which was written before fetch.py asked for
-  the facet. Such results are passed on with no CWE (never reported) and
-  counted.
-- The facet is an unordered set, while ``sast.cwe_map`` maps a rule by its
-  primary CWE so that a rule is never reported through a secondary CWE.
-  Sonar names no primary CWE, so this module applies the one choice that
-  gives the cwe-map-3 answer whatever the primary would have been: each CWE
-  of the rule is mapped on its own with ``cwe_map.rule_for``. When every CWE
-  gives the same answer (the same ruleId family, or unmapped for all of
-  them), that answer is certain and the result is passed on with its CWEs in
-  numeric order, so ``rule_for`` on the tuple gives that same answer. When
-  the answers differ (two families, or a family and an unmapped CWE), the
-  result depends on which CWE Sonar would call primary. It is then dropped
-  as ambiguous and counted, never reported. See :func:`cwe_decision`.
+  (only sysTags such as ``cwe``), so the facet is the one source. The rule's
+  description has a hand-written resources list, but it is a reference list,
+  not a primary CWE (python:S4423 lists only CWE-327 there while its facet
+  holds 295, 326 and 327), so it is not used.
+- Only ``fetch_format`` 2 documents are accepted. Format 1 was written before
+  fetch.py asked for the facet and holds no CWE, so reading it would silently
+  report nothing. ``allow_old_format=True`` reads it anyway, for tests only.
+  A format 2 document must hold, for every rule with a result, a facet answer
+  that is exactly that rule, and no ``rule_errors``. Anything else is an
+  error, never "no CWE".
+- The facet is an unordered set, so the CWE decision is
+  ``cwe_map.decide_unordered`` (cwe-map-4): unmapped CWEs are ignored, mapped
+  CWEs that all fall in one family give that family, mapped CWEs in more
+  than one family make the result ambiguous, and it is dropped and counted.
+  A result is passed on with the decided family's CWEs first, so
+  ``cwe_map.rule_for`` on the tuple gives that family and ``task_rule``
+  still sees every CWE when it picks HIGH or MEDIUM.
 - The location is ``textRange`` (or ``line``), and the file is the part of
   ``component`` after ``<projectKey>:``, which is relative to
   ``sonar.projectBaseDir`` (/app/repo). A result with no line is skipped and
@@ -84,20 +85,12 @@ def facet_cwes(search: dict[str, Any] | None) -> tuple[str, ...]:
     return tuple(f"CWE-{n}" for n in sorted(numbers))
 
 
-def cwe_decision(cwes: Iterable[str]) -> tuple[str, tuple[str, ...]]:
-    """("none" | "unmapped" | "mapped" | "ambiguous", the CWEs in numeric order).
-
-    Each CWE is mapped on its own, as if it were the primary one. "mapped"
-    means all of them land in the same family, "unmapped" that none of them
-    maps, "ambiguous" that the answer depends on which one is primary.
-    """
-    ordered = tuple(sorted(set(cwes), key=lambda c: int(c.split("-", 1)[1])))
-    if not ordered:
-        return "none", ordered
-    families = {cwe_map.rule_for((cwe,)) for cwe in ordered}
-    if len(families) > 1:
-        return "ambiguous", ordered
-    return ("unmapped" if families == {None} else "mapped"), ordered
+def facet_is_rule(search: dict[str, Any] | None, key: str) -> bool:
+    """Whether an api/rules/search answer is exactly the one rule ``key`` (as fetch.py checks)."""
+    search = search or {}
+    total = (search.get("paging") or {}).get("total", search.get("total"))
+    rules = search.get("rules") or []
+    return total is not None and int(total) == 1 and len(rules) == 1 and (rules[0] or {}).get("key") == key
 
 
 def component_path(component: str, project_key: str) -> str:
@@ -139,15 +132,31 @@ def rule_cwes(document: dict[str, Any]) -> dict[str, tuple[str, ...]]:
     return {key: facet_cwes(facets.get(key)) for key in keys}
 
 
-def normalise(document: dict[str, Any]) -> tuple[list[Finding], dict[str, Any]]:
-    """(findings, counts) from one sonarqube.json written by fetch.py."""
+def normalise(document: dict[str, Any], *, allow_old_format: bool = False) -> tuple[list[Finding], dict[str, Any]]:
+    """(findings, counts) from one sonarqube.json written by fetch.py.
+
+    Raises ValueError for a document whose rule CWEs cannot be trusted (see
+    the module docstring). ``allow_old_format`` is for tests only.
+    """
     if not isinstance(document, dict) or "issues_pages" not in document or "hotspots_pages" not in document:
         raise ValueError("sonarqube.json has no issues_pages or hotspots_pages")
+    fetch_format = document.get("fetch_format")
+    if fetch_format != 2 and not allow_old_format:
+        raise ValueError(f"sonarqube.json has fetch_format {fetch_format!r}, only 2 (with the rule cwe facet) "
+                         "is accepted")
     project = str(document.get("project_key") or "")
     has_facets = "rule_facets" in document
     cwes_by_rule = rule_cwes(document)
     issues = _flatten(document["issues_pages"], "issues")
     hotspots = _flatten(document["hotspots_pages"], "hotspots")
+    if fetch_format == 2:
+        if document.get("rule_errors"):
+            raise ValueError(f"rule lookups failed: {sorted(document['rule_errors'])}")
+        facets = document.get("rule_facets") or {}
+        used = {str(i.get("rule") or "") for i in issues} | {str(h.get("ruleKey") or "") for h in hotspots}
+        bad = sorted(key for key in used if not facet_is_rule(facets.get(key), key))
+        if bad:
+            raise ValueError(f"no api/rules/search answer for exactly the rule(s) {bad}, so their CWEs are unknown")
 
     findings: list[Finding] = []
     no_line = {VULNERABILITY: 0, SECURITY_HOTSPOT: 0}
@@ -163,7 +172,7 @@ def normalise(document: dict[str, Any]) -> tuple[list[Finding], dict[str, Any]]:
             no_line[sonar_type] += 1
             return
         file = component_path(str(item.get("component") or ""), project)
-        decision, cwes = cwe_decision(cwes_by_rule.get(rule, ()))
+        decision, _family, cwes = cwe_map.decide_unordered(cwes_by_rule.get(rule, ()))
         decisions[decision] += 1
         if decision == "ambiguous":
             ambiguous.append([rule, list(cwes), file, start])
@@ -201,7 +210,6 @@ def normalise(document: dict[str, Any]) -> tuple[list[Finding], dict[str, Any]]:
         "results_without_line": no_line,
         "rule_cwe_source": CWE_SOURCE_FACET if has_facets else CWE_SOURCE_NONE,
         "rules_without_cwe": sorted(k for k, v in cwes_by_rule.items() if not v),
-        "rule_lookup_errors": dict(sorted((document.get("rule_errors") or {}).items())),
         "results_by_cwe_decision": decisions,
         "results_cwe_ambiguous": ambiguous,
         "flows_raw": flows,

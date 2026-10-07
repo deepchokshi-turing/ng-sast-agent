@@ -6,8 +6,10 @@ query suite, and changing any value here is a new agent version (bump
 
 CodeQL stays at 2.27.1 to match the earlier baseline over the 159 cases. The
 bundle (linux64 on amd64, linux-arm64 on arm64) is baked into the tools image at
-``INSTALL_DIR``, because downloading it does not fit in Harbor's 300 s setup
-limit. ``install.py`` only checks it, and there is no download fallback.
+``INSTALL_DIR``. ``install.py`` uses it when it matches these pins. Otherwise it
+downloads the pinned bundle for the CPU, checks its sha256 and unpacks it, all
+inside Harbor's 300 s setup limit (about 100 s on a fast link), and fails with a
+clear message when the download cannot finish in time.
 """
 
 CODEQL_VERSION = "2.27.1"
@@ -50,7 +52,8 @@ def as_dict() -> dict:
     return {
         "codeql_version": CODEQL_VERSION,
         "bundle_tag": BUNDLE_TAG,
-        "bundles": {arch: {"asset": asset, "sha256": sha} for arch, (asset, sha) in BUNDLES.items()},
+        "bundles": {arch: {"asset": asset, "sha256": sha, "url": bundle_url(arch)}
+                    for arch, (asset, sha) in BUNDLES.items()},
         "install_dir": INSTALL_DIR,
         "python_queries_pack": PYTHON_QUERIES_PACK,
         "python_queries_version": PYTHON_QUERIES_VERSION,

@@ -35,7 +35,8 @@ class FakeSandbox:
     def __init__(self, environment_dir: Path, sarif: bytes | None, create_exit: int = 0, analyze_exit: int = 0,
                  install_exit: int = 0, kinds: dict[str, str] | None = None,
                  python_files: tuple[str, ...] = ("src/support_copilot/agent.py", "tests/test_smoke.py"),
-                 tar: str = "ok"):
+                 tar: str = "ok", install_result: str = '{"codeql_version": "2.27.1"}'):
+        self.install_result = install_result
         self.environment_dir = environment_dir
         self.files: dict[str, bytes] = {}
         self.commands: list[tuple[str, dict | None]] = []
@@ -54,7 +55,7 @@ class FakeSandbox:
             if self.install_exit:
                 return ExecResult(stdout="[install] ERROR: CodeQL is not installed at /opt/sast/codeql/codeql",
                                   return_code=self.install_exit)
-            return ExecResult(stdout='[install] ok\nINSTALL_RESULT {"codeql_version": "2.27.1"}', return_code=0)
+            return ExecResult(stdout="[install] ok\nINSTALL_RESULT " + self.install_result, return_code=0)
         if "database create" in command:
             return ExecResult(stdout="", stderr="A fatal error occurred: boom" if self.create_exit else "",
                               return_code=self.create_exit)
@@ -181,6 +182,22 @@ def test_results_outside_the_task_scope_are_dropped(tmp_path):
     assert meta["results_raw"] == 1 and meta["findings_out_of_scope"] == 1 and meta["findings_security"] == 0
     config = json.loads(sandbox.files["/opt/sast/codeql-config.json"])
     assert config["paths-ignore"] == ["src/pydantic_ai_mini/_compat"]
+
+
+def test_codeql_runs_from_the_folder_setup_installed_into(tmp_path):
+    """When the image had no bundle, install.py downloads one (maybe into the
+    work folder) and the scan must use that CLI and suite, not /opt/sast/codeql."""
+    sandbox = FakeSandbox(sample_env(), SARIF_7F3A91.read_bytes(),
+                          install_result='{"codeql_version": "2.27.1", "install_dir": "/tmp/sast/codeql", '
+                                         '"downloaded": true}')
+    _, _, go = run_agent(tmp_path, sandbox)
+    asyncio.run(go())
+    create = next(c for c, _ in sandbox.commands if "database create" in c)
+    analyze = next(c for c, _ in sandbox.commands if "database analyze" in c)
+    assert "/tmp/sast/codeql/codeql database create" in create
+    assert "/tmp/sast/codeql/codeql database analyze" in analyze
+    assert f"/tmp/sast/codeql/{pins.SUITE_PATH}" in analyze
+    assert "/opt/sast/codeql/" not in create + analyze
 
 
 @pytest.mark.parametrize("memory, cpus, threads, ram", [(8192, 4, 4, 7680), (1024, 2, 2, 1024), (1400, 1, 1, 1024)])

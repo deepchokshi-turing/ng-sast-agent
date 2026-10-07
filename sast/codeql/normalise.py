@@ -1,8 +1,14 @@
 """CodeQL SARIF (``--format=sarif-latest``) -> findings.
 
-- CWEs: the rule's ``external/cwe/cwe-NNN`` tags, in the rule's order, written
-  as ``CWE-<n>``. The rule is looked up in the driver and in the query packs
-  (``tool.extensions``), where CodeQL lists the rules it ran.
+- CWEs: the rule's ``external/cwe/cwe-NNN`` tags, written as ``CWE-<n>``. The
+  rule is looked up in the driver and in the query packs (``tool.extensions``),
+  where CodeQL lists the rules it ran. CodeQL names no primary CWE and lists the
+  tags in numeric order, so the first tag means nothing. The tags are decided
+  as an unordered set with ``sast.cwe_map.decide_unordered`` (cwe-map-4):
+  unmapped CWEs are ignored, a set whose mapped CWEs are all in one family is
+  passed on with that family's CWEs first, and a set that spans two families is
+  dropped as ambiguous and counted (``results_by_cwe_decision``,
+  ``results_cwe_ambiguous``). The SonarQube agent uses the same rule.
 - Location: ``locations[0]``, made relative to /app/repo. CodeQL writes URIs
   relative to ``%SRCROOT%`` and gives that base in ``originalUriBaseIds``, so a
   result is placed by resolving the base first.
@@ -13,9 +19,8 @@
   ``security-severity``: 7.0 and above is high, 4.0 to 6.9 medium, lower low,
   missing medium.
 
-Every result is kept: the ``security-extended`` suite runs security queries
-only, and ``sast.sarif`` counts and drops the ones whose primary CWE is not in
-the shared table.
+Every other result is kept: the ``security-extended`` suite runs security
+queries only, and ``sast.sarif`` counts and drops the ones with no mapped CWE.
 """
 
 from __future__ import annotations
@@ -24,6 +29,7 @@ import re
 from typing import Any
 from urllib.parse import unquote
 
+from .. import cwe_map
 from ..findings import Finding, TraceStep
 
 REPO_DIR = "/app/repo"
@@ -32,6 +38,7 @@ _LEVELS = {"error": "error", "warning": "warning", "note": "note", "recommendati
 
 
 def cwes_of(rule: dict[str, Any]) -> tuple[str, ...]:
+    """The rule's CWE tags as "CWE-<n>", as CodeQL lists them (not a priority order)."""
     tags = ((rule or {}).get("properties") or {}).get("tags") or []
     seen: list[str] = []
     for tag in tags:
@@ -178,6 +185,8 @@ def normalise(document: dict[str, Any]) -> tuple[list[Finding], dict[str, Any]]:
     outside_repo = 0
     with_trace = 0
     trace_steps_dropped = 0
+    decisions = {"none": 0, "unmapped": 0, "mapped": 0, "ambiguous": 0}
+    ambiguous: list[list[Any]] = []
     for result in results:
         if not isinstance(result, dict):
             continue
@@ -189,13 +198,18 @@ def normalise(document: dict[str, Any]) -> tuple[list[Finding], dict[str, Any]]:
             outside_repo += 1
             continue
         file, start, end = place
+        decision, _family, cwes = cwe_map.decide_unordered(cwes_of(rule))
+        decisions[decision] += 1
+        if decision == "ambiguous":
+            ambiguous.append([rule_id, list(cwes), file, start])
+            continue
         trace, dropped = trace_of(result, bases)
         trace_steps_dropped += dropped
         with_trace += bool(trace)
         level = result.get("level") or ((rule.get("defaultConfiguration") or {}).get("level")) or "warning"
         findings.append(Finding(
             tool_rule_id=rule_id,
-            cwes=cwes_of(rule),
+            cwes=cwes,
             file=file,
             start_line=start,
             end_line=end,
@@ -213,6 +227,8 @@ def normalise(document: dict[str, Any]) -> tuple[list[Finding], dict[str, Any]]:
         "results_raw": len(results),
         "results_by_tool_rule": dict(sorted(by_rule.items())),
         "results_outside_repo": outside_repo,
+        "results_by_cwe_decision": decisions,
+        "results_cwe_ambiguous": ambiguous,
         "results_with_trace": with_trace,
         "trace_steps_outside_repo": trace_steps_dropped,
         "codeql_rules_run": len(by_id),

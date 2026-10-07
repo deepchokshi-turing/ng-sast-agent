@@ -19,7 +19,8 @@ listing shows them. So the token never goes through ``env`` or a command line.
 It is uploaded as a file in a mode 700 directory under the work dir, made mode
 600, read by fetch.py (``SONAR_TOKEN_FILE``) and put into sonar-scanner's own
 environment by the sandbox shell (``SONAR_TOKEN="$(cat <file>)" exec ...``).
-The file is deleted when the scan ends, also after a failure. The token is
+The file is deleted when the scan ends, also after a failure (writing it is
+inside the same try/finally). The token is
 never in a log, an artifact or the metadata, and the command output that is
 kept is scrubbed of it in case a tool echoes it.
 
@@ -36,6 +37,7 @@ import os
 import secrets
 import shlex
 import time
+import urllib.parse
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -44,8 +46,8 @@ from harbor.environments.base import BaseEnvironment, ExecResult
 from ..base import REPO_DIR, ScannerAgent
 from ..errors import ScannerError
 from ..findings import Finding
-from ..semgrep.agent import in_scope
-from ..task_config import TaskSettings, repo_relative
+from ..scope import in_scope, repo_path, task_scope
+from ..task_config import TaskSettings
 from . import pins
 from .normalise import normalise, sonar_types
 from .options import SonarQubeOptions
@@ -55,15 +57,28 @@ _HERE = Path(__file__).parent
 #: Always excluded, like the Semgrep agent: compiled bytecode is a build output.
 ALWAYS_EXCLUDE_GLOBS = ("**/__pycache__/**", "**/*.pyc", "**/*.pyo")
 
+#: One deadline (the scan budget) covers the server check, sonar-scanner, the
+#: background task, the measures, the paging and the rule lookups. sonar-scanner
+#: and fetch.py run under ``timeout -k KILL_AFTER_SEC <seconds>`` inside the
+#: sandbox, so they stop there even when Harbor only kills its exec client.
+
 #: Seconds of the budget kept back for collecting results after sonar-scanner.
 COLLECT_RESERVE_SEC = 120
-#: fetch.py must stop waiting this long before its exec is killed, so it can
-#: still page the results, delete the project and write its JSON.
-COLLECT_TAIL_SEC = 60
+#: fetch.py's own deadline ends this long before its ``timeout``, so it can
+#: still delete the project (fetch.DELETE_SLICE_SEC) and write its JSON.
+FETCH_DELETE_RESERVE_SEC = 30
 #: A step with less time than this left is not started.
 MIN_STEP_SEC = 30
 CHECK_TIMEOUT_SEC = 120
-DELETE_TIMEOUT_SEC = 60
+#: ``timeout -k``: seconds between SIGTERM and SIGKILL.
+KILL_AFTER_SEC = 10
+#: How much longer the exec call waits than the in-sandbox ``timeout``.
+EXEC_SLACK_SEC = 5
+#: Cleanup (deleting the project, removing the token file) always gets this
+#: much, also after the deadline. The budget leaves Harbor's 120 s margin for it.
+CLEANUP_SLICE_SEC = 30
+#: Lines of sonar-scanner output kept that say a file could not be parsed.
+MAX_PARSE_LINES = 100
 
 #: The token file, relative to the work dir, in a directory only its owner can enter.
 TOKEN_DIR = "secret"
@@ -121,6 +136,91 @@ def scanner_properties(
         "sonar.qualitygate.wait": "false",
     }
     return [f"-D{key}={value}" for key, value in properties.items()]
+
+
+def bounded(command: str, seconds: float) -> str:
+    """``command`` under coreutils ``timeout`` inside the sandbox."""
+    return f"timeout -k {KILL_AFTER_SEC} {max(1, int(seconds))} {command}"
+
+
+def exec_timeout(seconds: float) -> float:
+    """The exec call's own limit for a command bounded to ``seconds``."""
+    return max(1, int(seconds)) + KILL_AFTER_SEC + EXEC_SLACK_SEC
+
+
+def _measures(document: dict[str, Any]) -> dict[str, str] | None:
+    component = (document.get("measures") or {}).get("component")
+    if not isinstance(component, dict):
+        return None
+    return {str(m.get("metric")): str(m.get("value") or "") for m in component.get("measures") or []
+            if isinstance(m, dict)}
+
+
+def _int(value: Any) -> int:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def language_distribution(value: str | None) -> dict[str, int]:
+    """``ncloc_language_distribution`` ("py=120;xml=4") as {language: ncloc}."""
+    result: dict[str, int] = {}
+    for part in (value or "").split(";"):
+        if "=" in part:
+            language, count = part.split("=", 1)
+            result[language.strip()] = _int(count)
+    return result
+
+
+def python_profile(document: dict[str, Any]) -> dict[str, Any] | None:
+    """The project's Python quality profile, else the server's default one."""
+    for key in ("quality_profiles", "default_quality_profiles"):
+        profiles = [p for p in ((document.get(key) or {}).get("profiles") or [])
+                    if isinstance(p, dict) and p.get("language", "py") == "py"]
+        if profiles:
+            return profiles[0]
+    return None
+
+
+def analysis_check(document: dict[str, Any], python_files_in_scope: int) -> tuple[dict[str, Any], list[str]]:
+    """(what was analysed, problems). Any problem means the scan cannot be trusted.
+
+    A scan that indexed no file, analysed no Python although the scope holds
+    Python files, or ran a Python profile with no active rule finds nothing
+    because it looked at nothing, which must not be graded as a clean scan.
+    """
+    measures = _measures(document)
+    profile = python_profile(document)
+    by_language = language_distribution((measures or {}).get("ncloc_language_distribution"))
+    summary = {
+        "files": _int((measures or {}).get("files")) if measures is not None else None,
+        "ncloc": _int((measures or {}).get("ncloc")) if measures is not None else None,
+        "ncloc_by_language": by_language,
+        "python_files_in_scope": python_files_in_scope,
+        "python_profile": {k: (profile or {}).get(k) for k in ("name", "key", "isDefault")} if profile else None,
+        "active_python_rules": _int(profile.get("activeRuleCount")) if profile else None,
+    }
+    problems = []
+    if measures is None:
+        problems.append("the analysis measures (api/measures/component) were not read")
+    elif summary["files"] == 0:
+        problems.append("SonarQube analysed 0 files (wrong scan roots or exclusions?)")
+    elif python_files_in_scope > 0 and by_language.get("py", 0) == 0:
+        problems.append(f"the scope holds {python_files_in_scope} Python files but SonarQube analysed no Python "
+                        f"(ncloc_language_distribution {measures.get('ncloc_language_distribution')!r})")
+    if profile is None:
+        problems.append("no Python quality profile was found for the project")
+    elif summary["active_python_rules"] == 0:
+        problems.append(f"the Python quality profile {profile.get('name')!r} has no active rules")
+    return summary, problems
+
+
+def parse_failures(output: str) -> list[str]:
+    """sonar-scanner lines that say a file could not be parsed."""
+    lines = [line.strip() for line in output.splitlines()
+             if "Unable to parse" in line or "Parse error" in line or "parsing error" in line.lower()]
+    return lines[:MAX_PARSE_LINES]
 
 
 def _scrub(text: str | None, token: str) -> str:
@@ -184,6 +284,10 @@ class SonarQubeAgent(ScannerAgent):
                 f"{' and '.join(missing)} not set on the host: the SonarQube agent needs the server URL as the "
                 "sandbox sees it (e.g. http://host.docker.internal:9000) and a user token (see README.md)"
             )
+        if "@" in urllib.parse.urlsplit(host).netloc:
+            # Not echoed: it holds a credential, and the URL goes into the exec env and the metadata.
+            raise ScannerError("SONAR_HOST_URL must not contain a user name or password (user:pass@host): "
+                               "the agent authenticates with SONAR_TOKEN only")
         if not host.startswith(("http://", "https://")):
             raise ScannerError(f"SONAR_HOST_URL must start with http:// or https://, got {host!r}")
         return host, token
@@ -219,8 +323,9 @@ class SonarQubeAgent(ScannerAgent):
         sonar: dict[str, Any] = {"host_url": host, "keep_project": bool(options.keep_project)}
         meta["sonarqube"] = sonar
 
-        await self._write_token(environment, token_dir, token_file, token, sonar)
         try:
+            # Inside the try: a failed upload or protect step must still remove the file.
+            await self._write_token(environment, token_dir, token_file, token, sonar)
             return await self._scan_with_token(environment, settings, budget_sec, meta, sonar, token, env,
                                                fetch=fetch, work=work, sonar_dir=sonar_dir, json_out=json_out,
                                                token_file=token_file, scanner_home=scanner_home,
@@ -257,9 +362,9 @@ class SonarQubeAgent(ScannerAgent):
 
         # 1. The server is up and takes the token.
         need(MIN_STEP_SEC, "checking the SonarQube server")
-        command = f"{fetch} check"
-        result = await self._run_logged(environment, "command-1", command, token, env=env,
-                                        timeout_sec=min(CHECK_TIMEOUT_SEC, left()),
+        seconds = min(CHECK_TIMEOUT_SEC, left() - KILL_AFTER_SEC - EXEC_SLACK_SEC)
+        result = await self._run_logged(environment, "command-1", bounded(f"{fetch} check", seconds), token,
+                                        env=env, timeout_sec=exec_timeout(seconds),
                                         what="the SonarQube server check")
         check = _result_line(result.stdout or "", "CHECK_RESULT")
         if result.return_code != 0 or check is None:
@@ -272,58 +377,80 @@ class SonarQubeAgent(ScannerAgent):
             "default_python_profile": check.get("default_python_profile"),
         })
 
-        # 2. sonar-scanner, with a throwaway project.
-        roots = [repo_relative(p, "scan_roots") for p in (options.scan_roots or settings.scanner_roots)] or ["."]
-        excludes = [repo_relative(p, "exclude") for p in (options.exclude or settings.excluded_paths)]
+        # 2. The scope, and how many Python files it holds.
+        roots, excludes = task_scope(options.scan_roots or settings.scanner_roots,
+                                     options.exclude or settings.excluded_paths, "scan_roots", "exclude")
+        need(MIN_STEP_SEC, "checking the scan roots")
         roots = await self._existing_roots(environment, roots, meta)
+        meta["scan"] = {"roots": roots, "excludes": excludes, "exclusions": exclusion_globs(excludes)}
+        python_files = await self._python_files_in_scope(environment, roots, excludes, min(60.0, left()))
+        sonar["python_files_in_scope"] = python_files
+
+        # 3. sonar-scanner, with a throwaway project. From here on the project
+        # may exist, so every exit path deletes it.
         project_key = f"sast-{secrets.token_hex(6)}"
         sonar["project_key"] = project_key
         sonar["deleted"] = False
         arguments = scanner_properties(project_key=project_key, roots=roots, excludes=excludes, sonar_dir=sonar_dir)
-        meta["scan"] = {"roots": roots, "excludes": excludes, "exclusions": exclusion_globs(excludes)}
-
         need(COLLECT_RESERVE_SEC + MIN_STEP_SEC, "running sonar-scanner")
-        command = (
-            f"rm -rf {shlex.quote(sonar_dir)} {shlex.quote(json_out)} && mkdir -p {shlex.quote(sonar_dir)} && "
-            # The sandbox shell reads the token into the scanner's environment only.
-            + f'SONAR_TOKEN="$(cat {shlex.quote(token_file)})" exec '
-            + " ".join(shlex.quote(part) for part in [f"{scanner_home}/bin/sonar-scanner", *arguments])
-        )
-        cleanup = (fetch, project_key, sonar)
-        result = await self._run_logged(environment, "command-2", command, token, env=env, cwd=REPO_DIR,
-                                        timeout_sec=left() - COLLECT_RESERVE_SEC, what="sonar-scanner",
-                                        cleanup=cleanup)
-        await self._keep_scanner_log(environment, result, f"{work}/out/sonar-scanner.log")
-        sonar["scanner_exit_code"] = result.return_code
-        if result.return_code != 0:
-            await self._delete_project(environment, fetch, project_key, env, sonar)
-            raise ScannerError("sonar-scanner exited {}: {} (full log: agent/command-2/stdout.txt)".format(
-                result.return_code, _last_error(f"{result.stdout}\n{result.stderr}", "no ERROR line in its output")))
+        scanner_started = False
+        try:
+            seconds = left() - COLLECT_RESERVE_SEC
+            command = (
+                f"rm -rf {shlex.quote(sonar_dir)} {shlex.quote(json_out)} && mkdir -p {shlex.quote(sonar_dir)} && "
+                # The sandbox shell reads the token into the scanner's environment only.
+                + f'SONAR_TOKEN="$(cat {shlex.quote(token_file)})" exec '
+                + bounded(" ".join(shlex.quote(part) for part in [f"{scanner_home}/bin/sonar-scanner", *arguments]),
+                          seconds)
+            )
+            scanner_started = True
+            result = await self._run_logged(environment, "command-2", command, token, env=env, cwd=REPO_DIR,
+                                            timeout_sec=exec_timeout(seconds), what="sonar-scanner")
+            await self._keep_scanner_log(environment, result, f"{work}/out/sonar-scanner.log")
+            sonar["scanner_exit_code"] = result.return_code
+            sonar["files_not_parsed"] = parse_failures(f"{result.stdout}\n{result.stderr}")
+            if result.return_code != 0:
+                raise ScannerError("sonar-scanner exited {}: {} (full log: agent/command-2/stdout.txt)".format(
+                    result.return_code,
+                    _last_error(f"{result.stdout}\n{result.stderr}", "no ERROR line in its output")))
 
-        # 3. Wait for the server to process the report, read everything, delete the project.
-        need(COLLECT_TAIL_SEC + MIN_STEP_SEC, "collecting the results")
-        command = (
-            f"{fetch} collect --report {shlex.quote(sonar_dir + '/report-task.txt')} "
-            f"--project {project_key} --out {shlex.quote(json_out)} --deadline {int(left() - COLLECT_TAIL_SEC)}"
-            + (" --keep" if options.keep_project else "")
-        )
-        result = await self._run_logged(environment, "command-3", command, token, env=env,
-                                        timeout_sec=left(), what="collecting the SonarQube results",
-                                        cleanup=cleanup)
-        document = await self._read_document(environment, json_out)
-        if document is not None:
-            sonar["deleted"] = bool(document.get("deleted"))
-            sonar["delete_error"] = document.get("delete_error")
-            task = document.get("ce_task") or {}
-            sonar["ce_task"] = {k: task.get(k) for k in ("id", "status", "executionTimeMs", "errorMessage")}
-            profiles = (document.get("quality_profiles") or {}).get("profiles") or []
-            sonar["quality_profile"] = [{k: p.get(k) for k in ("name", "key", "language", "isDefault")}
-                                        for p in profiles]
-        if result.return_code != 0:
-            raise ScannerError("collecting the SonarQube results failed (exit {}): {}".format(
-                result.return_code, _last_error(result.stdout or result.stderr or "", "no output")))
-        if document is None:
-            raise ScannerError(f"{json_out} is missing or unreadable after a successful collect")
+            # 4. Wait for the server, read what it analysed and found, delete the project.
+            need(FETCH_DELETE_RESERVE_SEC + MIN_STEP_SEC + KILL_AFTER_SEC + EXEC_SLACK_SEC, "collecting the results")
+            seconds = left() - KILL_AFTER_SEC - EXEC_SLACK_SEC
+            command = (
+                f"{fetch} collect --report {shlex.quote(sonar_dir + '/report-task.txt')} "
+                f"--project {project_key} --out {shlex.quote(json_out)} "
+                f"--deadline {int(seconds - FETCH_DELETE_RESERVE_SEC)}"
+                + (" --keep" if options.keep_project else "")
+            )
+            result = await self._run_logged(environment, "command-3", bounded(command, seconds), token, env=env,
+                                            timeout_sec=exec_timeout(seconds),
+                                            what="collecting the SonarQube results")
+            document = await self._read_document(environment, json_out)
+            if document is not None:
+                sonar["deleted"] = bool(document.get("deleted"))
+                sonar["delete_error"] = document.get("delete_error")
+                task = document.get("ce_task") or {}
+                sonar["ce_task"] = {k: task.get(k) for k in ("id", "status", "executionTimeMs", "errorMessage",
+                                                             "warningCount", "warnings")}
+                profiles = (document.get("quality_profiles") or {}).get("profiles") or []
+                sonar["quality_profile"] = [{k: p.get(k) for k in ("name", "key", "language", "isDefault",
+                                                                   "activeRuleCount")} for p in profiles]
+            if result.return_code != 0:
+                raise ScannerError("collecting the SonarQube results failed (exit {}): {}".format(
+                    result.return_code, _last_error(result.stdout or result.stderr or "", "no output")))
+            if document is None:
+                raise ScannerError(f"{json_out} is missing or unreadable after a successful collect")
+
+            # 5. A scan that looked at nothing is an error, not a clean result.
+            summary, problems = analysis_check(document, python_files)
+            sonar["analysis"] = summary
+            if problems:
+                raise ScannerError("SonarQube did not analyse the code: " + "; ".join(problems))
+        except BaseException:
+            if scanner_started and not sonar.get("deleted"):
+                await self._delete_project(environment, fetch, project_key, env, sonar)
+            raise
 
         try:
             findings, counts = normalise(document)
@@ -354,27 +481,29 @@ class SonarQubeAgent(ScannerAgent):
         timeout_sec: float,
         what: str,
         cwd: str | None = None,
-        cleanup: tuple[str, str, dict[str, Any]] | None = None,
     ) -> ExecResult:
-        """One exec, logged with the token scrubbed. The token is in neither the command nor the env.
-
-        ``cleanup`` is (fetch command, project key, the metadata's sonarqube
-        dict): when the exec fails or times out, the project is deleted and the
-        outcome recorded in that dict.
-        """
+        """One exec, logged with the token scrubbed. The token is in neither the command nor the env."""
         if token in command or any(token in value for value in env.values()):  # a programming error
             raise ScannerError("refusing to run a command whose command line or env contains SONAR_TOKEN")
         started = time.monotonic()
         try:
             result = await self._exec(environment, command, timeout_sec=timeout_sec, what=what, cwd=cwd, env=env)
         except ScannerError as exc:
-            if cleanup is not None:
-                await self._delete_project(environment, cleanup[0], cleanup[1], env, cleanup[2])
             raise ScannerError(_scrub(str(exc), token)) from None
         clean = ExecResult(stdout=_scrub(result.stdout, token), stderr=_scrub(result.stderr, token),
                            return_code=result.return_code)
         self._write_log(log_name, command, clean, round(time.monotonic() - started, 1))
         return clean
+
+    async def _python_files_in_scope(
+        self, environment: BaseEnvironment, roots: list[str], excludes: list[str], timeout_sec: float
+    ) -> int:
+        """How many .py files the scope holds, so a scan that analysed no Python can be told apart."""
+        paths = " ".join(shlex.quote(r) for r in roots)
+        result = await self._exec(environment, f"find {paths} -type f -name '*.py' 2>/dev/null",
+                                  timeout_sec=max(1.0, timeout_sec), what="counting Python files", cwd=REPO_DIR)
+        files = {repo_path(line.strip()) for line in (result.stdout or "").splitlines() if line.strip()}
+        return sum(1 for f in files if in_scope(f, roots, excludes))
 
     async def _write_token(
         self, environment: BaseEnvironment, token_dir: str, token_file: str, token: str, sonar: dict[str, Any]
@@ -383,13 +512,17 @@ class SonarQubeAgent(ScannerAgent):
 
         The upload may arrive owned by another user (``docker cp`` writes as
         root), so the sandbox user copies it into a file of its own, created
-        under umask 077, and removes the upload.
+        under umask 077, and removes the upload. The caller removes the whole
+        directory in a ``finally``, so a failure in any step here leaves nothing.
         """
         quoted_dir, quoted_file = shlex.quote(token_dir), shlex.quote(token_file)
         upload = f"{token_dir}/{TOKEN_FILE}.upload"
         quoted_upload = shlex.quote(upload)
-        await self._exec(environment, f"rm -rf {quoted_dir} && mkdir -p {quoted_dir} && chmod 700 {quoted_dir}",
-                         timeout_sec=60, what="preparing the token directory")
+        result = await self._exec(environment,
+                                  f"rm -rf {quoted_dir} && mkdir -p {quoted_dir} && chmod 700 {quoted_dir}",
+                                  timeout_sec=60, what="preparing the token directory")
+        if result.return_code != 0:
+            raise ScannerError(f"could not prepare the token directory {token_dir} (exit {result.return_code})")
         await self._upload_bytes(environment, token.encode("utf-8"), upload)
         result = await self._exec(
             environment,
@@ -397,14 +530,13 @@ class SonarQubeAgent(ScannerAgent):
             f"chmod 600 {quoted_file} && test -s {quoted_file}",
             timeout_sec=60, what="protecting the token file")
         if result.return_code != 0:
-            await self._remove_token(environment, token_dir, sonar)
             raise ScannerError(f"could not protect the token file {token_file} (exit {result.return_code})")
         sonar["token_file"] = token_file
 
     async def _remove_token(self, environment: BaseEnvironment, token_dir: str, sonar: dict[str, Any]) -> None:
         """Delete the token file and its directory. Best effort, recorded in the metadata."""
         try:
-            result = await self._exec(environment, f"rm -rf {shlex.quote(token_dir)}", timeout_sec=60,
+            result = await self._exec(environment, f"rm -rf {shlex.quote(token_dir)}", timeout_sec=CLEANUP_SLICE_SEC,
                                       what="removing the token file")
             sonar["token_file_removed"] = result.return_code == 0
         except ScannerError:
@@ -428,29 +560,15 @@ class SonarQubeAgent(ScannerAgent):
     async def _delete_project(
         self, environment: BaseEnvironment, fetch: str, project_key: str, env: dict[str, str], sonar: dict[str, Any]
     ) -> None:
-        """Best-effort cleanup after a failure. The run fails anyway."""
+        """Best-effort cleanup after a failure, in a fixed time slice even past the deadline. The run fails anyway."""
         if getattr(self.options, "keep_project", False):
             return
         try:
-            result = await self._exec(environment, f"{fetch} delete --project {project_key}",
-                                      timeout_sec=DELETE_TIMEOUT_SEC, what="deleting the SonarQube project", env=env)
+            result = await self._exec(environment, bounded(f"{fetch} delete --project {project_key}",
+                                                           CLEANUP_SLICE_SEC),
+                                      timeout_sec=exec_timeout(CLEANUP_SLICE_SEC),
+                                      what="deleting the SonarQube project", env=env)
             outcome = _result_line(result.stdout or "", "DELETE_RESULT") or {}
             sonar["deleted"] = bool(outcome.get("deleted"))
         except ScannerError:
             sonar["deleted"] = False
-
-    async def _existing_roots(self, environment: BaseEnvironment, roots: list[str], meta: dict[str, Any]) -> list[str]:
-        """sonar-scanner stops on a sonar.sources entry that does not exist: drop and record those."""
-        if roots == ["."]:
-            return roots
-        checks = "; ".join(
-            f"if [ -e {shlex.quote(p)} ]; then echo OK {shlex.quote(p)}; else echo MISSING {shlex.quote(p)}; fi"
-            for p in roots
-        )
-        result = await self._exec(environment, checks, timeout_sec=60, what="checking scan roots", cwd=REPO_DIR)
-        present = [line[3:] for line in (result.stdout or "").splitlines() if line.startswith("OK ")]
-        missing = [p for p in roots if p not in present]
-        meta["scan_roots_missing"] = missing
-        if not present:
-            raise ScannerError(f"none of the scan roots exist in {REPO_DIR}: {', '.join(roots)}")
-        return [p for p in roots if p in present]

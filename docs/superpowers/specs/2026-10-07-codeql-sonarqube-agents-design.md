@@ -30,8 +30,11 @@ Assumptions: Python only for now (all 28 tasks are Python). CodeQL stays at
 
 These hold for all three agents and are tested for each.
 
-1. ruleId comes only from the shared CWE table `cwe-map-3`, by the rule's
-   primary CWE. No tool-specific mapping and no tuning after results.
+1. ruleId comes only from the shared CWE table, now `cwe-map-4`. Semgrep maps
+   by the rule's primary CWE. CodeQL and SonarQube name no primary CWE, so
+   their CWEs are decided as an unordered set with
+   `cwe_map.decide_unordered` (revised 2026-10-08, see section 4). No
+   tool-specific mapping and no tuning after results.
 2. `controlStatus`, `residualRisk` and `recommendations` stay under
    `properties.heuristics` and are never scored.
 3. `codeFlows` are written only from a real trace the tool produced. No
@@ -52,13 +55,14 @@ sast/
                      and excludes, in_scope (added 2026-10-08, from PR #2)
   findings.py        Finding gains an optional trace (see 3.1)
   sarif.py           writes codeFlows only when a Finding has a trace
-  cwe_map.py         shared, unchanged
+  cwe_map.py         shared, cwe-map-4 adds decide_unordered (2026-10-08)
   heuristics.py      shared, unchanged
   semgrep/           unchanged apart from the image build and using scope.py
                      (it still re-exports in_scope for older imports)
   codeql/
     pins.py          CodeQL bundle version, URL and sha256 per arch, suite
-    install.py       checks /opt/sast/codeql against the pins
+    install.py       uses /opt/sast/codeql when it matches the pins, else
+                     downloads the pinned bundle (revised 2026-10-08)
     normalise.py     CodeQL SARIF -> Finding
     agent.py         CodeQLAgent
   sonarqube/
@@ -85,9 +89,18 @@ of them is a `root_cause` or a `context_assembly` step.
 ## 4. CodeQL agent
 
 Install: the bundle is in the image at `/opt/sast/codeql`. `install.py`
-checks `codeql version` and the bundle's `python-queries` pack version against
-the pins. If it is missing it fails with a clear message, because the bundle
-download does not fit in the 300 s setup limit.
+checks `codeql version`, the bundle's `python-queries` pack version and the
+suite file against the pins. The first version failed when the bundle was
+missing, on the view that the download does not fit in the 300 s setup limit.
+A teammate's review and PR #2 showed that it does (about 100 s), and that
+without a registry image every Daytona trial would fail at setup. So since
+2026-10-08 a missing or different bundle is downloaded for the CPU, its sha256
+is checked, the archive entries are checked against escapes (including chained
+symlinks), it is unpacked into a staging folder, checked there and moved into
+`/opt/sast/codeql`, or into the work folder when that is not writable. The
+installer stops itself at 270 s and the download has a hard deadline 90 s
+before that, so a slow link fails with a clear message instead of being cut off
+by Harbor.
 
 Scan, inside the sandbox:
 
@@ -113,7 +126,13 @@ Scan, inside the sandbox:
    The README gives the evidence.
 
 Normalise: for each result, the CWEs are the rule's `external/cwe/cwe-NNN`
-tags in order. The location is `locations[0]`, made relative to `/app/repo`.
+tags. CodeQL defines no primary CWE and lists the tags in numeric order, so
+taking the first tag (the first version) silently dropped
+`py/clear-text-logging-sensitive-data` (312, 359, 532) through the unmapped
+CWE-312 (audit 0.4.0, M1). The tags now go through
+`cwe_map.decide_unordered`: unmapped CWEs are ignored, one family is reported,
+two families are dropped as ambiguous and counted
+(`results_by_cwe_decision`, `results_cwe_ambiguous`). The location is `locations[0]`, made relative to `/app/repo`.
 When the result has `codeFlows`, the first thread flow becomes the trace.
 `residualRisk` (heuristic only) comes from the rule's `security-severity`
 property: 7.0 and above is high, 4.0 to 6.9 medium, lower is low. Results
@@ -137,14 +156,18 @@ Configuration, read on the host from environment variables at the start of
 - `SONAR_TOKEN`, required. A user token with permission to create and delete
   projects and to browse issues and hotspots.
 
-A missing variable is a `ScannerError` before anything runs. Harbor puts exec
+A missing variable, or a `SONAR_HOST_URL` with a user name or password in it,
+is a `ScannerError` before anything runs. Harbor puts exec
 environment variables on the command line (`docker compose exec -e`, and
 `env NAME=value` on Daytona), so the token never goes through exec env. The
 agent uploads it to a mode 600 file in a mode 700 folder under the work
 directory. `fetch.py` reads it from that file, and the scanner runs as
 `SONAR_TOKEN="$(cat <file>)" exec sonar-scanner ...`, so the token is in the
-scanner's environment but in no command line Harbor builds. The file is
-removed in a `finally` block. Tests check that the token appears in no exec
+scanner's environment but in no command line Harbor builds. Writing the file
+is inside the same `try` whose `finally` removes it, and the return code of
+every step that writes it is checked, so a failed upload or protect step
+leaves nothing behind (revised 2026-10-08 after a teammate reproduced the
+leak). Tests check that the token appears in no exec
 command, exec env, log, metadata, artifact or file left in the sandbox.
 (Revised 2026-10-08 after review. The first version passed the token through
 exec env.)
@@ -164,23 +187,47 @@ Scan, inside the sandbox:
    id from the scanner's report file and polls `api/ce/task` until it is
    `SUCCESS`. `FAILED`, `CANCELED` or running out of budget is a
    `ScannerError`.
-4. It pages through `api/issues/search` with `types=VULNERABILITY` and
-   `api/hotspots/search`. Per rule it calls `api/rules/show` (name, type) and
-   `api/rules/search?rule_key=<key>&facets=cwe`, because SonarQube 26.9's
-   rules/show does not return security standards. The cwe facet is the only
-   place the rule's CWEs appear, as an unordered set. A 404 or empty answer
-   for one rule is recorded and does not stop the run. Raw responses go to
-   `sonarqube.json`.
-5. It deletes the project (`api/projects/delete`). If deleting fails, the run
+4. It reads `api/measures/component` (`files`, `ncloc`,
+   `ncloc_language_distribution`), then pages through `api/issues/search`
+   with `types=VULNERABILITY` and `api/hotspots/search`, and the items read
+   must equal each search's `paging.total`. Per rule it calls
+   `api/rules/show` (name, type) and `api/rules/search?rule_key=<key>&facets=cwe`,
+   because SonarQube 26.9's rules/show does not return security standards.
+   The cwe facet is the only place the rule's CWEs appear, as an unordered
+   set. The description's resources section is a hand-written reference list
+   (S5332 lists 200 and 319, but S4423 lists only 327 while its facet holds
+   295, 326 and 327), so it is not a primary CWE and is not used. Every rule
+   lookup error is fatal, and the search must answer `paging.total == 1` with
+   `rules[0].key` equal to the rule. Raw responses go to `sonarqube.json`.
+5. It reads the project's Python quality profile, or the default one, and
+   deletes the project (`api/projects/delete`). If deleting fails, the run
    still succeeds and the metadata says the project was left behind.
+6. The agent raises `ScannerError` when the analysis looked at nothing: 0
+   files, no Python in the language distribution although the scope holds
+   `.py` files (counted in the sandbox before the scan), or a Python profile
+   with `activeRuleCount` 0. The background task's warnings and the scanner's
+   "Unable to parse file" lines are kept in the metadata.
 
-Normalise: SonarQube gives a rule's CWEs as an unordered set with no primary
-CWE, while cwe-map-3 maps by the primary CWE. So each CWE is mapped on its own
-as if it were the primary. A result is reported only when every CWE lands in
-the same family (or all are unmapped, which reports nothing). Mixed sets are
-dropped as ambiguous and counted. This gives the cwe-map-3 answer for any
-choice of primary, and was fixed before looking at task labels. Example:
-python:S5332 (CWE-200, CWE-319) is ambiguous and dropped. No trace is ever
+Time: one deadline, the scan budget, covers the check, the scan, the
+background task, the measures, the paging and the rule lookups. sonar-scanner
+and fetch.py run under `timeout -k 10 <seconds>` inside the sandbox, so a
+Harbor timeout that only kills the local `docker compose exec` client cannot
+leave the scanner running with the token. Once the scanner has started, the
+project is deleted on every exit path, including a timeout and a budget that
+runs out between steps, and that cleanup gets a short fixed slice even when
+the deadline has passed.
+
+Normalise: only `fetch_format` 2 output is read (format 1 has no CWE and
+would report nothing silently). SonarQube gives a rule's CWEs as an unordered
+set with no primary CWE, so the decision is `cwe_map.decide_unordered`
+(cwe-map-4, shared with CodeQL): unmapped CWEs are ignored, mapped CWEs in one
+family give that family, mapped CWEs in several families make the result
+ambiguous (dropped and counted), and no mapped CWE means unmapped. Example:
+python:S5332 (CWE-200, CWE-319) is LLM02.SID.HIGH. Honest note: the earlier
+rule (drop when any CWE is unmapped) was chosen after S5332's CWEs were known,
+and it dropped S5332. Under cwe-map-4 S5332 is a false positive in the shared
+code of the dc4b7a twins, which lowers precision. The rule is kept because it
+is the principled one, not because of that outcome. No trace is ever
 emitted from SonarQube: the Community Build has no taint engine, the recorded
 issues carry no flows, and the flow order was never verified. Raw flow counts
 are kept in the metadata. Each result records `sonarType`
@@ -203,11 +250,19 @@ pinned sha256:
 
 - CodeQL bundle 2.27.1 into `/opt/sast/codeql`, the linux64 asset on amd64
   and the linux-arm64 asset on arm64 (arm64 added 2026-10-08, sha256 from the
-  GitHub release, as PR #2 pins it). There is no download at setup.
-- sonar-scanner CLI with its bundled JRE for linux-x64 into
+  GitHub release, as PR #2 pins it). Setup downloads the same pinned bundle
+  only when the image does not have it (revised 2026-10-08, see section 4).
+- sonar-scanner CLI with its bundled JRE (linux-x64 on amd64, linux-aarch64
+  on arm64) into
   `/opt/sast/sonar-scanner`. The exact version and hash are taken from
   binaries.sonarsource.com during implementation and written into
   `sast/sonarqube/pins.py`.
+
+The Semgrep step runs the installer without a pipe, so a failed install fails
+the build (audit 0.4.0, L1). The build stages use `python:3.11-slim` by tag,
+because no digest for it is recorded here, and the Dockerfile says how to pin
+one. `fetch_archive.py` checks tar entries for chained symlink escapes before
+unpacking (audit 0.4.0, L2).
 
 `sast.__version__` and `pyproject.toml` move to 0.4.0, and
 `build_tools_image.sh` tags `sast-tools:0.4.0`. All 28 task Dockerfiles

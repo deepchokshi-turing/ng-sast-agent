@@ -161,6 +161,81 @@ def test_job_directory_mode_still_works(tmp_path):
     assert [r["fp_out"] for r in rows] == [1, 1, 1, 1]
 
 
+def _write_rewards(tmp_path, trials, metadata=None):
+    files = []
+    for name, r in trials.items():
+        f = tmp_path / name / "verifier" / "reward.json"
+        f.parent.mkdir(parents=True)
+        f.write_text(json.dumps(r))
+        if metadata is not None:
+            (tmp_path / name / "metadata.json").write_text(json.dumps(metadata[name]))
+        files.append(str(f))
+    return files
+
+
+def _empty(gt, **extra):
+    """What an empty SARIF scores: nothing matched, nothing flagged."""
+    r = reward(gt, 0.0, {EA: (int(gt > 0), 0)}, {"EA"} if gt else set(), set(),
+               reward=0.0 if gt else 1.0, fp_outside_scope=0, fn=gt)
+    r.update(extra)
+    return r
+
+
+def test_a_tool_that_reported_nothing_is_flagged_first(tmp_path):
+    files = _write_rewards(tmp_path, {"pos": _empty(2), "neg": _empty(0)})
+    out = tmp_path / "report"
+    proc = subprocess.run([sys.executable, str(REPORT), *files, "--write", str(out)], check=True,
+                          capture_output=True, text=True)
+    first = proc.stdout.splitlines()[0]
+    assert first.startswith("WARNING: no results emitted, scores equal an empty SARIF")
+    summary = json.loads((out / "report.json").read_text())["summary"]
+    assert summary["no_results_emitted"] == ["all trials"]
+    det = summary["pooled_detection"]
+    assert det["precision"] is None and det["F1"] is None and det["recall"] == 0.0
+    assert "precision n/a" in proc.stdout and "F1 n/a" in proc.stdout
+    assert "precision 0.000" not in proc.stdout
+    assert "no results emitted" in (out / "report.md").read_text()
+
+
+def test_the_flag_uses_the_agent_metadata_and_names_the_tool(tmp_path):
+    trials = {"pos": _empty(1), "neg": _empty(0)}
+    meta = {"pos": {"tool": "codeql", "results_emitted": 0}, "neg": {"tool": "codeql", "results_emitted": 0}}
+    proc = subprocess.run([sys.executable, str(REPORT), *_write_rewards(tmp_path, trials, meta)], check=True,
+                          capture_output=True, text=True)
+    assert proc.stdout.startswith("WARNING: no results emitted, scores equal an empty SARIF: codeql reported")
+
+
+def test_no_flag_when_any_result_was_emitted(tmp_path):
+    # Graded like an empty SARIF, but the metadata says a result was written
+    # (outside every file the grader looks at): the tool did report something.
+    trials = {"pos": _empty(1), "neg": _empty(0)}
+    meta = {"pos": {"tool": "semgrep", "results_emitted": 0}, "neg": {"tool": "semgrep", "results_emitted": 3}}
+    out = tmp_path / "report"
+    proc = subprocess.run([sys.executable, str(REPORT), *_write_rewards(tmp_path, trials, meta),
+                           "--write", str(out)], check=True, capture_output=True, text=True)
+    assert "no results emitted" not in proc.stdout
+    summary = json.loads((out / "report.json").read_text())["summary"]
+    assert summary["results_emitted_by_tool"]["semgrep"] == {"graded": 2, "known": 2, "emitted": 3,
+                                                             "no_results": False}
+
+
+def test_no_flag_for_the_hand_computed_example(report):
+    data, stdout, _ = report
+    assert data["summary"]["no_results_emitted"] == [] and "no results emitted" not in stdout
+
+
+def test_job_mode_flags_an_empty_job(tmp_path):
+    job = tmp_path / "jobs" / "2026-10-08__run"
+    for name, r in {"pos": _empty(1), "neg": _empty(0)}.items():
+        (job / name).mkdir(parents=True)
+        (job / name / "result.json").write_text(json.dumps({
+            "trial_name": name, "task_name": name, "verifier_result": {"rewards": r},
+            "agent_result": {"metadata": {"status": "ok", "tool": "sonarqube", "results_emitted": 0}}}))
+    proc = subprocess.run([sys.executable, str(REPORT), str(tmp_path / "jobs")], check=True,
+                          capture_output=True, text=True)
+    assert proc.stdout.startswith("WARNING: no results emitted, scores equal an empty SARIF: sonarqube")
+
+
 # ---- leak scan -------------------------------------------------------------------------
 
 def make_twin(root: Path, tool_neg: str = "def write(p):\n    return safe(p)\n") -> None:

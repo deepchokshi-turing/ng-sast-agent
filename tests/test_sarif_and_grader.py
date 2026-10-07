@@ -233,7 +233,7 @@ def test_recommendation_ids_are_the_instructions_catalogue():
 
 def test_driver_reports_the_versions():
     doc, _ = sarif.build([f()], tool_name="semgrep", tool_version="x")
-    assert doc["runs"][0]["tool"]["driver"]["properties"] == {"cweMap": "cwe-map-3", "heuristics": "heuristics-1"}
+    assert doc["runs"][0]["tool"]["driver"]["properties"] == {"cweMap": "cwe-map-4", "heuristics": "heuristics-1"}
     assert {r["id"] for r in doc["runs"][0]["tool"]["driver"]["rules"]} == {"LLM03.EA.FUNCTIONALITY"}
 
 

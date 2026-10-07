@@ -1,7 +1,8 @@
 """``sast.codeql.agent:CodeQLAgent``: CodeQL as a Harbor agent, no LLM.
 
-Uses the CodeQL 2.27.1 bundle baked into the tools image at /opt/sast/codeql,
-builds a Python database of /app/repo without a build (``--build-mode=none``),
+Uses the CodeQL 2.27.1 bundle baked into the tools image at /opt/sast/codeql
+(or, when the image has none, the pinned bundle that setup downloads and checks,
+see ``install.py``), builds a Python database of /app/repo without a build (``--build-mode=none``),
 runs the bundle's ``python-security-extended`` suite, maps each result to a task
 ruleId by its CWE (``sast.cwe_map``) and writes /app/output/findings.sarif for
 the task's verifier. CodeQL path queries report a real dataflow path, and that
@@ -285,6 +286,10 @@ class CodeQLAgent(ScannerAgent):
         work = getattr(self, "_work_dir", None)
         if work is None:
             raise ScannerError("setup() did not run: CodeQL was not checked")
+        # The baked bundle, or the one install.py downloaded when there was none.
+        install_dir = str((getattr(self, "_install", None) or {}).get("install_dir") or pins.INSTALL_DIR)
+        codeql = f"{install_dir}/codeql"
+        suite = f"{install_dir}/{pins.SUITE_PATH}"
 
         roots, excludes = task_scope(settings.scanner_roots, settings.excluded_paths)
         roots, files = await self._classify_roots(environment, roots, meta)
@@ -311,14 +316,15 @@ class CodeQLAgent(ScannerAgent):
             "threads": threads,
             "ram_mb": ram,
             "suite": pins.SUITE_PATH,
+            "codeql": codeql,
         }
         env = {"HOME": f"{work}/home"}
 
         deadline = time.monotonic() + budget_sec
         try:
-            create = f"rm -f {shlex.quote(sarif_file)} && " + _shell(create_command(db, config_file, threads, ram))
+            create = f"rm -f {shlex.quote(sarif_file)} && " + _shell(create_command(db, config_file, threads, ram, codeql=codeql))
             await self._run_step(environment, "command-1", create, "CodeQL database create", deadline, env, meta)
-            analyze = _shell(analyze_command(db, sarif_file, threads, ram))
+            analyze = _shell(analyze_command(db, sarif_file, threads, ram, suite=suite, codeql=codeql))
             await self._run_step(environment, "command-2", analyze, "CodeQL database analyze", deadline, env, meta)
             return await self._read_results(environment, sarif_file, roots, excludes, meta)
         finally:

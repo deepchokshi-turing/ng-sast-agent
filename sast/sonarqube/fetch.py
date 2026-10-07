@@ -21,21 +21,28 @@ Subcommands:
 ``collect --report FILE --project KEY --out FILE --deadline SEC [--keep]``
     Reads the background task id from sonar-scanner's report file, polls
     ``api/ce/task`` until SUCCESS (FAILED, CANCELED or the deadline is an
-    error), pages ``api/issues/search`` (VULNERABILITY) and
-    ``api/hotspots/search``, then for each rule once calls ``api/rules/show``
-    (name and type) and ``api/rules/search?rule_key=<key>&facets=cwe``, whose
-    ``cwe`` facet is the rule's CWE set (26.9 has no securityStandards in
-    rules/show). A 404 or an empty answer for one rule is recorded under
-    ``rule_errors`` and does not stop the collection. Then it reads the
-    project's Python quality profile and deletes the project unless
-    ``--keep``. Writes every raw response to ``--out`` with a ``deleted`` flag,
-    also after a failure. Last line ``COLLECT_RESULT {json}``.
+    error), reads what was analysed (``api/measures/component``: files, ncloc,
+    ncloc_language_distribution), pages ``api/issues/search`` (VULNERABILITY)
+    and ``api/hotspots/search``, then for each rule once calls
+    ``api/rules/show`` (name and type) and
+    ``api/rules/search?rule_key=<key>&facets=cwe``, whose ``cwe`` facet is the
+    rule's CWE set (26.9 has no securityStandards in rules/show). Any error in
+    a rule lookup stops the collection, and so does a search that does not
+    find exactly that one rule. Then it reads the project's Python quality
+    profile (the default one when the project has none) and deletes the
+    project unless ``--keep``. ``--deadline`` bounds every one of these calls
+    together. The delete still gets a short fixed slice after it. Writes every
+    raw response to ``--out`` with a ``deleted`` flag, also after a failure.
+    Last line ``COLLECT_RESULT {json}``.
 ``delete --project KEY``
-    Best-effort cleanup after a failed scan.
+    Best-effort cleanup after a failed scan, within a short fixed time.
 
 Exit status: 0 ok, 2 bad configuration or arguments, 3 the server refused or
 could not be reached, 4 the background task FAILED or was CANCELED, 5 the
-deadline passed, 6 the results cannot be read completely.
+deadline passed, 6 the results cannot be read completely (paging, rule CWEs).
+
+The agent also runs this script under ``timeout -k 10 <seconds>``, so it
+cannot outlive its step even if a call hangs.
 """
 
 import argparse
@@ -54,6 +61,10 @@ PAGE_SIZE = 500
 MAX_RESULTS = 10000
 HTTP_TIMEOUT_SEC = 60
 GET_ATTEMPTS = 3
+#: Seconds the project delete may take, also when the collect deadline has passed.
+DELETE_SLICE_SEC = 20
+#: The analysis measures read after the background task succeeds.
+MEASURE_KEYS = "files,ncloc,ncloc_language_distribution"
 
 EXIT_CONFIG, EXIT_HTTP, EXIT_TASK, EXIT_TIMEOUT, EXIT_INCOMPLETE = 2, 3, 4, 5, 6
 
@@ -69,6 +80,16 @@ class Sonar(object):
     def __init__(self, host, token):
         self.host = host.rstrip("/")
         self.token = token
+        #: time.time() after which no call starts, or None for no limit.
+        self.deadline = None
+
+    def _time_left(self, method, path):
+        if self.deadline is None:
+            return float(HTTP_TIMEOUT_SEC)
+        left = self.deadline - time.time()
+        if left <= 0:
+            raise Failure("the deadline passed before {} {}".format(method, path), EXIT_TIMEOUT)
+        return min(float(HTTP_TIMEOUT_SEC), left)
 
     def scrub(self, text):
         text = str(text)
@@ -105,9 +126,10 @@ class Sonar(object):
                    "User-Agent": "sast-agents-fetch"}
         attempts = GET_ATTEMPTS if method == "GET" else 1
         for attempt in range(1, attempts + 1):
+            timeout = self._time_left(method, path)
             request = urllib.request.Request(url, data=data, headers=headers, method=method)
             try:
-                with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT_SEC) as response:
+                with urllib.request.urlopen(request, timeout=timeout) as response:
                     body = response.read()
                 break
             except urllib.error.HTTPError as exc:
@@ -154,10 +176,19 @@ def read_token(path):
     return token
 
 
+def has_user_info(url):
+    """Whether a URL carries a user name or password (``http://user:pass@host``)."""
+    netloc = urllib.parse.urlsplit(url).netloc
+    return "@" in netloc
+
+
 def connect(token_file=None):
     host = os.environ.get("SONAR_HOST_URL", "").strip()
     if not host:
         raise Failure("SONAR_HOST_URL is not set", EXIT_CONFIG)
+    if has_user_info(host):
+        # Not echoed: it holds a credential.
+        raise Failure("SONAR_HOST_URL must not contain a user name or password (user:pass@host)", EXIT_CONFIG)
     token = read_token(token_file or os.environ.get("SONAR_TOKEN_FILE", "").strip())
     if not host.startswith(("http://", "https://")):
         raise Failure("SONAR_HOST_URL must start with http:// or https://, got {!r}".format(host), EXIT_CONFIG)
@@ -224,20 +255,27 @@ def wait_for_task(sonar, task_id, deadline, interval, document):
 
 
 def pages(sonar, path, items_key, params):
-    """Every page of a search, raw. Stops when all results are read."""
-    collected, page, total = [], 1, None
+    """Every page of a search, raw. The number of items read must equal the reported total."""
+    collected, page, count = [], 1, 0
     while True:
         response = sonar.get(path, p=page, ps=PAGE_SIZE, **params) or {}
         collected.append(response)
         paging = response.get("paging") or {}
         total = paging.get("total", response.get("total"))
-        if total is not None and int(total) > MAX_RESULTS:
+        if total is None:
+            raise Failure("{} gave no paging total, so completeness cannot be checked".format(path), EXIT_INCOMPLETE)
+        total = int(total)
+        if total > MAX_RESULTS:
             raise Failure("{} reports {} results but only {} can be paged, so the result would be incomplete".format(
                 path, total, MAX_RESULTS), EXIT_INCOMPLETE)
         items = response.get(items_key) or []
-        if not items or total is None or page * PAGE_SIZE >= int(total):
-            return collected
+        count += len(items)
+        if not items or page * PAGE_SIZE >= total:
+            break
         page += 1
+    if count != total:
+        raise Failure("{} reported {} results but {} were read".format(path, total, count), EXIT_INCOMPLETE)
+    return collected
 
 
 def search_issues(sonar, project):
@@ -252,37 +290,31 @@ def search_issues(sonar, project):
         return pages(sonar, "api/issues/search", "issues", params)
 
 
+def facet_found_rule(search, key):
+    """Whether an api/rules/search answer is exactly the one rule ``key``."""
+    search = search or {}
+    total = (search.get("paging") or {}).get("total", search.get("total"))
+    rules = search.get("rules") or []
+    return total is not None and int(total) == 1 and len(rules) == 1 and (rules[0] or {}).get("key") == key
+
+
 def lookup_rule(sonar, key, document):
     """rules/show and the rules/search cwe facet of one rule, raw.
 
-    A rule the server does not know (404) or a search that finds nothing is
-    recorded in ``rule_errors`` and leaves the rule with no CWE. Any other
-    error stops the collection as usual.
+    Every error is fatal: a rule without its CWEs would silently drop its
+    results. The search must report exactly one rule, the one asked for.
     """
-    errors = []
-    try:
-        document["rules"][key] = sonar.get("api/rules/show", key=key)
-    except Failure as exc:
-        if exc.http_status != 404:
-            raise
-        document["rules"][key] = None
-        errors.append(str(exc))
-    try:
-        search = sonar.get("api/rules/search", rule_key=key, facets="cwe", ps=1)
-    except Failure as exc:
-        if exc.http_status != 404:
-            raise
-        search = None
-        errors.append(str(exc))
+    document["rules"][key] = sonar.get("api/rules/show", key=key)
+    search = sonar.get("api/rules/search", rule_key=key, facets="cwe", ps=1)
     document["rule_facets"][key] = search
-    if search is not None and not (search.get("rules") or search.get("total")):
-        errors.append("api/rules/search found no rule {}".format(key))
-    if errors:
-        document["rule_errors"][key] = "; ".join(errors)
+    if not facet_found_rule(search, key):
+        raise Failure("api/rules/search?rule_key={} did not return exactly that rule, so its CWEs are "
+                      "unknown".format(key), EXIT_INCOMPLETE)
 
 
 def delete_project(sonar, project):
-    """(deleted, error)."""
+    """(deleted, error). Gets its own short time slice, also after the deadline."""
+    sonar.deadline = time.time() + DELETE_SLICE_SEC
     try:
         sonar.call("POST", "api/projects/delete", form={"project": project})
         return True, None
@@ -309,13 +341,16 @@ def collect(sonar, args):
         "rules": {},
         "rule_facets": {},
         "rule_errors": {},
+        "measures": None,
         "quality_profiles": None,
+        "default_quality_profiles": None,
         "deleted": False,
         "delete_error": None,
         "kept": bool(args.keep),
         "error": None,
     }
     deadline = time.time() + float(args.deadline)
+    sonar.deadline = deadline
     failure = None
     try:
         report = read_report(args.report)
@@ -332,6 +367,8 @@ def collect(sonar, args):
             document["server"]["version"] = sonar.call("GET", "api/server/version", raw=True).strip()
         except Failure as exc:
             say(sonar, "[fetch] server version not available: {}".format(exc))
+        document["measures"] = sonar.get("api/measures/component", component=args.project,
+                                         metricKeys=MEASURE_KEYS)
         document["issues_pages"] = search_issues(sonar, args.project)
         document["hotspots_pages"] = pages(sonar, "api/hotspots/search", "hotspots", {"projectKey": args.project})
 
@@ -343,6 +380,9 @@ def collect(sonar, args):
         for key in sorted(keys):
             lookup_rule(sonar, key, document)
         document["quality_profiles"] = sonar.get("api/qualityprofiles/search", project=args.project, language="py")
+        if not (document["quality_profiles"] or {}).get("profiles"):
+            document["default_quality_profiles"] = sonar.get("api/qualityprofiles/search", language="py",
+                                                             defaults="true")
     except Failure as exc:
         failure = exc
         document["error"] = str(exc)
@@ -359,7 +399,6 @@ def collect(sonar, args):
     hotspots = sum(len(p.get("hotspots") or []) for p in document["hotspots_pages"])
     say(sonar, "COLLECT_RESULT " + json.dumps({
         "issues": issues, "hotspots": hotspots, "rules": len(document["rules"]),
-        "rule_errors": len(document["rule_errors"]),
         "deleted": document["deleted"], "kept": document["kept"], "delete_error": document["delete_error"],
     }))
 

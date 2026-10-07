@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from sast import sarif, task_config
+from sast import cwe_map, sarif, task_config
 from sast.codeql.normalise import cwes_of, normalise, repo_path, residual_risk
 from sast.findings import TraceStep
 from sast.scope import in_scope
@@ -127,7 +127,9 @@ def test_plain_problem_from_real_output():
 def test_every_recorded_result_lands_in_the_repo(task):
     findings, counts = normalise(recorded(task))
     assert counts["results_outside_repo"] == 0
+    assert counts["results_cwe_ambiguous"] == []
     assert len(findings) == counts["results_raw"]
+    assert sum(counts["results_by_cwe_decision"].values()) == counts["results_raw"]
     for f in findings:
         assert not f.file.startswith(("/", "./", "file:", "%")) and f.start_line >= 1
 
@@ -297,3 +299,60 @@ def test_twins_get_identical_codeql_results():
         neg, _ = normalise(recorded(f"task_{task}_negative"))
         assert [(f.tool_rule_id, f.file, f.start_line) for f in pos] == \
                [(f.tool_rule_id, f.file, f.start_line) for f in neg]
+
+
+# ---- cwe-map-4: CodeQL tags are an unordered set ---------------------------------------
+
+def _retargeted(rule_id: str, tags: list[str] | None = None) -> dict:
+    """The recorded 4da5ab result, pointed at another rule of the same real run.
+
+    No query in python-security-extended fired with these rules on the dataset,
+    so the result is the real py/insecure-protocol one and only its rule
+    reference changes. With ``tags`` the rule's CWE tags are replaced too.
+    """
+    import copy
+    document = copy.deepcopy(recorded("task_4da5ab_positive"))
+    run = document["runs"][0]
+    rules = run["tool"]["driver"]["rules"]
+    index = next(i for i, r in enumerate(rules) if r["id"] == rule_id)
+    if tags is not None:
+        rules[index]["properties"]["tags"] = ["security"] + [f"external/cwe/cwe-{t}" for t in tags]
+    (result,) = run["results"]
+    result["ruleId"] = rule_id
+    result["ruleIndex"] = index
+    result["rule"] = {"id": rule_id, "index": index}
+    return document
+
+
+@pytest.mark.parametrize("rule_id, rule", [
+    # Tags 312, 359, 532: cwe-map-3 took 312 (unmapped) and dropped these.
+    ("py/clear-text-logging-sensitive-data", "LLM02.SID.HIGH"),
+    ("py/clear-text-storage-sensitive-data", "LLM02.SID.HIGH"),
+    ("py/path-injection", "LLM03.EA.FUNCTIONALITY"),
+    ("py/code-injection", "LLM03.EA.FUNCTIONALITY"),
+    ("py/stack-trace-exposure", "LLM02.SID.MEDIUM"),
+    ("py/insecure-protocol", None),
+])
+def test_codeql_tags_are_decided_as_an_unordered_set(rule_id, rule):
+    findings, counts = normalise(_retargeted(rule_id))
+    (finding,) = findings
+    assert sarif.emitted_rules(findings) == [rule]
+    if rule is not None:
+        assert counts["results_by_cwe_decision"]["mapped"] == 1
+        assert cwe_map.rule_for(finding.cwes) is not None
+    else:
+        assert counts["results_by_cwe_decision"]["unmapped"] == 1
+
+
+def test_a_rule_whose_tags_span_two_families_is_dropped_and_counted():
+    findings, counts = normalise(_retargeted("py/path-injection", tags=["200", "22"]))
+    assert findings == []
+    assert counts["results_by_cwe_decision"] == {"none": 0, "unmapped": 0, "mapped": 0, "ambiguous": 1}
+    assert counts["results_cwe_ambiguous"] == [
+        ["py/path-injection", ["CWE-22", "CWE-200"], "src/pydantic_ai_mini/_compat/httpx2.py", 146]]
+
+
+def test_tag_order_does_not_change_the_result():
+    forward = normalise(_retargeted("py/path-injection", tags=["532", "312", "359"]))[0]
+    backward = normalise(_retargeted("py/path-injection", tags=["359", "312", "532"]))[0]
+    assert [f.cwes for f in forward] == [f.cwes for f in backward] == [("CWE-359", "CWE-532", "CWE-312")]

@@ -13,14 +13,23 @@
 #                  codeql-bundle-linux-arm64 on arm64, each pinned by sha256.
 #   sonar-scanner  /opt/sast/sonar-scanner, the CLI with its bundled JRE.
 #
-# Every download is checked against the sha256 pinned in sast/<tool>/pins.py.
+# The CodeQL bundle, sonar-scanner, uv and the Semgrep rules are checked against
+# the sha256 pinned in sast/<tool>/pins.py. The Semgrep wheel, its dependencies
+# and uv's CPython are resolved with --exclude-newer at the pinned date but are
+# not hash-checked.
 # tools/build_tools_image.sh stages this Dockerfile, the Semgrep installer files
 # and fetch_archive.py, and passes the pins as build arguments.
-FROM python:3.11-slim AS semgrep
+#
+# The build stages use python:3.11-slim pinned by its multi-arch index digest
+# (from `docker buildx imagetools inspect python:3.11-slim` on 2026-10-08), so
+# amd64 and arm64 builds both resolve. Only the build stages use it (the final
+# image is FROM scratch and holds /opt/sast alone).
+FROM python:3.11-slim@sha256:0dd364ba7e10242f07755449e3a3d0e35f9efd987952737b90def6709ab0c5ce AS semgrep
 COPY install.py merge_rules.py pins.json /opt/sast/
-RUN python3 /opt/sast/install.py /opt/sast/pins.json | tail -1
+# No pipe here: the step's exit status must be the installer's own.
+RUN python3 /opt/sast/install.py /opt/sast/pins.json
 
-FROM python:3.11-slim AS codeql
+FROM python:3.11-slim@sha256:0dd364ba7e10242f07755449e3a3d0e35f9efd987952737b90def6709ab0c5ce AS codeql
 ARG TARGETARCH
 ARG CODEQL_URL_AMD64
 ARG CODEQL_SHA256_AMD64
@@ -37,7 +46,7 @@ RUN set -e; \
     python3 /tmp/fetch_archive.py "$url" "$sha" /opt/sast/codeql --strip-top; \
     /opt/sast/codeql/codeql version --format=terse
 
-FROM python:3.11-slim AS sonar
+FROM python:3.11-slim@sha256:0dd364ba7e10242f07755449e3a3d0e35f9efd987952737b90def6709ab0c5ce AS sonar
 ARG TARGETARCH
 ARG SONAR_SCANNER_VERSION
 ARG SONAR_SCANNER_SHA256_AMD64

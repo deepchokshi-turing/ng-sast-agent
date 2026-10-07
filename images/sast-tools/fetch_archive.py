@@ -70,13 +70,83 @@ def unpack_zip(path, root):
                 os.chmod(target, mode)
 
 
+def _parts(name, what):
+    if name.startswith("/") or "\\" in name:
+        fail("{} {!r} is absolute or uses backslashes".format(what, name))
+    parts = [p for p in name.split("/") if p not in ("", ".")]
+    if not parts or ".." in parts:
+        fail("{} {!r} is empty or contains '..'".format(what, name))
+    return parts
+
+
+def _resolve(base, target, links, depth=0):
+    """Where a relative link target lands, following the archive's own symlinks
+    the way the file system would. Fails when it leaves the root."""
+    if depth > 40:
+        fail("symlink loop at {!r}".format("/".join(base)))
+    if target.startswith("/"):
+        fail("archive symlink target {!r} is absolute".format(target))
+    stack = list(base)
+    for comp in target.split("/"):
+        if comp in ("", "."):
+            continue
+        if comp == "..":
+            if not stack:
+                fail("archive symlink target {!r} points outside the target folder".format(target))
+            stack.pop()
+            continue
+        stack.append(comp)
+        key = "/".join(stack)
+        if key in links:
+            stack = _resolve(stack[:-1], links[key], links, depth + 1)
+    return stack
+
+
+def check_tar_members(members):
+    """Refuse a tar that could write or point outside the folder it is unpacked into.
+
+    Checking each name and link target with realpath before anything exists on
+    disk is not enough: a link to '.' followed by a link through it escapes
+    (audit 0.4.0, L2). So: only files, folders and links; no absolute name and
+    no '..'; no member below a member that is a symlink; every symlink resolves
+    inside the root through the archive's other symlinks; a hard link names a
+    member path; no symlink shares its name with another member. The same
+    rules as sast/codeql/install.py.
+    """
+    links = {}
+    seen = {}
+    for member in members:
+        parts = _parts(member.name, "archive entry")
+        if not (member.isfile() or member.isdir() or member.issym() or member.islnk()):
+            fail("archive entry {!r} is not a file, folder or link".format(member.name))
+        key = "/".join(parts)
+        if key in seen and (member.issym() or seen[key]):
+            fail("archive entry {!r} appears twice and one is a symlink".format(member.name))
+        seen[key] = seen.get(key, False) or member.issym()
+        if member.issym():
+            links[key] = member.linkname
+    for member in members:
+        parts = _parts(member.name, "archive entry")
+        for i in range(1, len(parts)):
+            if "/".join(parts[:i]) in links:
+                fail("archive entry {!r} goes through the symlink {!r}".format(member.name, "/".join(parts[:i])))
+        if member.issym():
+            _resolve(parts[:-1], member.linkname, links)
+        elif member.islnk():
+            target = _parts(member.linkname, "hard link target")
+            for i in range(1, len(target) + 1):
+                if "/".join(target[:i]) in links:
+                    fail("hard link {!r} goes through a symlink".format(member.name))
+
+
 def unpack_tar(path, root):
     with tarfile.open(path, "r:gz") as archive:
-        for member in archive.getmembers():
-            safe_target(root, member.name)
-            if member.issym() or member.islnk():
-                safe_target(root, os.path.join(os.path.dirname(member.name), member.linkname))
-        archive.extractall(root)  # members checked above, safe_target
+        members = archive.getmembers()
+        check_tar_members(members)
+        # Members checked above. The 'tar' filter (Python 3.11.4 and later)
+        # also refuses absolute names and clears setuid bits.
+        kwargs = {"filter": "tar"} if hasattr(tarfile, "tar_filter") else {}
+        archive.extractall(root, members=members, **kwargs)
 
 
 def main():

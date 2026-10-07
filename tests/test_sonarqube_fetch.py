@@ -1,12 +1,19 @@
 """fetch.py against a local HTTP stub: token file, auth header, HTTP errors, task states, paging, rule lookups.
 
-The stub answers with status codes and minimal JSON shapes (no findings
-content), so it tests how fetch.py talks to a server, not what a real
-SonarQube reports. Real output is in test_sonarqube_normalise.py.
+Where a real answer exists, the stub replays it: ``replay_routes`` serves the
+responses recorded from SonarQube 26.9 in tests/fixtures/sonarqube_26.9-f2_*.json
+(background task, issues, hotspots, rules/show, the rules/search cwe facet,
+quality profile, server version). Two kinds of answer are written here
+instead. The ``api/measures/component`` answer, because the recordings predate
+that call (``measures_response``, in the documented shape). And error paths no
+recording can show (401, 403, 404, 5xx, a FAILED or CANCELED task, a server
+that is not UP, a short page, a deadline), which use minimal JSON and say so in
+their docstrings or names.
 """
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import socket
@@ -19,7 +26,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from tests.conftest import ROOT
+from sast.sonarqube.normalise import normalise
+from tests.conftest import FIXTURES, ROOT
 
 FETCH = ROOT / "sast" / "sonarqube" / "fetch.py"
 TOKEN = "squ_fedcba9876543210fedcba9876543210fedcba98"
@@ -116,7 +124,7 @@ def result_line(stdout, prefix):
     return json.loads([line for line in stdout.splitlines() if line.startswith(prefix + " ")][-1][len(prefix) + 1:])
 
 
-UP = (200, {"id": "server-1", "version": "26.9.test", "status": "UP"})
+UP = (200, {"id": "server-1", "version": "26.9.0.129388", "status": "UP"})
 EMPTY_ISSUES = (200, {"issues": [], "paging": {"pageIndex": 1, "pageSize": 500, "total": 0}})
 EMPTY_HOTSPOTS = (200, {"hotspots": [], "paging": {"pageIndex": 1, "pageSize": 500, "total": 0}})
 
@@ -125,7 +133,7 @@ def check_routes(**overrides):
     routes = {
         "api/system/status": UP,
         "api/authentication/validate": (200, {"valid": True}),
-        "api/server/version": (200, "26.9.test"),
+        "api/server/version": (200, "26.9.0.129388"),
         "api/navigation/global": (200, {"edition": "community"}),
         "api/qualityprofiles/search": (200, {"profiles": [{"name": "Sonar way", "key": "py-1"}]}),
     }
@@ -133,17 +141,62 @@ def check_routes(**overrides):
     return routes
 
 
+def measures_response(files=34, ncloc=1500, distribution="py=1500"):
+    """api/measures/component in its documented shape. Not recorded: the recordings predate this call."""
+    return {"component": {"key": PROJECT, "qualifier": "TRK", "measures": [
+        {"metric": "files", "value": str(files)}, {"metric": "ncloc", "value": str(ncloc)},
+        {"metric": "ncloc_language_distribution", "value": distribution}]}}
+
+
 def collect_routes(ce_status="SUCCESS", **overrides):
+    """Minimal answers for error-path tests (no findings content)."""
     routes = {
         "api/ce/task": (200, {"task": {"id": "task-1", "status": ce_status, "errorMessage": "analysis crashed"}}),
-        "api/server/version": (200, "26.9.test"),
+        "api/server/version": (200, "26.9.0.129388"),
+        "api/measures/component": (200, measures_response()),
         "api/issues/search": EMPTY_ISSUES,
         "api/hotspots/search": EMPTY_HOTSPOTS,
-        "api/qualityprofiles/search": (200, {"profiles": [{"name": "Sonar way", "key": "py-1", "language": "py"}]}),
+        "api/qualityprofiles/search": (200, {"profiles": [{"name": "Sonar way", "key": "py-1", "language": "py",
+                                                           "activeRuleCount": 398}]}),
         "api/projects/delete": (204, ""),
     }
     routes.update(overrides)
     return routes
+
+
+def recorded_f2(task):
+    return json.loads((FIXTURES / f"sonarqube_26.9-f2_{task}.json").read_text())
+
+
+def _paged(pages):
+    def answer(query):
+        index = int(query.get("p", 1)) - 1
+        return (200, pages[index]) if index < len(pages) else (200, {**pages[-1], "issues": [], "hotspots": []})
+    return answer
+
+
+def replay_routes(document, **overrides):
+    """A stub that answers with the responses of one real recorded run."""
+    rules, facets = document["rules"], document["rule_facets"]
+    routes = {
+        "api/ce/task": (200, {"task": document["ce_task"]}),
+        "api/server/version": (200, document["server"]["version"]),
+        "api/measures/component": (200, measures_response()),
+        "api/issues/search": _paged(document["issues_pages"]),
+        "api/hotspots/search": _paged(document["hotspots_pages"]),
+        "api/rules/show": lambda q: (200, rules[q["key"]]) if q["key"] in rules else (404, {"errors": [{"msg": "x"}]}),
+        "api/rules/search": lambda q: (200, facets[q["rule_key"]]),
+        "api/qualityprofiles/search": (200, document["quality_profiles"]),
+        "api/projects/delete": (204, ""),
+    }
+    routes.update(overrides)
+    return routes
+
+
+def report_for(tmp_path, project):
+    path = tmp_path / "report-task.txt"
+    path.write_text(f"projectKey={project}\nceTaskId=task-1\n")
+    return path
 
 
 @pytest.fixture
@@ -167,7 +220,7 @@ def test_check_reports_version_edition_and_profile(stub):
     proc = run_fetch(["check"], server.url)
     assert proc.returncode == 0, proc.stdout
     assert result_line(proc.stdout, "CHECK_RESULT") == {
-        "status": "UP", "server_version": "26.9.test", "server_id": "server-1", "edition": "community",
+        "status": "UP", "server_version": "26.9.0.129388", "server_id": "server-1", "edition": "community",
         "default_python_profile": {"name": "Sonar way", "key": "py-1"},
     }
     assert server.requests and all(r["auth"] == f"Bearer {TOKEN}" for r in server.requests)
@@ -251,49 +304,110 @@ def test_token_file_argument(stub):
 # ---------------------------------------------------------------- collect
 
 
-def test_collect_pages_reads_each_rule_once_and_deletes(stub, tmp_path, report):
+@pytest.mark.parametrize("task", ["task_4da5ab_negative", "task_4da5ab_positive", "task_dc4b7a_negative",
+                                  "task_dc4b7a_positive"])
+def test_collect_replays_a_recorded_run(stub, tmp_path, task):
+    """fetch.py collect against the real responses of one recorded run gives the same document and findings."""
+    recording = recorded_f2(task)
+    project = recording["project_key"]
+    server = stub(replay_routes(recording))
+    out = tmp_path / "sonarqube.json"
+    proc = run_fetch(["collect", "--report", str(report_for(tmp_path, project)), "--project", project,
+                      "--out", str(out), "--deadline", "30", "--poll-interval", "0.05"], server.url)
+    assert proc.returncode == 0, proc.stdout
+    document = json.loads(out.read_text())
+    for key in ("ce_task", "issues_pages", "hotspots_pages", "rules", "rule_facets", "quality_profiles"):
+        assert document[key] == recording[key], key
+    assert document["fetch_format"] == 2 and document["rule_errors"] == {} and document["deleted"] is True
+    assert document["measures"] == measures_response() and document["default_quality_profiles"] is None
+    assert document["server"]["version"] == "26.9.0.129388"
+    assert normalise(document) == normalise(recording)
+
+    first = server.calls("api/issues/search")[0]["query"]
+    assert first["componentKeys"] == project and first["types"] == "VULNERABILITY" and first["ps"] == "500"
+    assert server.calls("api/hotspots/search")[0]["query"]["projectKey"] == project
+    assert server.calls("api/measures/component")[0]["query"] == {
+        "component": project, "metricKeys": "files,ncloc,ncloc_language_distribution"}
+    (search,) = server.calls("api/rules/search")
+    assert search["query"] == {"rule_key": next(iter(recording["rules"])), "facets": "cwe", "ps": "1"}
+    assert server.calls("api/qualityprofiles/search")[0]["query"] == {"project": project, "language": "py"}
+    assert server.calls("api/ce/task")[0]["query"] == {"id": "task-1"}
+    (delete,) = server.calls("api/projects/delete", "POST")
+    assert urllib.parse.parse_qs(delete["body"]) == {"project": [project]}
+    assert all(r["auth"] == f"Bearer {TOKEN}" for r in server.requests)
+    assert TOKEN not in out.read_text()
+
+
+def test_collect_pages_until_the_total_is_read(stub, tmp_path, report):
+    """501 results over two pages, made of copies of a recorded issue (no recording has that many)."""
+    issue = recorded_f2("task_dc4b7a_negative")["issues_pages"][0]["issues"][0]
+
     def issues(query):
         page = int(query["p"])
-        items = [{"key": f"i{page}-{n}", "rule": f"python:S{n % 2}"} for n in range(500 if page == 1 else 1)]
+        items = []
+        for n in range(500 if page == 1 else 1):
+            item = copy.deepcopy(issue)
+            item["key"] = f"i{page}-{n}"
+            items.append(item)
         return 200, {"issues": items, "paging": {"pageIndex": page, "pageSize": 500, "total": 501}}
 
-    routes = collect_routes(**{
-        "api/issues/search": issues,
-        "api/hotspots/search": (200, {"hotspots": [{"key": "h1", "ruleKey": "python:S5"}],
-                                      "paging": {"pageIndex": 1, "pageSize": 500, "total": 1}}),
-        "api/rules/show": lambda q: (200, {"rule": {"key": q["key"]}}),
-        "api/rules/search": lambda q: (200, {"total": 1, "rules": [{"key": q["rule_key"]}], "facets": [
-            {"property": "cwe", "values": [{"val": "200", "count": 1}]}]}),
-    })
-    server = stub(routes)
+    recording = recorded_f2("task_dc4b7a_negative")
+    server = stub(replay_routes(recording, **{"api/issues/search": issues}))
     proc = run_fetch(collect_args(report, tmp_path), server.url)
     assert proc.returncode == 0, proc.stdout
     assert result_line(proc.stdout, "COLLECT_RESULT") == {
-        "issues": 501, "hotspots": 1, "rules": 3, "rule_errors": 0, "deleted": True, "kept": False,
-        "delete_error": None}
-
+        "issues": 501, "hotspots": 0, "rules": 1, "deleted": True, "kept": False, "delete_error": None}
     assert [c["query"]["p"] for c in server.calls("api/issues/search")] == ["1", "2"]
-    first = server.calls("api/issues/search")[0]["query"]
-    assert first["componentKeys"] == PROJECT and first["types"] == "VULNERABILITY" and first["ps"] == "500"
-    assert server.calls("api/hotspots/search")[0]["query"]["projectKey"] == PROJECT
-    assert sorted(c["query"]["key"] for c in server.calls("api/rules/show")) == ["python:S0", "python:S1",
-                                                                                  "python:S5"]
-    searches = server.calls("api/rules/search")
-    assert sorted(c["query"]["rule_key"] for c in searches) == ["python:S0", "python:S1", "python:S5"]
-    assert all(c["query"]["facets"] == "cwe" and c["query"]["ps"] == "1" for c in searches)
-    assert server.calls("api/qualityprofiles/search")[0]["query"] == {"project": PROJECT, "language": "py"}
-    # The task is polled at SONAR_HOST_URL, never at the serverUrl in the report file.
-    assert server.calls("api/ce/task")[0]["query"] == {"id": "task-1"}
-    (delete,) = server.calls("api/projects/delete", "POST")
-    assert urllib.parse.parse_qs(delete["body"]) == {"project": [PROJECT]}
+    assert len(server.calls("api/rules/show")) == 1  # each rule once
 
+
+def test_a_short_page_is_an_error(stub, tmp_path, report):
+    """Stub only: the server reports 3 results but serves 2 (no recording can show it)."""
+    pages = copy.deepcopy(recorded_f2("task_dc4b7a_negative")["issues_pages"])
+    pages[0]["paging"]["total"] = 3
+    server = stub(replay_routes(recorded_f2("task_dc4b7a_negative"), **{"api/issues/search": _paged(pages)}))
+    proc = run_fetch(collect_args(report, tmp_path), server.url)
+    assert proc.returncode == 6 and "reported 3 results but 2 were read" in proc.stdout
+    assert server.calls("api/projects/delete", "POST")
+
+
+def test_a_page_without_total_is_an_error(stub, tmp_path, report):
+    """Stub only: a search answer with no paging total."""
+    server = stub(collect_routes(**{"api/hotspots/search": (200, {"hotspots": []})}))
+    proc = run_fetch(collect_args(report, tmp_path), server.url)
+    assert proc.returncode == 6 and "no paging total" in proc.stdout
+
+
+def test_default_profile_when_the_project_has_none(stub, tmp_path, report):
+    """Stub only: the project search returns no profile, so the default Python profile is read."""
+    def profiles(query):
+        if query.get("project"):
+            return 200, {"profiles": []}
+        return 200, {"profiles": [{"name": "Sonar way", "key": "py-1", "language": "py", "activeRuleCount": 398}]}
+
+    server = stub(collect_routes(**{"api/qualityprofiles/search": profiles}))
+    proc = run_fetch(collect_args(report, tmp_path), server.url)
+    assert proc.returncode == 0, proc.stdout
     document = json.loads((tmp_path / "sonarqube.json").read_text())
-    assert document["deleted"] is True and document["error"] is None and document["project_key"] == PROJECT
-    assert len(document["issues_pages"]) == 2 and set(document["rules"]) == {"python:S0", "python:S1", "python:S5"}
-    assert document["fetch_format"] == 2 and document["rule_errors"] == {}
-    assert set(document["rule_facets"]) == {"python:S0", "python:S1", "python:S5"}
-    assert document["server"] == {"host_url": server.url, "version": "26.9.test"}
-    assert TOKEN not in (tmp_path / "sonarqube.json").read_text()
+    assert document["default_quality_profiles"]["profiles"][0]["activeRuleCount"] == 398
+    assert server.calls("api/qualityprofiles/search")[1]["query"] == {"language": "py", "defaults": "true"}
+
+
+def test_the_deadline_covers_the_whole_collection(stub, tmp_path, report):
+    """Stub only: the task succeeds at once, then a hanging search runs past the deadline. The delete still runs."""
+    import time
+
+    def slow(query):
+        time.sleep(1.5)
+        return EMPTY_ISSUES
+
+    server = stub(collect_routes(**{"api/issues/search": slow}))
+    started = time.monotonic()
+    proc = run_fetch(collect_args(report, tmp_path, deadline="0.5"), server.url)
+    assert proc.returncode == 5 and "deadline passed" in proc.stdout
+    assert time.monotonic() - started < 10
+    assert server.calls("api/projects/delete", "POST")
+    assert json.loads((tmp_path / "sonarqube.json").read_text())["deleted"] is True
 
 
 def test_keep_leaves_the_project(stub, tmp_path, report):
@@ -374,31 +488,39 @@ def test_delete_subcommand(stub):
 
 
 def one_issue_routes(**overrides):
-    issues = (200, {"issues": [{"key": "i1", "rule": "python:S9", "type": "VULNERABILITY"}],
-                    "paging": {"pageIndex": 1, "pageSize": 500, "total": 1}})
-    return collect_routes(**{"api/issues/search": issues, **overrides})
+    """The recorded dc4b7a positive run, with its rule lookups overridden for an error path."""
+    return replay_routes(recorded_f2("task_dc4b7a_positive"), **overrides)
 
 
-@pytest.mark.parametrize("routes, recorded_error", [
-    ({"api/rules/show": (404, {"errors": [{"msg": "Rule not found"}]}),
-      "api/rules/search": (404, {"errors": [{"msg": "Rule not found"}]})}, "not found"),
-    ({"api/rules/show": (200, {"rule": {"key": "python:S9"}}),
-      "api/rules/search": (200, {"total": 0, "rules": [], "facets": [{"property": "cwe", "values": []}]})},
-     "found no rule python:S9"),
+S5332 = "python:S5332"
+
+
+@pytest.mark.parametrize("routes, message", [
+    ({"api/rules/show": (404, {"errors": [{"msg": "Rule not found"}]})}, "GET api/rules/show failed: not found"),
+    ({"api/rules/search": (404, {"errors": [{"msg": "Rule not found"}]})}, "GET api/rules/search failed: not found"),
+    ({"api/rules/search": (200, {"total": 0, "paging": {"total": 0}, "rules": [], "facets": []})},
+     "did not return exactly that rule"),
+    ({"api/rules/search": (200, {"paging": {"total": 1}, "rules": [{"key": "python:S9999"}], "facets": []})},
+     "did not return exactly that rule"),
+    ({"api/rules/search": (200, {"paging": {"total": 2}, "rules": [{"key": S5332}, {"key": "python:S1"}],
+                                 "facets": []})},
+     "did not return exactly that rule"),
+    ({"api/rules/search": (403, {"errors": [{"msg": "Insufficient privileges"}]})}, "GET api/rules/search failed"),
 ])
-def test_a_rule_without_cwe_does_not_fail_collect(stub, tmp_path, report, routes, recorded_error):
+def test_every_rule_lookup_error_is_fatal(stub, tmp_path, routes, message):
+    """Stub only: no recording has a failed rule lookup. A rule without its CWEs must not drop results silently."""
+    project = recorded_f2("task_dc4b7a_positive")["project_key"]
     server = stub(one_issue_routes(**routes))
-    proc = run_fetch(collect_args(report, tmp_path), server.url)
-    assert proc.returncode == 0, proc.stdout
-    assert result_line(proc.stdout, "COLLECT_RESULT")["rule_errors"] == 1
-    document = json.loads((tmp_path / "sonarqube.json").read_text())
-    assert recorded_error in document["rule_errors"]["python:S9"]
-    assert document["deleted"] is True and document["error"] is None
-
-
-def test_other_rule_lookup_errors_still_fail(stub, tmp_path, report):
-    server = stub(one_issue_routes(**{"api/rules/show": (200, {"rule": {"key": "python:S9"}}),
-                                      "api/rules/search": (403, {"errors": [{"msg": "Insufficient privileges"}]})}))
-    proc = run_fetch(collect_args(report, tmp_path), server.url)
-    assert proc.returncode == 3 and "GET api/rules/search failed" in proc.stdout
+    out = tmp_path / "sonarqube.json"
+    proc = run_fetch(["collect", "--report", str(report_for(tmp_path, project)), "--project", project,
+                      "--out", str(out), "--deadline", "10", "--poll-interval", "0.05"], server.url)
+    assert proc.returncode in (3, 6) and message in proc.stdout, proc.stdout
+    document = json.loads(out.read_text())
+    assert document["error"] and document["deleted"] is True
     assert server.calls("api/projects/delete", "POST")
+
+
+def test_host_url_with_user_info_is_refused():
+    proc = run_fetch(["check"], "http://admin:hunter2@127.0.0.1:9")
+    assert proc.returncode == 2 and "must not contain a user name or password" in proc.stdout
+    assert "hunter2" not in proc.stdout

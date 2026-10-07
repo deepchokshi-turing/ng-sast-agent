@@ -86,7 +86,7 @@ def test_happy_path_writes_sarif_logs_and_metadata(tmp_path):
     meta = context.metadata
     assert meta["status"] == "ok"
     assert meta["model_ignored"] == "openai/gpt-5"
-    assert meta["cwe_map"] == "cwe-map-3"
+    assert meta["cwe_map"] == "cwe-map-4"
     assert meta["heuristics"] == "heuristics-1"
     assert meta["agent_version"] == "0.4.0+semgrep-1.179.0"
     assert meta["scan_budget_sec"] == 780

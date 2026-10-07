@@ -36,7 +36,10 @@ def test_options_split_strings_and_keep_unknown_keys(tmp_path):
 
 
 def test_preflight_never_fails_a_job_on_an_unknown_key():
-    SemgrepAgent.preflight({"something_new": "1"})
+    assert SemgrepAgent.preflight({"something_new": "1"}) is None
+    # The key is kept and recorded, not silently lost.
+    options = SemgrepAgent.parse_options({"something_new": "1"}, {})
+    assert options.model_extra == {"something_new": "1"}
 
 
 def test_preflight_still_rejects_a_bad_value():

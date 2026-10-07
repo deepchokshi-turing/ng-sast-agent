@@ -37,6 +37,16 @@ these views:
 Trials whose SARIF was missing or whose grader crashed are left out of the
 category and risk tables and counted separately.
 
+A tool that reported nothing scores exactly what an empty SARIF scores (1.0
+on every negative, FPR 0, "neither" exact 1.0). When no graded trial of a tool
+emitted a result, the report says so on its first line. The count comes from
+the agent metadata (``results_emitted``, in a job's result.json or a
+``metadata.json`` next to the trial's ``verifier`` folder). For a bare
+reward.json with neither, a trial with tp, fp and fp_outside_scope all 0 counts
+as having no result.
+
+Precision is n/a when there is no result to take it over (tp + fp = 0).
+
 Uses only the standard library.
 """
 
@@ -115,6 +125,7 @@ def labels_from(rewards: dict) -> dict:
 def base_row(task: str, rewards: dict, status: str = "ok", error: str = "") -> dict:
     return {
         "task": task,
+        "tool": None,
         "status": status,
         "reward": rewards.get("reward"),
         "tp": rewards.get("tp"),
@@ -144,6 +155,7 @@ def rows_for(job: Path, tasks_dir: Path | None) -> list[dict]:
                        "errored" if exception else meta.get("status", "?"),
                        (exception.get("exception_message") or meta.get("error") or "")[:120])
         row.update({
+            "tool": meta.get("tool") or meta.get("agent"),
             "raw": meta.get("results_raw"),
             "security": meta.get("findings_security"),
             "emitted": meta.get("results_emitted"),
@@ -156,11 +168,31 @@ def rows_for(job: Path, tasks_dir: Path | None) -> list[dict]:
     return out
 
 
+def _trial_metadata(reward_file: Path) -> dict:
+    """The agent metadata next to a reward.json, when the trial folder has it."""
+    trial = reward_file.parent.parent if reward_file.parent.name == "verifier" else reward_file.parent
+    for candidate, pick in ((trial / "result.json", lambda d: (d.get("agent_result") or {}).get("metadata")),
+                            (trial / "metadata.json", lambda d: d)):
+        if candidate.is_file():
+            try:
+                meta = pick(json.loads(candidate.read_text()))
+            except (ValueError, AttributeError):
+                continue
+            if isinstance(meta, dict):
+                return meta
+    return {}
+
+
 def rows_from_reward_files(files: list[Path]) -> list[dict]:
     rows = []
     for f in files:
         task = f.parent.parent.name if f.parent.name == "verifier" else f.parent.name
-        rows.append(base_row(task, json.loads(f.read_text())))
+        row = base_row(task, json.loads(f.read_text()))
+        meta = _trial_metadata(f)
+        if meta:
+            row["tool"] = meta.get("tool") or meta.get("agent")
+            row["emitted"] = meta.get("results_emitted")
+        rows.append(row)
     return rows
 
 
@@ -244,9 +276,12 @@ def pooled_detection(rows: list[dict]) -> dict | None:
     fp = sum(r["fp"] or 0 for r in positives)
     fn = sum(r["fn"] or 0 for r in positives)
     gt = sum(r["gt"] for r in positives)
-    precision = tp / (tp + fp) if tp + fp else 0.0
+    precision = tp / (tp + fp) if tp + fp else None  # undefined with no result
     recall = tp / gt if gt else 0.0
-    f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
+    if precision is None:
+        f1 = None
+    else:
+        f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
     return {"tasks": len(positives), "gt": gt, "tp": tp, "fp": fp, "fn": fn,
             "precision": precision, "recall": recall, "F1": f1}
 
@@ -266,6 +301,41 @@ def reward_by_role(rows: list[dict]) -> dict:
     return out
 
 
+def _emitted(row: dict) -> int | None:
+    """Results the agent wrote, from its metadata, else from the grader's counts."""
+    if row.get("emitted") is not None:
+        return int(row["emitted"])
+    if row["reward"] is None:
+        return None
+    counts = [row.get("tp"), row.get("fp"), row.get("fp_out")]
+    if all(c is None for c in counts):
+        return None
+    return 0 if all(not c for c in counts) else None
+
+
+def emitted_by_tool(rows: list[dict]) -> dict:
+    """Per tool: graded trials, trials with a known result count, and their total.
+    ``no_results`` is True when every graded trial is known to have emitted nothing."""
+    out: dict[str, dict] = {}
+    for r in rows:
+        if r["reward"] is None or r["status"] == "errored":
+            continue
+        tool = r.get("tool") or "all trials"
+        e = out.setdefault(tool, {"graded": 0, "known": 0, "emitted": 0})
+        e["graded"] += 1
+        n = _emitted(r)
+        if n is not None:
+            e["known"] += 1
+            e["emitted"] += n
+    for e in out.values():
+        e["no_results"] = e["graded"] > 0 and e["known"] == e["graded"] and e["emitted"] == 0
+    return out
+
+
+NO_RESULTS_WARNING = ("no results emitted, scores equal an empty SARIF: {tool} reported nothing on any of its "
+                      "{graded} graded trials, so every negative scores 1.0, FPR is 0 and the 'neither' row is "
+                      "exact by default. These numbers say nothing about the tool.")
+
 HARBOR_MEAN_WARNING = ("Harbor's job-level mean reward (result.json) averages positives and negatives "
                        "together. It is not a score: an empty SARIF earns 1.0 on every negative. "
                        "Quote the pooled detection, category and per-role figures instead.")
@@ -274,7 +344,10 @@ HARBOR_MEAN_WARNING = ("Harbor's job-level mean reward (result.json) averages po
 def summarise(rows: list[dict]) -> dict:
     graded = [r for r in rows if r["reward"] is not None]
     zero = [r for r in graded if r["gt"] == 0]
+    emitted = emitted_by_tool(rows)
     return {
+        "no_results_emitted": sorted(t for t, e in emitted.items() if e["no_results"]),
+        "results_emitted_by_tool": emitted,
         "trials": len(rows), "graded": len(graded),
         "excluded_from_category_tables": len(rows) - len(usable(rows)),
         "reward_by_role": reward_by_role(rows),
@@ -316,6 +389,11 @@ TRIAL_COLUMNS = ["task", "status", "reward", "tp", "fp", "fn", "fp_out", "gt", "
 
 def render(rows: list[dict], summary: dict, table=text_table) -> str:
     out = []
+    for tool in summary["no_results_emitted"]:
+        graded = summary["results_emitted_by_tool"][tool]["graded"]
+        out.append("WARNING: " + NO_RESULTS_WARNING.format(tool=tool, graded=graded))
+    if out:
+        out.append("")
     cols = [c for c in TRIAL_COLUMNS if any(c in r for r in rows)]
     out += table(cols, [[r.get(c) for c in cols] for r in rows])
     out.append(f"\ntrials {summary['trials']}, graded {summary['graded']}, "
@@ -323,8 +401,8 @@ def render(rows: list[dict], summary: dict, table=text_table) -> str:
     det = summary["pooled_detection"]
     if det:
         out.append(f"detection, pooled over {det['tasks']} tasks with findings ({det['gt']} ground-truth findings):")
-        out.append(f"  tp {det['tp']}  fp {det['fp']}  fn {det['fn']}  precision {det['precision']:.3f}  "
-                   f"recall {det['recall']:.3f}  F1 {det['F1']:.3f}")
+        out.append(f"  tp {det['tp']}  fp {det['fp']}  fn {det['fn']}  precision {fmt(det['precision']) or 'n/a'}  "
+                   f"recall {det['recall']:.3f}  F1 {fmt(det['F1']) or 'n/a'}")
         with_meta = [r for r in rows if (r["gt"] or 0) > 0 and r["reward"] is not None and r.get("near") is not None]
         if with_meta:
             gt_meta = sum(r["gt"] for r in with_meta)

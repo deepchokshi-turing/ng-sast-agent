@@ -144,14 +144,21 @@ agent version.
      and task images that run tests or `compileall` are full of it;
    - runs without `--dataflow-traces` (see "No dataflow trace" below);
    - keeps `category: security` results and maps each one's CWE to a task ruleId
-     ([sast/cwe_map.py](sast/cwe_map.py), `cwe-map-3`);
+     ([sast/cwe_map.py](sast/cwe_map.py), `cwe-map-4`);
    - writes the SARIF, with the fields below.
 
 ### Decisions (all fixed before any results; see the plan for reasons)
 
 - **CWE → ruleId** is assigned by what each CWE means, using the ruleId
   definitions the task format uses, never by task labels.
-  - A finding uses its rule's **primary** CWE.
+  - A Semgrep finding uses its rule's **primary** CWE, the one the rule's
+    author lists first.
+  - CodeQL and SonarQube name no primary CWE. CodeQL lists its `external/cwe`
+    tags in numeric order and SonarQube's cwe facet is an unordered set, so
+    their CWEs are decided as a set (`cwe_map.decide_unordered`, `cwe-map-4`):
+    unmapped CWEs are ignored, a set whose mapped CWEs all fall in one family
+    is reported under that family, and a set that spans two families is
+    dropped as ambiguous and counted. The answer never depends on the order.
   - LLM02 covers disclosure *flows* only: exposure, logs, errors, sent data, and
     authorisation on data. Hard-coded secrets (CWE-798), weak transport or
     storage, and XXE aren't mapped.
@@ -242,12 +249,18 @@ The Semgrep version and the rules are pinned in
 `tools/report.py <job dir> --tasks <tasks dir>` prints a per-trial table and,
 as the headline for SAST, **detection pooled across tasks**:
 
-- precision, recall and F1 from the verifier's tp/fp/fn;
+- precision, recall and F1 from the verifier's tp/fp/fn. Precision (and so F1)
+  is shown as n/a when the tool reported nothing to take it over;
 - **location recall**: ground-truth findings with any security finding near them,
   mapped or not. This separates "looked at the right code" from "CWE on the other
   OWASP side";
 - **location + acceptable-CWE recall**;
 - zero-finding tasks with no false positive.
+
+When no graded trial of a tool emitted a result (`results_emitted` in the
+agent metadata), the report's first line says "no results emitted, scores
+equal an empty SARIF". Such a run scores 1.0 on every negative, FPR 0 and an
+exact "neither" row by default, so those figures say nothing about the tool.
 
 The composite task reward is shown too. For this agent the path, controls and
 recommendations sub-scores are 0 by design (no trace, heuristics unscored), so
@@ -269,6 +282,16 @@ the expected scan time plus 120 s.
   whole repo and matches by ±10 lines and OWASP prefix.
 - On full repos, extra findings lower F1. A zero-finding (fixed-twin) task scores
   1.0 only if the SARIF is completely empty.
+- The grader matches greedily: each result, in file order, takes the first
+  unmatched finding near it. A partial-credit result (say `LLM02.SID.MEDIUM`
+  one line above) can therefore take a finding that a full-credit result
+  further down would have matched, and the full-credit one becomes a false
+  positive. Agents merge results of one family on one line, so this needs two
+  results on different lines. It was seen in a crafted case only, not in a run.
+- On a negative task, a result near the fix marks every contrast category with
+  the same risk prefix as detected (`cat.<category>.detected`), the same
+  prefix-level match positives use. A `LLM03.EA.PERMISSIONS` result near a
+  FUNCTIONALITY fix counts as a false positive for FUNCTIONALITY.
 
 ## CodeQL agent
 
@@ -280,12 +303,27 @@ revisited if a contract follows, so don't use it in client work until then.
 
 ### Run
 
-The bundle is too big to download in Harbor's 300 s setup window, so it isn't
-installed at setup and there is no download fallback. It has to be in the task
-image at `/opt/sast/codeql`, which the `sast-tools:0.4.0` image provides for
-both amd64 and arm64. Setup only checks it (`sast/codeql/install.py`): the CLI
-must report 2.27.1 and the bundle's `codeql/python-queries` pack must be 1.8.11,
-or the trial fails with a message that names the image to use.
+The normal place for the bundle is the task image at `/opt/sast/codeql`, which
+the `sast-tools:0.4.0` image provides for both amd64 and arm64. Setup
+(`sast/codeql/install.py`, standard library only) checks it: the CLI must
+report 2.27.1, the bundle's `codeql/python-queries` pack must be exactly
+1.8.11 and the suite file must be there. When it matches, nothing is
+downloaded and setup takes about a second.
+
+When there is no bundle, or one with other versions, setup downloads the
+pinned bundle for the CPU (`linux64` on x86_64, `linux-arm64` on aarch64, about
+690 MB), checks its sha256 while it streams, refuses any archive entry that
+could land or point outside the target (absolute names, `..`, links that
+escape directly or through another link), unpacks it into a staging folder,
+checks versions and the suite there and only then moves it into place. The
+target is `/opt/sast/codeql` when the agent's user can write there, otherwise
+`codeql` in the agent's work folder, and the agent runs CodeQL from wherever
+setup put it (`install.install_dir` in the metadata). This takes about 100 s on
+a fast link. Harbor gives setup 300 s, so the installer stops itself after
+270 s, and the download has a hard deadline 90 s before that. A download that
+cannot finish in time fails the trial with a message saying so and naming the
+tools image, rather than being cut off by Harbor. Setup on Daytona therefore
+works without a registry image, at the cost of the download in every trial.
 
 ```bash
 PYTHONPATH=$PWD .venv/bin/harbor run -y -p <tasks> -n 4 -a sast.codeql.agent:CodeQLAgent -o jobs/codeql
@@ -298,7 +336,7 @@ as for the Semgrep agent.
 ### What a run does
 
 1. Reads the scope from `metadata.scanner_roots` and `metadata.excluded_paths`
-   through `sast/scope.py`, which every agent shares. A path with a "/" is
+   through `sast/scope.py` (`task_scope`). A path with a "/" is
    anchored at the repository root, a plain name such as `tests` means that
    name at any depth, and bytecode is always left out.
 2. Lists the Python files (`*.py`, `*.pyi`) under the roots and keeps those in
@@ -317,9 +355,17 @@ as for the Semgrep agent.
    `--ram` from its `memory_mb` minus 512, never below 1024.
 6. Checks the result (see the failure policy below), turns each result into a
    finding and drops results outside the scope. A finding's CWEs are the rule's
-   `external/cwe/cwe-NNN` tags in order, and its location is `locations[0]`
-   relative to `/app/repo`. The ruleId then comes from the shared CWE table, as
-   for Semgrep.
+   `external/cwe/cwe-NNN` tags and its location is `locations[0]` relative to
+   `/app/repo`. CodeQL has no primary CWE and sorts the tags by number, so the
+   first tag means nothing. The tags are decided as a set with the shared table
+   (`cwe-map-4`, see "Decisions" above). Under `cwe-map-3` the first tag
+   decided, and `py/clear-text-logging-sensitive-data` (CWE-312, 359, 532) and
+   `py/clear-text-storage-sensitive-data` (312, 315, 359) could never be
+   reported because CWE-312 is unmapped and sorts first. Now both are
+   `LLM02.SID.HIGH`. No other rule of the suite changes, and none spans two
+   families. A result whose tags did would be dropped and listed in
+   `results_cwe_ambiguous`, with the four outcomes counted in
+   `results_by_cwe_decision`.
 
 ### Failure policy
 
@@ -465,7 +511,9 @@ export SONAR_TOKEN=<the token>
 ```
 
 `SONAR_HOST_URL` is the server **as the sandbox sees it**, not as your shell
-sees it. Inside a Docker sandbox on Docker Desktop (macOS, Windows) that is
+sees it. It must not hold a user name or password (`http://user:pass@host`),
+because the URL goes into the exec env and the metadata. Such a URL is
+refused without being echoed. Inside a Docker sandbox on Docker Desktop (macOS, Windows) that is
 `http://host.docker.internal:9000`. On Linux, either add
 `--add-host=host.docker.internal:host-gateway` to the sandbox or use the
 bridge address (usually `http://172.17.0.1:9000`). The agent checks the server
@@ -480,9 +528,10 @@ directory under its work dir that only the sandbox user can open, makes the
 file mode 600, and points `fetch.py` at it with `SONAR_TOKEN_FILE`. The scanner
 gets the token from the sandbox shell, as
 `SONAR_TOKEN="$(cat <file>)" exec sonar-scanner ...`, so it is in the scanner's
-own environment but in no command line Harbor builds. The file is deleted when
-the scan ends, also after a failure, and the metadata records
-`token_file_removed`. The token is never in a log, an artifact or the run
+own environment but in no command line Harbor builds. Writing the file is
+inside the same `try`/`finally` as the scan, so the file is deleted when the
+scan ends, also after a failure in the upload or in making it private, and the
+metadata records `token_file_removed`. The token is never in a log, an artifact or the run
 metadata, and the command output that is kept is scrubbed of it in case a tool
 prints it. The unit tests check all of this.
 
@@ -499,6 +548,12 @@ PYTHONPATH=$PWD .venv/bin/harbor run -y -p dev/tasks -n 2 -a sast.sonarqube.agen
 Keep `-n` small: every trial is analysed by the same server, which handles one
 background task at a time on the Community Build.
 
+To record a run that has results, use the sample task
+`tests/fixtures/tasks/smoke_sonar` (`-p tests/fixtures/tasks -i smoke_sonar`).
+Its tiny notes helper has clear-text HTTP, which the Community Build reports as
+a VULNERABILITY (`python:S5332`), and a shell command, a formatted SQL query
+and a world-writable folder, which it should report as Security Hotspots.
+
 ### What a run does
 
 1. **setup**: `install.py` checks `/opt/sast/sonar-scanner` (the scanner and its
@@ -506,6 +561,11 @@ background task at a time on the Community Build.
    runs `sonar-scanner -v`.
 2. **run**:
    - The token file is written as described above.
+   - One deadline, the scan budget, covers the check, the scanner, the
+     background task, the measures, the paging and the rule lookups.
+     `sonar-scanner` and every `fetch.py` call run under
+     `timeout -k 10 <seconds>` inside the sandbox, so they stop there even when
+     Harbor only kills its own `docker compose exec` client.
    - `fetch.py check` asks the server for its status (must be `UP`), checks the
      token, and records the server version, the edition and the default Python
      quality profile.
@@ -518,42 +578,67 @@ background task at a time on the Community Build.
      `sonar.scm.disabled=true`. Its working files go under the agent's work
      directory, so a read-only repository is fine.
    - `fetch.py collect` waits for the server's background task to reach
-     `SUCCESS`, pages through the vulnerabilities (`types=VULNERABILITY`) and
-     the hotspots, and looks up each rule once. `api/rules/show` gives its name
-     and type, and `api/rules/search?rule_key=<key>&facets=cwe&ps=1` gives its
-     CWEs as the `cwe` facet. Community Build 26.9 does not return
-     `securityStandards` from `api/rules/show`, so the facet is the only CWE
-     source. A rule the server does not find (404 or an empty answer) is
-     recorded under `rule_errors`, keeps no CWE and does not stop the run.
-     Then it reads the project's Python quality profile and deletes the
-     project. A delete that fails does not fail the run, and the metadata says
-     the project was left.
+     `SUCCESS`, reads what was analysed (`api/measures/component` with
+     `files`, `ncloc` and `ncloc_language_distribution`), pages through the
+     vulnerabilities (`types=VULNERABILITY`) and the hotspots, and looks up
+     each rule once. Every search must yield exactly as many items as its
+     `paging.total`. `api/rules/show` gives a rule's name and type, and
+     `api/rules/search?rule_key=<key>&facets=cwe&ps=1` gives its CWEs as the
+     `cwe` facet. Community Build 26.9 does not return `securityStandards`
+     from `api/rules/show`, so the facet is the only CWE source. The rule
+     description's resources section is a hand-written reference list, not a
+     primary CWE (`python:S4423` lists only CWE-327 there while its facet holds
+     295, 326 and 327), so it is not used. Any rule lookup error stops the
+     run, and so does a search that does not return exactly that one rule
+     (`paging.total == 1` and the same key), because a rule without its CWEs
+     would silently drop its results. Then it reads the project's Python
+     quality profile (the server's default one when the project has none)
+     and deletes the project. The delete gets its own short time slice, also
+     when the deadline has passed. A delete that fails does not fail the run,
+     and the metadata says the project was left.
+   - **A scan that looked at nothing is an error.** The agent counts the `.py`
+     files in the task's scope before scanning. After the collection it
+     raises `ScannerError` when SonarQube analysed 0 files, when the scope has
+     Python files but `ncloc_language_distribution` has no Python, or when the
+     Python quality profile has no active rule (`activeRuleCount` 0). The
+     background task's `warnings` and any "Unable to parse file" lines of the
+     scanner output go into the metadata (`ce_task.warnings`,
+     `files_not_parsed`).
+   - Only `fetch_format` 2 output (with the cwe facet) is read. The older
+     format 1 has no CWE and would report nothing without saying so.
    - Each issue's own `type` is checked again, and anything other than
      `VULNERABILITY` is skipped and counted (`issues_not_vulnerability`).
-   - The CWEs are mapped with the same table as Semgrep (`cwe-map-3`), with
+   - The CWEs are mapped with the same table as Semgrep (`cwe-map-4`), with
      the rule below.
 3. **Failures are errors**: a server that is down, a refused token (HTTP 401)
    or missing permission (403), a scanner error, a background task that ends
-   `FAILED` or `CANCELED`, or running out of budget raises `ScannerError`. The
-   budget covers the check, the scan and the collection together.
+   `FAILED` or `CANCELED`, a rule lookup error, an incomplete page, an
+   analysis of nothing, or running out of budget raises `ScannerError`. The
+   project is deleted on every exit path once the scanner has started,
+   including a timeout and a budget that runs out between steps.
 
 #### How a rule's CWE set is mapped
 
-`cwe-map-3` maps a finding by its rule's primary CWE, so that a rule whose main
-weakness is out of scope is never reported through a secondary CWE. The cwe
-facet is an unordered set and Sonar names no primary. The agent therefore maps
-each CWE of the rule on its own, as if it were the primary one, and reports
-the result only when every CWE gives the same answer. That answer is then
-what `cwe-map-3` would give whichever CWE is primary, and the CWEs are passed
-on in numeric order so the table's primary lookup returns it. When all the
-CWEs are unmapped, the result is passed on and counted as unmapped like any
-other agent's. When the answers differ (two families, or a family and an
-unmapped CWE) the result is dropped as ambiguous and listed in
-`results_cwe_ambiguous`. `results_by_cwe_decision` counts the four outcomes
-(`none`, `unmapped`, `mapped`, `ambiguous`). This rule was fixed from the
-table's own intent, not tuned on task labels. For example `python:S5332`
-(CWE-200 and CWE-319) is ambiguous, because CWE-200 maps to LLM02 and CWE-319
-is unmapped, and `python:S4423` (CWE-295, 326, 327) is unmapped.
+The cwe facet is an unordered set and Sonar names no primary CWE, so the
+agent uses `cwe_map.decide_unordered` (`cwe-map-4`, the same rule as the
+CodeQL agent). Unmapped CWEs are ignored. When the mapped CWEs all fall in one
+family, that family is reported, and the CWEs are passed on with that family's
+CWEs first, so the SARIF ruleId is that family and `task_rule` still sees
+every CWE when it picks HIGH or MEDIUM. When they fall in more than one
+family, the result is dropped as ambiguous and listed in
+`results_cwe_ambiguous`. When no CWE is mapped, the result is counted as
+unmapped and not reported. `results_by_cwe_decision` counts the four outcomes
+(`none`, `unmapped`, `mapped`, `ambiguous`). For example `python:S4423`
+(CWE-295, 326, 327) is unmapped, and `python:S5332` (CWE-200 and CWE-319) is
+`LLM02.SID.HIGH`: CWE-200 gives LLM02, and CWE-319 is a boundary CWE.
+
+An honest note on that example. The rule the agent used before (drop a result
+when any of its CWEs is unmapped) was chosen after `python:S5332`'s CWEs
+{200, 319} were already known, and it happened to drop S5332. `cwe-map-4`
+ignores unmapped CWEs instead, so S5332 is now reported. On the dc4b7a twins
+it fires in shared code, so it is a false positive there and lowers
+precision. The rule is kept because it is the principled one, not because of
+that outcome.
 
 #### No traces
 
@@ -568,27 +653,32 @@ Semgrep, and `keep_project=true` to leave the project on the server so you can
 look at it in the UI.
 
 The metadata records, under `sonarqube`: the host URL, server version, edition,
-quality profile, project key, whether it was deleted (also after a timeout),
-the background task, the token file's path and whether it was removed, and the
-kept findings per `sonarType`. At the top level it records the counts above
-(`rule_cwe_source`, `rules_without_cwe`, `rule_lookup_errors`,
+quality profile (with `activeRuleCount`), project key, whether it was deleted
+(also after a timeout), the background task with its `warnings`, what was
+analysed (`analysis`: files, ncloc, ncloc per language, Python files in
+scope, active Python rules), `files_not_parsed`, the token file's path and
+whether it was removed, and the kept findings per `sonarType`. At the top
+level it records the counts above (`rule_cwe_source`, `rules_without_cwe`,
 `results_by_cwe_decision`, `results_cwe_ambiguous`,
 `issues_not_vulnerability`, `flows_raw`). The raw API responses are in the
 trial artifacts as `sonarqube.json`, next to `sonar-scanner.log`.
 
-The normaliser tests run on responses recorded from a real run (server
-26.9.0.129388 Community, scanner 8.1.0.6389, 2026-10-07), in
-`tests/fixtures/sonarqube_26.9_<task>.json`. Those were written by the older
-fetch.py without the cwe facet, so they hold no CWE and nothing is reported
-from them, which the tests check. A fresh recording with the facet will be
-added after the next real run
-([tests/test_sonarqube_normalise.py](tests/test_sonarqube_normalise.py)).
+The tests replay responses recorded from real runs (server 26.9.0.129388
+Community, scanner 8.1.0.6389), unedited, in
+`tests/fixtures/sonarqube_26.9-f2_<task>.json` (2026-10-08, with the cwe
+facet). The HTTP stub in `tests/test_sonarqube_fetch.py` and the fake sandbox
+in `tests/test_sonarqube_agent.py` serve those responses. The measures answer
+is written in its documented shape, because the recordings predate that
+call, and tests of error paths no recording shows (401, 404, a FAILED task, a
+timeout) say so. The older `sonarqube_26.9_<task>.json` (format 1, no CWE) are
+kept to check that the normaliser refuses them. No recording holds a Security
+Hotspot yet. `smoke_sonar` above is meant to produce one.
 
 ## Development
 
 ```bash
 uv sync
-.venv/bin/python -m pytest          # no Docker or Semgrep needed
+.venv/bin/python -m pytest -rs      # no Docker or Semgrep needed, -rs lists skips
 tools/check_merged_rules.sh         # after changing pins.py; needs Docker
 ```
 

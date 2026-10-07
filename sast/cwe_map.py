@@ -1,4 +1,4 @@
-"""CWE -> task ruleId, version ``cwe-map-3``. Frozen: changing it is a new version.
+"""CWE -> task ruleId, version ``cwe-map-4``. Frozen: changing it is a new version.
 
 The task asks every agent, LLM or scanner, to report only five ruleIds
 (``instruction.md``). A scanner reports CWEs, so each CWE is assigned to one of
@@ -29,10 +29,18 @@ A CWE not listed here (XSS, crypto strength, CSRF, cookies, DoS, missing
 moderation, ...) is outside the five ruleIds and is not reported; the finding is
 still counted in the run's metadata.
 
-A finding is mapped by its rule's **primary** (first-listed) CWE only, so a rule
+When a tool names a **primary** CWE (Semgrep rule metadata, where the rule
+author lists it first), a finding is mapped by that primary CWE only, so a rule
 whose main weakness is out of scope (say XSS) is not reported through a secondary
-CWE. (In the pinned rules no security rule has an unmapped primary and a mapped
-secondary CWE, so this choice changes no finding today.)
+CWE. (In the pinned Semgrep rules no security rule has an unmapped primary and a
+mapped secondary CWE, so this choice changes no finding today.)
+
+When a tool gives its CWEs with no primary (CodeQL's ``external/cwe`` tags, which
+CodeQL lists in numeric order, and SonarQube's ``cwe`` facet, an unordered set),
+:func:`decide_unordered` decides. Unmapped CWEs are ignored. If the mapped CWEs
+all fall in one family, that family is reported. If they fall in more than one,
+the result is dropped as ambiguous and counted. With no mapped CWE the result is
+unmapped and not reported. The answer never depends on the order of the input.
 
 The table was built from the CWE inventory of the pinned rules and these
 definitions, without looking at task labels. It is not tuned after results.
@@ -49,11 +57,22 @@ History:
   Agent 0.3.0 later dropped the trace-sink branch, because Semgrep OSS 1.179.0
   gives no dataflow trace in JSON without a login. The branch never fired on
   real output, so every emitted ruleId is unchanged and the version stays.
+- cwe-map-4 (2026-10-08, before any further run, not tuned on labels): same
+  table and the same Semgrep rule. Adds :func:`decide_unordered` for tools with
+  no primary CWE (CodeQL, SonarQube). Under cwe-map-3 the CodeQL agent mapped by
+  the first tag, which is the lowest number, so ``py/clear-text-logging-sensitive-data``
+  (312, 359, 532) was dropped through the unmapped CWE-312. The SonarQube agent
+  dropped a rule when any of its CWEs was unmapped. That SonarQube rule was
+  chosen after python:S5332's CWEs {200, 319} were known. cwe-map-4 ignores
+  unmapped CWEs, so S5332 now maps to LLM02 (CWE-200) and, with CWE-319 in the
+  set, is reported as LLM02.SID.HIGH. On the dc4b7a twins that is a false
+  positive in shared code, which lowers precision. The rule is kept because it
+  is the principled one, not because of that outcome.
 """
 
 from __future__ import annotations
 
-VERSION = "cwe-map-3"
+VERSION = "cwe-map-4"
 
 SID_HIGH = "LLM02.SID.HIGH"
 SID_MEDIUM = "LLM02.SID.MEDIUM"
@@ -124,6 +143,48 @@ def rule_for(cwes: list[str] | tuple[str, ...]) -> str | None:
         return None
     entry = CWE_MAP.get(cwes[0])
     return entry[0] if entry is not None else None
+
+
+def _cwe_sort_key(cwe: str) -> tuple[int, int, str]:
+    head, _, number = str(cwe).partition("-")
+    if head.upper() == "CWE" and number.isdigit():
+        return (0, int(number), "")
+    return (1, 0, str(cwe))
+
+
+def decide_unordered(cwes) -> tuple[str, str | None, tuple[str, ...]]:
+    """The cwe-map-4 decision for CWEs that come with no primary.
+
+    Returns ``(decision, family, ordered)``:
+
+    - ``decision`` is ``"none"`` (no CWE), ``"unmapped"`` (no CWE is in the
+      table), ``"mapped"`` (every mapped CWE is in one family) or
+      ``"ambiguous"`` (the mapped CWEs are in more than one family).
+    - ``family`` is the table's answer for that family (what :func:`rule_for`
+      gives for one of its CWEs) when ``decision`` is ``"mapped"``, else None.
+    - ``ordered`` holds every distinct CWE: the mapped CWEs of the chosen family
+      first, in numeric order, then the rest in numeric order. So
+      :func:`rule_for` on it gives ``family``, and :func:`task_rule` still sees
+      every CWE when it picks HIGH or MEDIUM.
+
+    Unmapped CWEs are ignored. The result never depends on the input order.
+    A normaliser drops an ``"ambiguous"`` result and counts it.
+    """
+    distinct = tuple(sorted({str(c) for c in (cwes or ())}, key=_cwe_sort_key))
+    if not distinct:
+        return "none", None, distinct
+    families = {}
+    for cwe in distinct:
+        entry = CWE_MAP.get(cwe)
+        if entry is not None:
+            families.setdefault(entry[0], []).append(cwe)
+    if not families:
+        return "unmapped", None, distinct
+    if len(families) > 1:
+        return "ambiguous", None, distinct
+    (family, members), = families.items()
+    rest = tuple(c for c in distinct if c not in members)
+    return "mapped", family, tuple(members) + rest
 
 
 #: CWEs whose definition is data leaving its authorisation or trust boundary.
