@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
-"""Check that no label leaks into what the scanner sees.
+"""Heuristic leak check: look for common ways a label reaches the scanner.
 
     python tools/leak_scan.py <harbor-tasks dir> [--write-qc]
+
+This is a heuristic, not a proof that no label leaks (spec section 5.2). It
+cannot see, for example, a fix-only name that both twins share, or a hint that
+paraphrases the ground truth in fewer than six words.
 
 For every task folder (one holding task.toml or environment/):
 
@@ -9,7 +13,15 @@ For every task folder (one holding task.toml or environment/):
    that would reveal the label (advisory ids, bug-class words, rule ids, CWE ids).
 2. Evaluator-only files (ground truth, repro tests, provenance) must not be
    under environment/.
-3. For twins ``task_<id>_positive`` / ``task_<id>_negative``: the environment/
+3. Ground-truth prose must not appear in environment/. Every string in
+   tests/ground_truth.json with at least six words (rationales, ``why`` notes,
+   summaries, and so on) is cut into six-word shingles after lowercasing and
+   dropping punctuation, and no shingle may occur in a text file under
+   environment/.
+4. environment/Dockerfile may copy only ``repo/`` into the image. ``COPY
+   --from=<stage>`` (files from another image) is allowed. Any other COPY or ADD
+   source, for example ``tests/`` or ``.``, is a problem.
+5. For twins ``task_<id>_positive`` / ``task_<id>_negative``: the environment/
    trees may differ only in files listed in the positive ground truth's
    ``fix_changed_files`` (paths relative to environment/repo), and
    security_manifest.json and fixtures/ must be byte-identical.
@@ -34,6 +46,8 @@ BANNED = ["cve-", "ghsa-", "vulnerab", "exploit", "patch", "fixed", "insecure", 
 BANNED_RE = re.compile("|".join(re.escape(w) for w in BANNED), re.IGNORECASE)
 EVALUATOR_ONLY = [re.compile(p) for p in (r"^ground_truth.*\.json$", r"^repro_test.*\.py$", r"^provenance.*\.json$")]
 TWIN_RE = re.compile(r"^(task_.+)_(positive|negative)$")
+SHINGLE = 6
+WORD_RE = re.compile(r"[a-z0-9_]+")
 
 
 def is_task(d: Path) -> bool:
@@ -66,6 +80,85 @@ def banned_hits(files: dict[str, bytes]) -> list[str]:
 def evaluator_files(files: dict[str, bytes]) -> list[str]:
     return [f"evaluator-only file under environment/: {rel}" for rel in files
             if any(p.match(rel.rsplit("/", 1)[-1]) for p in EVALUATOR_ONLY)]
+
+
+def words(text: str) -> list[str]:
+    return WORD_RE.findall(text.lower())
+
+
+def shingles(tokens: list[str], n: int = SHINGLE) -> set[tuple[str, ...]]:
+    return {tuple(tokens[i:i + n]) for i in range(len(tokens) - n + 1)}
+
+
+def truth_strings(node, path: str = "") -> list[tuple[str, str]]:
+    """(json path, string) for every string in the ground truth."""
+    if isinstance(node, str):
+        return [(path, node)]
+    if isinstance(node, dict):
+        return [x for k, v in node.items() for x in truth_strings(v, f"{path}.{k}" if path else k)]
+    if isinstance(node, list):
+        return [x for i, v in enumerate(node) for x in truth_strings(v, f"{path}[{i}]")]
+    return []
+
+
+def overlap_problems(task: Path, files: dict[str, bytes]) -> list[str]:
+    """Six-word shingles of ground-truth strings that also occur in environment/ files."""
+    gt_file = task / "tests" / "ground_truth.json"
+    if not gt_file.is_file():
+        return []
+    try:
+        truth = json.loads(gt_file.read_text())
+    except ValueError as exc:
+        return [f"cannot read tests/ground_truth.json: {exc}"]
+    wanted: dict[tuple[str, ...], str] = {}
+    for where, text in truth_strings(truth):
+        tokens = words(text)
+        if len(text.split()) < SHINGLE or len(tokens) < SHINGLE:
+            continue
+        for sh in shingles(tokens):
+            wanted.setdefault(sh, where)
+    if not wanted:
+        return []
+    problems, reported = [], set()
+    for rel, data in files.items():
+        if b"\0" in data[:4096]:
+            continue  # binary
+        for sh in shingles(words(data.decode("utf-8", errors="replace"))) & wanted.keys():
+            key = (wanted[sh], rel)
+            if key in reported:
+                continue
+            reported.add(key)
+            problems.append(f"ground-truth text from {wanted[sh]} appears in environment/{rel}: '{' '.join(sh)}'")
+    return sorted(problems)
+
+
+def dockerfile_problems(task: Path) -> list[str]:
+    """COPY or ADD of anything but repo/ (other build stages excepted)."""
+    df = task / "environment" / "Dockerfile"
+    if not df.is_file():
+        return []
+    text = re.sub(r"\\\r?\n", " ", df.read_text(errors="replace"))
+    problems = []
+    for n, line in enumerate(text.splitlines(), 1):
+        parts = line.strip().split()
+        if not parts or parts[0].upper() not in ("COPY", "ADD"):
+            continue
+        args = parts[1:]
+        if any(a.startswith("--from") for a in args):
+            continue
+        args = [a for a in args if not a.startswith("--")]
+        joined = " ".join(args)
+        if joined.startswith("["):
+            try:
+                args = json.loads(joined)
+            except ValueError:
+                problems.append(f"Dockerfile: cannot parse '{line.strip()}'")
+                continue
+        for src in args[:-1]:
+            if src.rstrip("/").removeprefix("./") != "repo":
+                problems.append(f"Dockerfile copies {src} into the image (only repo/ may be copied): "
+                                f"'{line.strip()}'")
+    return problems
 
 
 def twin_problems(pos: Path, neg: Path) -> list[str]:
@@ -106,6 +199,7 @@ def scan(root: Path) -> dict[str, list[str]]:
         if not files:
             problems[t.name].append("no files under environment/")
         problems[t.name] += banned_hits(files) + evaluator_files(files)
+        problems[t.name] += overlap_problems(t, files) + dockerfile_problems(t)
     by_name = {t.name: t for t in tasks}
     for name, t in by_name.items():
         m = TWIN_RE.match(name)
@@ -141,7 +235,8 @@ def main() -> int:
         if args.write_qc:
             write_qc(args.tasks / name, not items)
     failed = sum(1 for v in problems.values() if v)
-    print(f"\n{len(problems) - failed}/{len(problems)} tasks pass")
+    print(f"\nheuristic leak check: {len(problems) - failed}/{len(problems)} tasks pass "
+          f"(a pass is not proof that no label leaks)")
     return 1 if failed else 0
 
 

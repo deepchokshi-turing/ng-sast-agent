@@ -39,11 +39,12 @@ category gets a TPR, an FPR and a score of TPR minus FPR. Our mapping is below.
 | true test case | a positive task, labelled with the rule ids of its findings |
 | false test case | a minimal-contrast negative, labelled with its `contrast_rule_ids` |
 | exact CWE match | `matching.require_cwe` with the finding's `acceptable_cwes` |
-| results outside test case files ignored | `fp_outside_scope`, never a false positive |
+| results outside test case files ignored | `fp_outside_scope`, never a false positive (on a negative, anything away from the fix and the traps) |
 
 The category outcome is TP when a finding of that category is matched and FN
 when none is. On a negative it is FP when a result of the same OWASP risk family
-lands on the changed code and TN otherwise. The risk family (LLM02 or LLM03) is
+fails the negative (near the fixed code or on one of its traps, see below) and
+TN otherwise. The risk family (LLM02 or LLM03) is
 what decides a match, and the subtype a tool picks is scored under
 `classification`. This keeps subtype naming, which tools do not agree on, from
 turning a correct detection into a miss.
@@ -58,9 +59,11 @@ turning a correct detection into a miss.
 
 When true a result matches a finding only if its `properties.cwe` shares a CWE
 with the finding's `acceptable_cwes` plus `primary_cwe`. This applies to the
-primary location and to every alternative location. CWE ids are normalised, so
-"CWE-22", "cwe-22", "22" and 22 agree, and `properties.cwe` may be a list or a
-single string. The default is false, which keeps the v2 rule (risk family and
+primary location and to every alternative location. CWE ids are read as
+`CWE-<n>` anywhere in the value, so "CWE-22", "cwe-22" and "A01:2021 - CWE-22"
+agree. A bare number counts only when it is the whole value ("22" or 22), so the
+digits of an OWASP id are never read as a CWE. `properties.cwe` may be a list
+or a single string. The default is false, which keeps the v2 rule (risk family and
 location only). A result with the right location and the wrong CWE is a false
 positive when it lies inside `fix_changed_files`.
 
@@ -75,13 +78,28 @@ positive when it lies inside `fix_changed_files`.
 "fix_changed_files": ["src/mini/tools/file_tool.py"]
 ```
 
-A negative scores 1.0 unless a result whose rule id starts with one of the
-contrast prefixes (LLM02 or LLM03, taken from `contrast_rule_ids`) lands within
-`line_tolerance` of `fixed_locations` or anywhere inside `fix_changed_files`.
-Such a result needs no CWE agreement to count as a false positive, because on a
-negative any claim of that risk at the changed code is wrong. Results elsewhere,
-and results of a risk family the task does not contrast, are
-`fp_outside_scope`. A negative without `contrast_rule_ids` keeps the old rule.
+A negative scores 1.0 unless one of its results falls in a failure bucket.
+
+- `near_fix` is a result whose rule id starts with one of the contrast prefixes
+  (LLM02 or LLM03, taken from `contrast_rule_ids`) and that lands within
+  `line_tolerance` of `fixed_locations`.
+- `trap` is a result that hits one of the negative's own `hard_negative_trap`
+  entries in `negative_analyses`, meaning its prefix is in the trap's
+  `trap_rule_prefixes` and it lands within `line_tolerance` of the trap lines.
+  A `minimal_contrast` entry is not a trap.
+
+Neither bucket needs CWE agreement, because on a negative any claim of that
+risk at the fixed code or at a labelled trap is wrong. A result in both buckets
+counts once, as `near_fix`. Every other result is `fp_outside_scope`. That
+includes results elsewhere in `fix_changed_files`, which no longer fail a
+negative, so a noisy file the fix happens to touch does not fail the twin. A
+negative without `contrast_rule_ids` keeps the old rule.
+
+`grading_detail.json` has `failure_bucket` (`near_fix`, `trap`,
+`near_fix+trap` or null), `results_near_fixed_code` and `trap_hits` (each hit
+names its traps). `reward.json` has the flat flags `neg.fail.near_fix` and
+`neg.fail.trap` (0 or 1), and `trap_hits` counts the trap results. `fp` counts
+the results in both buckets.
 
 ### Linked findings
 
@@ -93,17 +111,26 @@ still matched and scored on its own.
 ## Task-level outcomes
 
 For client measurement 1 the grader decides, per task, which risk types the
-tool claimed. A result counts when it is in scope, meaning it matched a finding,
-or it lies in `fix_changed_files`, or it is near `fixed_locations` on a negative.
-When a positive task names no fix files every result is in scope, as in v1.
+tool claimed. On a positive only a result that matched a finding counts. On a
+negative only a result that fails the negative (either bucket above) counts.
 Each risk type then gets TP, FP, FN or TN against `risk_types_present`, which
-covers tasks labelled with both risks, one, or neither.
+covers tasks labelled with both risks, one, or neither. Category detection uses
+the same rule.
+
+The older loose rule is kept next to it as `tl.pred_loose.SID` and
+`tl.pred_loose.EA` (and `risk_types_loose` in `grading_detail.json`). There a
+result also counts when it is an unmatched result inside `fix_changed_files`
+(anywhere when a positive names no fix files), or any result near
+`fixed_locations` or inside `fix_changed_files` on a negative. The loose
+variant can credit a risk to a result at the wrong place, so read it only as
+"the tool said something about this risk in the changed files".
 
 Harbor only accepts numbers in `reward.json`, so these outcomes are written
 there as flat 0 or 1 flags, and in full in `grading_detail.json`:
 
 ```json
-"tl.truth.SID": 1, "tl.pred.SID": 1, "tl.truth.EA": 1, "tl.pred.EA": 0,
+"tl.truth.SID": 1, "tl.pred.SID": 1, "tl.pred_loose.SID": 1,
+"tl.truth.EA": 1, "tl.pred.EA": 0, "tl.pred_loose.EA": 1,
 "cat.LLM02.SID.truth": 1, "cat.LLM02.SID.detected": 1,
 "cat.LLM03.EA.FUNCTIONALITY.truth": 1, "cat.LLM03.EA.FUNCTIONALITY.detected": 0
 ```
@@ -113,12 +140,42 @@ there as flat 0 or 1 flags, and in full in `grading_detail.json`:
   "truth_risk_types": ["excessive_agency", "sensitive_information_disclosure"],
   "predicted_risk_types": ["sensitive_information_disclosure"],
   "risk_types": {"sensitive_information_disclosure": "TP", "excessive_agency": "FN"},
-  "categories": {"LLM02.SID": "TP", "LLM03.EA.FUNCTIONALITY": "FN"}
+  "categories": {"LLM02.SID": "TP", "LLM03.EA.FUNCTIONALITY": "FN"},
+  "predicted_risk_types_loose": ["excessive_agency", "sensitive_information_disclosure"],
+  "risk_types_loose": {"sensitive_information_disclosure": "TP", "excessive_agency": "TP"}
 }
 ```
 
 A missing SARIF file adds `"sarif_missing": 1`, and a grader crash adds
 `"grader_error": 1`. The report leaves those trials out of the category tables.
+
+The reader is lenient about two shapes tools emit. `"results": null` in a run
+is read as no results, and a `recommendations` property given as one string is
+read as a one-item list (anything else that is not a list of strings is
+ignored).
+
+## Ground-truth check
+
+```bash
+python3 grade.py --check-truth --truth tests/ground_truth.json
+```
+
+This validates a ground truth instead of grading and exits 1 on any problem.
+Run it on every task at build time. It reports
+
+- missing top-level or per-finding fields, and scoring weights that are not
+  numbers,
+- line ranges that are not integers from 1 up, or that end before they start,
+  in accepted locations, path steps, `fixed_locations` and `negative_analyses`,
+- a finding that has no usable `primary_cwe` or `acceptable_cwes` while
+  `require_cwe` is true, since it could never match,
+- accepted locations (primary or alternative) of two different findings in the
+  same file whose `line_tolerance` windows overlap, when one result could match
+  both (same risk type and, under `require_cwe`, a shared CWE). The grader
+  would always credit such a result to the first finding. `task_781350`'s F1
+  and F2 alternative at `_instrumentation.py:115` and `:107` are an example.
+
+`check_truth(truth)` in `grade.py` returns the same problems as a list.
 
 ## v2 fields (unchanged)
 
@@ -143,20 +200,38 @@ these dataset views. `--write <dir>` also writes `report.json` and `report.md`.
   labelled both, one, or neither.
 - Mean detection, classification, path, controls and recommendations over
   positive tasks.
+- Mean task reward for positives and for negatives, reported apart, and how
+  many negatives failed near the fix or on a trap. There is no mean over both
+  together. An empty SARIF scores 1.0 on every negative, so a combined mean,
+  including the job-level mean Harbor writes to its `result.json`, rewards
+  saying nothing and is not a score.
 
-## Leak scan
+## Heuristic leak check
 
-`tools/leak_scan.py <harbor-tasks dir>` checks every file under each task's
-`environment/` for words that would give the label away, checks that ground
-truth, repro tests and provenance are not under `environment/`, and checks that
-twin pairs differ only in the positive's `fix_changed_files` with identical
-manifest and fixtures. It exits non-zero on any problem. `--write-qc` records
-"pass" or "fail" in `validation/provenance.json` under `qc.label_leak_scan`.
+`tools/leak_scan.py <harbor-tasks dir>` is a heuristic leak check. It catches
+common ways a label reaches the scanner but is not a proof that none does (it
+cannot, for example, see a fix-only name that both twins share). It
+
+- searches every file under each task's `environment/` for words that would
+  give the label away,
+- checks that ground truth, repro tests and provenance are not under
+  `environment/`,
+- looks for ground-truth prose in the repo. Every string in
+  `tests/ground_truth.json` with at least six words (rationales, `why` notes,
+  summaries and so on) is cut into six-word shingles, and none of them may
+  appear in a text file under `environment/` (case and punctuation ignored),
+- checks that `environment/Dockerfile` copies only `repo/` into the image
+  (`COPY --from` of another build stage is allowed),
+- checks that twin pairs differ only in the positive's `fix_changed_files` with
+  identical manifest and fixtures.
+
+It exits non-zero on any problem. `--write-qc` records "pass" or "fail" in
+`validation/provenance.json` under `qc.label_leak_scan`.
 
 ## Examples
 
-`dev/tasks/smoke_eval_twin` is a v2 twin using `fixed_locations`, and
-`dev/tasks/smoke_eval` uses `fix_changed_files`. Semgrep flags an unrelated
+`tests/fixtures/tasks/smoke_eval_twin` is a v2 twin using `fixed_locations`, and
+`tests/fixtures/tasks/smoke_eval` uses `fix_changed_files`. Semgrep flags an unrelated
 `shell=True` helper in both.
 
 | Task | Original grader | Grader v2 and v3 |

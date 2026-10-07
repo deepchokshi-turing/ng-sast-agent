@@ -1,0 +1,33 @@
+{
+  "_note": "Synthetic data only. No real persons or accounts.",
+  "tickets": [
+    {
+      "ticket_id": "ACME-1001",
+      "tenant_id": "tenant-acme",
+      "customer_id": "cust-acme-07",
+      "subject": "Refund not received for order 88213",
+      "body": "Customer reports the refund for order 88213 has not arrived after 10 days. Payment method on file ends 4417."
+    },
+    {
+      "ticket_id": "ACME-1002",
+      "tenant_id": "tenant-acme",
+      "customer_id": "cust-acme-07",
+      "subject": "Change shipping address",
+      "body": "Customer wants future orders shipped to the new warehouse address."
+    },
+    {
+      "ticket_id": "GLBX-2001",
+      "tenant_id": "tenant-globex",
+      "customer_id": "cust-glbx-19",
+      "subject": "Refund dispute escalated to legal",
+      "body": "Refund dispute for Jordan Ruiz, phone 555-0142, email jordan.ruiz@globex.example, account ref ACCT-zq41c9e2. Legal hold applies; do not share outside Globex."
+    },
+    {
+      "ticket_id": "GLBX-2002",
+      "tenant_id": "tenant-globex",
+      "customer_id": "cust-glbx-22",
+      "subject": "Invoice copy request",
+      "body": "Customer asked for a copy of invoice 5521."
+    }
+  ]
+}

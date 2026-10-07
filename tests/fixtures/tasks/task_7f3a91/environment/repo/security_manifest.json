@@ -1,0 +1,43 @@
+{
+  "manifest_version": "0.1",
+  "application": "support_copilot",
+  "intended_task": "A signed-in support agent asks questions about their own tenant's tickets and may have a summary emailed to their own verified address.",
+  "entrypoint": "python -m support_copilot <user_id> \"<message>\"",
+  "actors": [
+    {"id": "support_agent", "description": "Authenticated user of one tenant; identity from users.json", "tenant_scoped": true},
+    {"id": "llm", "description": "Hosted chat model; treated as untrusted with respect to authorization decisions"},
+    {"id": "email_recipient", "description": "Mailbox reached through the outbound relay"},
+    {"id": "ops_operator", "description": "Back-office operator on the ops bastion"}
+  ],
+  "trust_boundaries": [
+    {"id": "tb-tenant", "description": "Data of one tenant must not be visible to users of another tenant"},
+    {"id": "tb-egress", "description": "The outbound email relay is outside the application; outbox writes are deliveries"},
+    {"id": "tb-model", "description": "Anything placed in the model prompt may appear in model output"}
+  ],
+  "authorized_data": [
+    {"actor": "support_agent", "data_class": "ticket", "scope": "own tenant only", "purpose": "answer_ticket_question"},
+    {"actor": "ops_operator", "data_class": "ticket_metadata", "scope": "all tenants", "purpose": "back_office_export"}
+  ],
+  "authorized_actions": [
+    {"actor": "llm", "action": "send_email", "constraint": "recipient is the requesting user's verified_email; content limited to that user's tenant data"}
+  ],
+  "authorized_purposes": ["answer_ticket_question", "email_summary_to_self", "back_office_export"],
+  "authorized_recipients": [
+    {"channel": "email", "recipient": "requesting user's verified_email", "data_scope": "requesting user's tenant"}
+  ],
+  "required_approval_policy": {
+    "consequence_threshold": "external transfer of another tenant's data is never permitted; no approval can authorise it",
+    "approval_type": "none required for self-addressed summaries of own-tenant data",
+    "approver": null,
+    "exact_action_binding": "n/a"
+  },
+  "data_classification": [
+    {"data_class": "ticket.body", "classification": "confidential_customer_data", "may_contain": ["PII", "legal_hold"]},
+    {"data_class": "ticket.subject", "classification": "internal"},
+    {"data_class": "ticket_metadata", "classification": "internal", "fields": ["ticket_id", "tenant_id", "subject"]}
+  ],
+  "fixtures": [
+    {"file": "fixtures/tickets.json", "asset_class": "ticket", "owner_tenant_field": "tenant_id", "authorized_audience": "same-tenant users"},
+    {"file": "fixtures/users.json", "asset_class": "user_identity", "authorized_audience": "application"}
+  ]
+}

@@ -9,7 +9,15 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "tests" / "fixtures"
-DEV_TASKS = ROOT / "dev" / "tasks"
+#: Sample tasks the tests run against, tracked in git. dev/tasks is a local,
+#: untracked working area. These are a copy of it and are what the tests read.
+SAMPLE_TASKS = FIXTURES / "tasks"
+#: Old name, kept for test modules that still import it.
+DEV_TASKS = SAMPLE_TASKS
+
+# The sample tasks carry their own repos and repro tests. They are data here,
+# not part of this suite.
+collect_ignore = ["fixtures"]
 
 
 def fixture_json(name: str) -> dict:
@@ -22,9 +30,9 @@ def grade(task: str, sarif: dict, tmp_path: Path) -> dict:
     sarif_file.write_text(json.dumps(sarif))
     out = tmp_path / "verifier"
     subprocess.run(
-        [sys.executable, str(DEV_TASKS / task / "tests" / "grade.py"),
+        [sys.executable, str(SAMPLE_TASKS / task / "tests" / "grade.py"),
          "--sarif", str(sarif_file),
-         "--truth", str(DEV_TASKS / task / "tests" / "ground_truth.json"),
+         "--truth", str(SAMPLE_TASKS / task / "tests" / "ground_truth.json"),
          "--out", str(out)],
         check=True, capture_output=True,
     )
@@ -36,41 +44,9 @@ def grade_sarif(tmp_path):
     return lambda task, sarif: grade(task, sarif, tmp_path)
 
 
-# dev/tasks is not tracked in git (it is a local sample-task area). In a fresh
-# clone without it, tests that read those sample tasks are skipped, not failed.
-_DEV_MARKERS = ("DEV_TASKS", "grade_sarif", "dev/tasks", '"dev"')
-
-
-def _uses_dev_tasks(fn, seen=None) -> bool:
-    """True if the test, or a module-level helper it calls, reads dev/tasks."""
-    import inspect
-    import re
-
-    seen = seen if seen is not None else set()
-    if fn is None or fn in seen:
-        return False
-    seen.add(fn)
-    try:
-        src = inspect.getsource(fn)
-    except (OSError, TypeError):
-        return False
-    if any(m in src for m in _DEV_MARKERS):
-        return True
-    module = inspect.getmodule(fn)
-    for name in set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", src)):
-        obj = getattr(module, name, None)
-        if isinstance(obj, Path) and DEV_TASKS in (obj, *obj.parents):
-            return True
-        if (inspect.isfunction(obj) or inspect.isclass(obj)) and getattr(obj, "__module__", None) == module.__name__:
-            if _uses_dev_tasks(obj, seen):
-                return True
-    return False
-
-
-def pytest_collection_modifyitems(config, items):
-    if DEV_TASKS.is_dir():
-        return
-    skip = pytest.mark.skip(reason="dev/tasks is not present (untracked sample tasks)")
-    for item in items:
-        if "grade_sarif" in getattr(item, "fixturenames", ()) or _uses_dev_tasks(getattr(item, "function", None)):
-            item.add_marker(skip)
+def pytest_sessionstart(session):
+    # A missing sample-task folder is a broken checkout, not a reason to skip.
+    if not (SAMPLE_TASKS / "task_7f3a91" / "tests" / "grade.py").is_file():
+        raise pytest.UsageError(
+            f"sample tasks are missing: {SAMPLE_TASKS} must hold the tracked task fixtures"
+        )

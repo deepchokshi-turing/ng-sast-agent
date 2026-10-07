@@ -56,7 +56,8 @@ sast-agents/
 │       ├── pins.py          semgrep version, uv version + sha256, rules commit + content hash
 │       └── normalise.py     Semgrep JSON -> normalised findings
 ├── tests/                   pytest; stdlib + harbor only; recorded Semgrep JSON fixtures
-├── dev/tasks/               test-only tasks (never part of the dataset)
+│   └── fixtures/tasks/      test-only sample tasks, tracked (never part of the dataset)
+├── dev/tasks/               untracked local copy of the sample tasks, for harbor runs
 │   ├── task_7f3a91/         the reference task, unchanged
 │   ├── smoke_eval/          tiny repo, one eval() on model output -> expect tp=1
 │   └── smoke_empty/         tiny clean repo -> expect empty SARIF, reward 1.0
@@ -168,7 +169,9 @@ test imports every module in a venv that has only `harbor==0.23.0`.
 - **No `codeFlows`** **[RT: the free version gives no trace, and a made-up one-step
   flow at the match earns path credit the tool didn't earn (0.400 → 0.475 in a test).
   The path sub-score is 0 by design]**.
-- No `controlStatus`, `residualRisk` or `recommendations`; those are scored 0 by design.
+- No top-level `controlStatus`, `residualRisk` or `recommendations`. Those are
+  scored 0 by design. Since v0.3.0 the heuristic values sit under
+  `properties.heuristics`, which the grader does not read (section 11).
 - Zero results produce a valid SARIF with `results: []`.
 
 ### 3.4 Failure policy
@@ -344,25 +347,41 @@ From Haseeb's review, checked one by one. The README is the current reference.
   with `fp == 0`.
 - **Not reproduced:** an exclude with a slash under a subfolder root
   (`--exclude src/vendor` with root `src`) worked on 1.179.0.
-  `dev/tasks/smoke_eval` now carries that case as a regression check.
+  The `smoke_eval` sample task now carries that case as a regression check.
 - **Not agent issues:** grader and ground-truth design (twin scoring, region
   width, sink alternatives, trap windows) belong to the task format.
 
 ## 11. Client-spec coverage (2026-10-07, v0.3.0, cwe-map-3)
 
-Measurements 2 to 4 of the client spec scored 0 by design until now. The README
-is the reference. In short:
+Measurements 2 to 4 of the client spec (path, controls, recommendations) score
+0 for this agent by design. The README is the reference. In short:
 
-- The scan runs with `--dataflow-traces`. A taint trace becomes the codeFlow
-  (`source`, then the match as `sink`). Without one, the match alone is the
-  `sink`. Intermediate variables are not emitted (no honest role). This reverses
-  the section 3.3 decision on one-step flows at the client's request. The
-  README states that their path credit comes from line tolerance.
-- LLM02 is MEDIUM unless a boundary CWE (201, 918, 319, 532, 359) or a trace
-  sink that is a network, email, file-write or logging call makes it HIGH.
-- `controlStatus` (`none`), `residualRisk` (rule severity/impact) and
-  `recommendations` (fixed table by ruleId and CWE) are documented heuristics
-  in `sast/heuristics.py`.
-- The traces are tested against a crafted fixture in Semgrep's documented JSON
-  shape (`tests/fixtures/crafted_semgrep_dataflow_trace.json`). A real run with
-  traces has not been recorded yet.
+- **No dataflow trace without login.** Semgrep OSS 1.179.0 gives no JSON trace
+  without a login. Tested on 2026-10-07 with an explicit taint rule (model
+  output to `os.system`) under `--dataflow-traces`: the JSON had no
+  `dataflow_trace` and `extra.lines` read "requires login", the SARIF had no
+  `codeFlows`, and only the plain-text output printed the trace. So the agent
+  does not pass `--dataflow-traces`, reads no trace, and emits no `codeFlows`.
+  The path sub-score is 0 by design, as section 3.3 decided.
+- **An earlier draft of v0.3.0 went further, and that was reverted after the
+  audit.** It emitted a one-step codeFlow at the match when there was no trace,
+  parsed a JSON trace that Semgrep never produced (tested only against a crafted
+  fixture, now removed), and wrote fixed `controlStatus`, `residualRisk` and
+  `recommendations` into the scored fields. Those constants matched the
+  dataset's most common labels and raised one task's reward from 0.225 to
+  0.4375 with nothing the tool found.
+- **Heuristics are reported separately.** `controlStatus` (`none`),
+  `residualRisk` (rule severity and impact) and `recommendations` (fixed table
+  by ruleId and CWE, `sast/heuristics.py`, `heuristics-1`) go under
+  `properties.heuristics` with the table version. The grader reads only the
+  top-level fields, so the controls and recommendations sub-scores stay 0.
+  Anyone who wants a heuristic track can score those values on their own, never
+  mixed into the tool's reward.
+- LLM02 is MEDIUM unless a boundary CWE (201, 918, 319, 532, 359) makes it
+  HIGH. The trace-sink branch went with the trace path. It never fired on real
+  output, so `cwe-map-3` is unchanged in what it emits.
+- The sample tasks the tests need are tracked in `tests/fixtures/tasks/`.
+  `dev/tasks/` stays untracked, and a missing fixtures folder fails the test
+  run instead of skipping tests. `tools/build_tools_image.sh` tags `sast-tools`
+  with the version in `pyproject.toml`, and the sample task Dockerfiles pin
+  `sast-tools:0.3.0`.

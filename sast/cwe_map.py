@@ -13,9 +13,8 @@ them **by what the CWE means**, using the scope definitions in the instruction:
   The table names the LLM02 *family* (written as ``SID_HIGH``); the emitted
   severity is chosen by :func:`task_rule` (cwe-map-3): ``LLM02.SID.HIGH`` when
   any of the finding's CWEs is in :data:`BOUNDARY_CWES` (201, 918, 319, 532,
-  359: weaknesses defined by data leaving its boundary) or when its dataflow
-  trace ends in a network, email, file-write or logging call
-  (``sast.heuristics.boundary_sink_kind``); otherwise ``LLM02.SID.MEDIUM``.
+  359: weaknesses defined by data leaving its boundary); otherwise
+  ``LLM02.SID.MEDIUM``.
   918 and 319 never put a finding into LLM02 on their own (918 is
   FUNCTIONALITY, 319 is unmapped); as a secondary CWE they still raise it.
 - ``LLM03.EA.FUNCTIONALITY``: the weakness lets a tool or code path do more than
@@ -47,6 +46,9 @@ History:
 - cwe-map-3 (2026-10-07, before any dataset run): same table; LLM02 results are
   now MEDIUM unless a boundary CWE or a boundary-crossing trace sink makes them
   HIGH (:func:`task_rule`). Before, every LLM02 result was HIGH.
+  Agent 0.3.0 later dropped the trace-sink branch, because Semgrep OSS 1.179.0
+  gives no dataflow trace in JSON without a login. The branch never fired on
+  real output, so every emitted ruleId is unchanged and the version stays.
 """
 
 from __future__ import annotations
@@ -128,17 +130,16 @@ def rule_for(cwes: list[str] | tuple[str, ...]) -> str | None:
 BOUNDARY_CWES = frozenset({"CWE-201", "CWE-918", "CWE-319", "CWE-532", "CWE-359"})
 
 
-def task_rule(cwes: list[str] | tuple[str, ...], *, boundary_sink: bool = False) -> str | None:
+def task_rule(cwes: list[str] | tuple[str, ...]) -> str | None:
     """The ruleId a result is emitted under.
 
     :func:`rule_for` picks the family from the primary CWE. An LLM02 result is
-    ``LLM02.SID.HIGH`` when any CWE is in :data:`BOUNDARY_CWES` or the tool's
-    dataflow trace ends in a boundary-crossing call (``boundary_sink``), and
+    ``LLM02.SID.HIGH`` when any CWE is in :data:`BOUNDARY_CWES` and
     ``LLM02.SID.MEDIUM`` otherwise. Other families are unchanged.
     """
     rule = rule_for(cwes)
     if rule != SID_HIGH:
         return rule
-    if boundary_sink or BOUNDARY_CWES.intersection(cwes):
+    if BOUNDARY_CWES.intersection(cwes):
         return SID_HIGH
     return SID_MEDIUM

@@ -10,12 +10,19 @@
 # CPU of the machine that runs Harbor. It only helps local runs: Daytona pulls
 # images from a registry.
 #
-# The tag is sast.__version__, so a task image always copies tools that match
-# the agent version that will check them.
+# The tag is the agent version from pyproject.toml (it must equal
+# sast.__version__), so a task image always copies tools that match the agent
+# version that will check them. Task Dockerfiles pin the same tag, for example
+# ARG SAST_TOOLS_IMAGE=sast-tools:0.3.0.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-VERSION="$(PYTHONPATH="$ROOT" python3 -c 'import sast; print(sast.__version__)')"
+VERSION="$(python3 -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["project"]["version"])' "$ROOT/pyproject.toml")"
+PKG_VERSION="$(PYTHONPATH="$ROOT" python3 -c 'import sast; print(sast.__version__)')"
+if [[ "$VERSION" != "$PKG_VERSION" ]]; then
+  echo "pyproject.toml says $VERSION but sast.__version__ is $PKG_VERSION: make them equal first" >&2
+  exit 1
+fi
 CONTEXT="$(mktemp -d)"
 trap 'rm -rf "$CONTEXT"' EXIT
 

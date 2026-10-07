@@ -1,5 +1,7 @@
-"""task_format/grade.py (grader v3): require_cwe, minimal-contrast negatives,
-task-level and category outcomes, linked findings, Harbor-safe reward.json."""
+"""task_format/grade.py (grader v3): require_cwe, minimal-contrast negatives
+(near-fix rule plus trap hits), task-level and category outcomes (matched-only
+and loose), linked findings, Harbor-safe reward.json, robustness of the SARIF
+reader, and the --check-truth schema check."""
 
 from __future__ import annotations
 
@@ -70,16 +72,22 @@ def positive(require_cwe=True):
                     {"linked_finding_ids": ["F2"], "link_relation": "ea_exposes_sid"}),
             finding("F2", "LLM02.SID.HIGH", "sensitive_information_disclosure", 60, ["CWE-200"], "CWE-201"),
         ],
-        "negative_analyses": [], "scoring_weights": WEIGHTS,
+        "negative_analyses": [], "scoring_weights": dict(WEIGHTS),
         "fix_changed_files": [TOOL],
     }
+
+
+TRAP = {"id": "N2", "kind": "hard_negative_trap", "file": TOOL, "start_line": 300, "end_line": 310,
+        "trap_rule_prefixes": ["LLM03"], "why_not_a_finding": "operator-only path"}
+CONTRAST = {"id": "N1", "kind": "minimal_contrast", "contrast_of": "F1", "file": TOOL, "start_line": 20,
+            "end_line": 24, "rationale": "path kept inside base"}
 
 
 def negative():
     return {
         "schema_version": "gt-0.1", "variant_role": "negative", "risk_types_present": [],
         "matching": {"line_tolerance": 10, "path_line_tolerance": 10, "require_cwe": True},
-        "findings": [], "negative_analyses": [], "scoring_weights": WEIGHTS,
+        "findings": [], "negative_analyses": [dict(CONTRAST), dict(TRAP)], "scoring_weights": dict(WEIGHTS),
         "contrast_rule_ids": ["LLM03.EA.FUNCTIONALITY", "LLM02.SID.HIGH"],
         "fixed_locations": [{"file": TOOL, "start_line": 20, "end_line": 24, "why": "path kept inside base"}],
         "fix_changed_files": [TOOL],
@@ -122,30 +130,64 @@ def test_without_require_cwe_the_location_is_enough(tmp_path):
 
 # ---- negatives ------------------------------------------------------------------------
 
-@pytest.mark.parametrize("doc, reward, fp, outside", [
-    (sarif(), 1.0, 0, 0),
-    (sarif(result("LLM03.EA.AUTONOMY", TOOL, 22, ["CWE-79"])), 0.0, 1, 0),   # no CWE agreement needed
-    (sarif(result("LLM02.SID.MEDIUM", TOOL, 200)), 0.0, 1, 0),               # inside a fix file, far away
-    (sarif(result("LLM03.EA.FUNCTIONALITY", APP, 5)), 1.0, 0, 1),            # elsewhere
-    (sarif(result("OTHER.X", TOOL, 21)), 1.0, 0, 1),                         # not a contrast prefix
+@pytest.mark.parametrize("doc, reward, fp, outside, bucket", [
+    (sarif(), 1.0, 0, 0, None),
+    (sarif(result("LLM03.EA.AUTONOMY", TOOL, 22, ["CWE-79"])), 0.0, 1, 0, "near_fix"),  # no CWE agreement needed
+    (sarif(result("LLM02.SID.MEDIUM", TOOL, 200)), 1.0, 0, 1, None),     # in a fix file but far from the fix
+    (sarif(result("LLM03.EA.FUNCTIONALITY", APP, 5)), 1.0, 0, 1, None),  # elsewhere
+    (sarif(result("OTHER.X", TOOL, 21)), 1.0, 0, 1, None),               # not a contrast prefix
+    (sarif(result("LLM03.EA.AUTONOMY", TOOL, 305)), 0.0, 1, 0, "trap"),  # the negative's own trap
+    (sarif(result("LLM03.EA.AUTONOMY", TOOL, 318)), 0.0, 1, 0, "trap"),  # within tolerance of the trap
+    (sarif(result("LLM02.SID.HIGH", TOOL, 305)), 1.0, 0, 1, None),       # trap is for LLM03 only
+    (sarif(result("LLM03.EA.AUTONOMY", TOOL, 21), result("LLM03.EA.AUTONOMY", TOOL, 302)), 0.0, 2, 0,
+     "near_fix+trap"),
 ])
-def test_negative_fails_only_on_contrast_results_in_scope(tmp_path, doc, reward, fp, outside):
-    score, _ = run(doc, negative(), tmp_path)
+def test_negative_fails_near_the_fix_or_on_a_trap(tmp_path, doc, reward, fp, outside, bucket):
+    score, detail = run(doc, negative(), tmp_path)
     assert (score["reward"], score["fp"], score["fp_outside_scope"]) == (reward, fp, outside)
+    assert detail["failure_bucket"] == bucket
+    assert score["neg.fail.near_fix"] == int("near_fix" in (bucket or ""))
+    assert score["neg.fail.trap"] == int("trap" in (bucket or ""))
+    assert score["trap_hits"] == len(detail["trap_hits"])
+
+
+def test_trap_hit_detail_names_the_trap(tmp_path):
+    score, detail = run(sarif(result("LLM03.EA.AUTONOMY", TOOL, 305)), negative(), tmp_path)
+    assert [h["traps"] for h in detail["trap_hits"]] == [["N2"]]
+    assert detail["results_near_fixed_code"] == []
+    assert detail["task_level"]["risk_types"]["excessive_agency"] == "FP"
+    assert detail["task_level"]["categories"] == {"LLM02.SID": "TN", "LLM03.EA.FUNCTIONALITY": "FP"}
+
+
+def test_minimal_contrast_entry_is_not_a_trap(tmp_path):
+    t = negative()
+    t["fixed_locations"] = [{"file": TOOL, "start_line": 500, "end_line": 500, "why": "moved"}]
+    score, _ = run(sarif(result("LLM03.EA.AUTONOMY", TOOL, 21)), t, tmp_path)  # on N1 (minimal_contrast) only
+    assert score["reward"] == 1.0 and score["fp_outside_scope"] == 1
 
 
 def test_negative_ignores_other_risk_family(tmp_path):
     score, detail = run(sarif(result("LLM02.SID.HIGH", TOOL, 21)), ea_only_negative(), tmp_path)
     assert score["reward"] == 1.0 and score["fp_outside_scope"] == 1
-    # but the task-level view still records that the tool claimed SID in scope
-    assert detail["task_level"]["risk_types"]["sensitive_information_disclosure"] == "FP"
-    assert detail["task_level"]["categories"] == {"LLM03.EA.FUNCTIONALITY": "TN"}
+    tl = detail["task_level"]
+    # The result does not fail the negative, so it predicts nothing. The loose view still records it.
+    assert tl["risk_types"]["sensitive_information_disclosure"] == "TN"
+    assert tl["risk_types_loose"]["sensitive_information_disclosure"] == "FP"
+    assert (score["tl.pred.SID"], score["tl.pred_loose.SID"]) == (0, 1)
+    assert tl["categories"] == {"LLM03.EA.FUNCTIONALITY": "TN"}
+
+
+def test_negative_noise_in_fix_file_counts_only_in_the_loose_view(tmp_path):
+    score, detail = run(sarif(result("LLM03.EA.FUNCTIONALITY", TOOL, 200)), negative(), tmp_path)
+    assert score["reward"] == 1.0
+    assert (score["tl.pred.EA"], score["tl.pred_loose.EA"]) == (0, 1)
+    assert detail["task_level"]["categories"]["LLM03.EA.FUNCTIONALITY"] == "TN"
 
 
 def test_positive_oracle_on_negative_truth_scores_zero(tmp_path):
-    doc = sarif(result("LLM03.EA.FUNCTIONALITY", TOOL, 20, ["CWE-22"]), result("LLM02.SID.HIGH", TOOL, 60, ["CWE-200"]))
+    doc = sarif(result("LLM03.EA.FUNCTIONALITY", TOOL, 20, ["CWE-22"]), result("LLM02.SID.HIGH", TOOL, 24, ["CWE-200"]))
     score, detail = run(doc, negative(), tmp_path)
-    assert score["reward"] == 0.0
+    assert score["reward"] == 0.0 and detail["failure_bucket"] == "near_fix"
     assert detail["task_level"]["categories"] == {"LLM02.SID": "FP", "LLM03.EA.FUNCTIONALITY": "FP"}
 
 
@@ -177,18 +219,27 @@ def test_task_level_one_of_two_and_out_of_scope_ignored(tmp_path):
     assert (score["cat.LLM02.SID.truth"], score["cat.LLM02.SID.detected"]) == (1, 0)
 
 
-def test_task_level_in_scope_false_positive_predicts_the_risk(tmp_path):
-    # A wrong-CWE SID result inside the fix file: no match, but the tool did claim SID there.
+def test_task_level_counts_only_matched_results(tmp_path):
+    # A wrong-CWE SID result inside the fix file: no match, so no SID prediction.
+    # The loose view (pre-audit rule) still counts it.
     doc = sarif(result("LLM02.SID.HIGH", TOOL, 60, ["CWE-79"]))
-    _, detail = run(doc, positive(), tmp_path)
+    score, detail = run(doc, positive(), tmp_path)
     tl = detail["task_level"]
-    assert tl["risk_types"]["sensitive_information_disclosure"] == "TP"
+    assert tl["risk_types"]["sensitive_information_disclosure"] == "FN"
+    assert tl["risk_types_loose"]["sensitive_information_disclosure"] == "TP"
+    assert (score["tl.pred.SID"], score["tl.pred_loose.SID"]) == (0, 1)
     assert tl["categories"]["LLM02.SID"] == "FN"
 
 
+def test_matched_and_loose_agree_when_everything_matches(tmp_path):
+    doc = sarif(result("LLM03.EA.FUNCTIONALITY", TOOL, 20, ["CWE-22"]))
+    score, _ = run(doc, positive(), tmp_path)
+    assert (score["tl.pred.EA"], score["tl.pred_loose.EA"], score["tl.pred.SID"], score["tl.pred_loose.SID"]) == (1, 1, 0, 0)
+
+
 def test_v2_ground_truth_gets_task_level_too(tmp_path):
-    from tests.conftest import DEV_TASKS
-    truth = json.loads((DEV_TASKS / "task_7f3a91" / "tests" / "ground_truth.json").read_text())
+    from tests.conftest import SAMPLE_TASKS
+    truth = json.loads((SAMPLE_TASKS / "task_7f3a91" / "tests" / "ground_truth.json").read_text())
     _, detail = run(sarif(), truth, tmp_path)
     assert detail["task_level"]["categories"] == {"LLM02.SID": "FN"}
     assert detail["task_level"]["risk_types"]["excessive_agency"] == "TN"
@@ -224,3 +275,123 @@ def test_oracle_style_sarif_scores_full_marks(tmp_path):
     score, _ = run(sarif(oracle("LLM03.EA.FUNCTIONALITY", 20, "CWE-22"), oracle("LLM02.SID.HIGH", 60, "CWE-201")),
                    positive(), tmp_path)
     assert score["reward"] == 1.0
+
+
+def test_twin_and_missing_sarif_have_loose_flags(tmp_path):
+    score, _ = run(None, negative(), tmp_path)
+    assert (score["tl.pred_loose.SID"], score["neg.fail.near_fix"], score["neg.fail.trap"]) == (0, 0, 0)
+
+
+# ---- robustness (audit G2) ---------------------------------------------------------------
+
+def _grade_module():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("grade_v3_under_test", GRADER)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@pytest.mark.parametrize("value, expected", [
+    ("CWE-749", "CWE-749"), ("cwe-22", "CWE-22"), ("A01:2021 - CWE-749", "CWE-749"), ("22", "CWE-22"),
+    (" 22 ", "CWE-22"), (22, "CWE-22"), ("A01:2021", None), ("OWASP 2021", None), ("", None), (None, None),
+    (True, None), ("CWE-022", "CWE-22"),
+])
+def test_norm_cwe(value, expected):
+    assert _grade_module().norm_cwe(value) == expected
+
+
+def test_owasp_prefixed_cwe_matches(tmp_path):
+    score, _ = run(sarif(result("LLM03.EA.FUNCTIONALITY", TOOL, 21, "A01:2021 - CWE-22")), positive(), tmp_path)
+    assert score["tp"] == 1
+    score, _ = run(sarif(result("LLM03.EA.FUNCTIONALITY", TOOL, 21, "A01:2021 - CWE-1")), positive(), tmp_path / "b")
+    assert score["tp"] == 0
+
+
+@pytest.mark.parametrize("truth, reward", [(positive(), 0.0), (negative(), 1.0)])
+def test_null_results_are_empty(tmp_path, truth, reward):
+    doc = {"version": "2.1.0", "runs": [{"tool": {"driver": {"name": "t"}}, "results": None}]}
+    score, detail = run(doc, truth, tmp_path)
+    assert "grader_error" not in score and "error" not in detail
+    assert score["reward"] == reward
+
+
+def test_recommendations_as_string_is_one_item(tmp_path):
+    def doc(recs):
+        r = result("LLM03.EA.FUNCTIONALITY", TOOL, 20, ["CWE-22"], recommendations=recs)
+        return sarif(r)
+    as_str, _ = run(doc("REC-A"), positive(), tmp_path / "s")
+    as_list, _ = run(doc(["REC-A"]), positive(), tmp_path / "l")
+    assert as_str["recommendations"] == as_list["recommendations"] == 0.5  # 1.0 for F1, F2 missed
+    junk, _ = run(doc({"x": 1}), positive(), tmp_path / "j")
+    assert junk["recommendations"] == 0.0 and "grader_error" not in junk
+
+
+# ---- ground-truth schema check (audit G2 and T8) ------------------------------------------
+
+def check(truth: dict, tmp_path: Path) -> subprocess.CompletedProcess:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "truth.json").write_text(json.dumps(truth))
+    return subprocess.run([sys.executable, str(GRADER), "--check-truth", "--truth", str(tmp_path / "truth.json")],
+                          capture_output=True, text=True)
+
+
+@pytest.mark.parametrize("truth", [positive(), positive(False), negative(), ea_only_negative()])
+def test_check_truth_accepts_good_ground_truth(tmp_path, truth):
+    proc = check(truth, tmp_path)
+    assert proc.returncode == 0, proc.stdout
+    assert _grade_module().check_truth(truth) == []
+
+
+def _mutated(fn):
+    t = positive()
+    fn(t)
+    return t
+
+
+@pytest.mark.parametrize("truth, message", [
+    (_mutated(lambda t: [t["findings"][0].pop(k) for k in ("primary_cwe", "acceptable_cwes")]),
+     "require_cwe is true but primary_cwe and acceptable_cwes give no CWE"),
+    (_mutated(lambda t: t["findings"][0].update(primary_cwe="A01:2021", acceptable_cwes=[])), "give no CWE"),
+    (_mutated(lambda t: t["findings"][1].pop("path")), "F2: missing path"),
+    (_mutated(lambda t: t["findings"][1].pop("risk_type")), "F2: missing risk_type"),
+    (_mutated(lambda t: t["findings"][0]["primary_location"].update(start_line=30, end_line=25)), "end_line 25"),
+    (_mutated(lambda t: t["findings"][0]["primary_location"].update(start_line=0)), "start_line must be"),
+    (_mutated(lambda t: t["findings"][0]["path"][0].update(start_line="7")), "path[0]: start_line"),
+    (_mutated(lambda t: t.pop("matching")), "missing matching"),
+    (_mutated(lambda t: t["scoring_weights"].pop("path")), "scoring_weights.path"),
+    (_mutated(lambda t: t["findings"][1].update(id="F1")), "duplicate finding id"),
+])
+def test_check_truth_reports_problems(tmp_path, truth, message):
+    proc = check(truth, tmp_path)
+    assert proc.returncode == 1 and message in proc.stdout, proc.stdout
+
+
+def _overlapping(gap, same_cwe=True, same_risk=True):
+    t = positive()
+    f2 = t["findings"][1]
+    if same_risk:
+        f2.update(risk_type="excessive_agency", rule_id="LLM03.EA.FUNCTIONALITY",
+                  acceptable_rule_ids=["LLM03.EA.FUNCTIONALITY"])
+    f2["acceptable_cwes"] = ["CWE-22"] if same_cwe else ["CWE-200"]
+    f2["primary_cwe"] = f2["acceptable_cwes"][0]
+    f2["alternative_primary_locations"] = [{"file": TOOL, "start_line": 20 + gap, "end_line": 20 + gap, "why": "x"}]
+    return t
+
+
+@pytest.mark.parametrize("truth, overlap", [
+    (_overlapping(8), True),            # the task_781350 case: 8 lines apart, tolerance 10
+    (_overlapping(20), True),           # windows of +-10 still touch
+    (_overlapping(21), False),
+    (_overlapping(8, same_cwe=False), False),   # require_cwe keeps them apart
+    (_overlapping(8, same_risk=False), False),  # different risk family never competes
+])
+def test_check_truth_flags_overlapping_accepted_locations(tmp_path, truth, overlap):
+    proc = check(truth, tmp_path)
+    assert ("overlapping accepted locations" in proc.stdout) is overlap, proc.stdout
+    assert proc.returncode == int(overlap)
+
+
+def test_check_truth_does_not_grade(tmp_path):
+    proc = check(positive(), tmp_path)
+    assert not (tmp_path / "out").exists() and "ok" in proc.stdout
