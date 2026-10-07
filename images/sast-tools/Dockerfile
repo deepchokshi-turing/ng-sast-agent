@@ -5,16 +5,56 @@
 #   FROM <the task's base image>
 #   COPY --from=sast-tools /opt/sast /opt/sast
 #
-# /opt/sast carries its own CPython (uv-managed), so it works on any task base
-# image with glibc >= 2.34 (Debian 12+, Ubuntu 22.04+). The agent finds the
-# install, checks it against its pins, and skips the download; on an image
-# without it, the agent installs as before.
+# /opt/sast holds three tools:
+#   Semgrep        venv, rules and merged rules, with its own CPython (uv-managed),
+#                  so it works on any task base image with glibc >= 2.34.
+#   CodeQL         /opt/sast/codeql, the full CodeQL bundle (CLI plus query packs),
+#                  unpacked as a real folder: codeql-bundle-linux64 on amd64 and
+#                  codeql-bundle-linux-arm64 on arm64, each pinned by sha256.
+#   sonar-scanner  /opt/sast/sonar-scanner, the CLI with its bundled JRE.
 #
-# Built by tools/build_tools_image.sh, which stages install.py, merge_rules.py
-# and pins.json from sast/semgrep/.
-FROM python:3.11-slim AS build
+# Every download is checked against the sha256 pinned in sast/<tool>/pins.py.
+# tools/build_tools_image.sh stages this Dockerfile, the Semgrep installer files
+# and fetch_archive.py, and passes the pins as build arguments.
+FROM python:3.11-slim AS semgrep
 COPY install.py merge_rules.py pins.json /opt/sast/
 RUN python3 /opt/sast/install.py /opt/sast/pins.json | tail -1
 
+FROM python:3.11-slim AS codeql
+ARG TARGETARCH
+ARG CODEQL_URL_AMD64
+ARG CODEQL_SHA256_AMD64
+ARG CODEQL_URL_ARM64
+ARG CODEQL_SHA256_ARM64
+COPY fetch_archive.py /tmp/fetch_archive.py
+RUN set -e; \
+    case "$TARGETARCH" in \
+      amd64) url="$CODEQL_URL_AMD64"; sha="$CODEQL_SHA256_AMD64" ;; \
+      arm64) url="$CODEQL_URL_ARM64"; sha="$CODEQL_SHA256_ARM64" ;; \
+      *) echo "no CodeQL bundle pinned for linux/$TARGETARCH"; exit 2 ;; \
+    esac; \
+    mkdir -p /opt/sast; \
+    python3 /tmp/fetch_archive.py "$url" "$sha" /opt/sast/codeql --strip-top; \
+    /opt/sast/codeql/codeql version --format=terse
+
+FROM python:3.11-slim AS sonar
+ARG TARGETARCH
+ARG SONAR_SCANNER_VERSION
+ARG SONAR_SCANNER_SHA256_AMD64
+ARG SONAR_SCANNER_SHA256_ARM64
+COPY fetch_archive.py /tmp/fetch_archive.py
+RUN set -e; \
+    case "$TARGETARCH" in \
+      amd64) arch=x64; sha="$SONAR_SCANNER_SHA256_AMD64" ;; \
+      arm64) arch=aarch64; sha="$SONAR_SCANNER_SHA256_ARM64" ;; \
+      *) echo "unsupported arch $TARGETARCH"; exit 2 ;; \
+    esac; \
+    python3 /tmp/fetch_archive.py \
+      "https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-${SONAR_SCANNER_VERSION}-linux-${arch}.zip" \
+      "$sha" /opt/sast/sonar-scanner --strip-top; \
+    /opt/sast/sonar-scanner/bin/sonar-scanner -v
+
 FROM scratch
-COPY --from=build /opt/sast /opt/sast
+COPY --from=semgrep /opt/sast /opt/sast
+COPY --from=codeql /opt/sast /opt/sast
+COPY --from=sonar /opt/sast /opt/sast

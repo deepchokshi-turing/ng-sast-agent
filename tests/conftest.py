@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -18,6 +19,29 @@ DEV_TASKS = SAMPLE_TASKS
 # The sample tasks carry their own repos and repro tests. They are data here,
 # not part of this suite.
 collect_ignore = ["fixtures"]
+
+
+#: Where the real-bundle tests look for the CodeQL 2.27.1 CLI: $CODEQL_BIN (the
+#: ``codeql`` launcher inside an unpacked bundle), else the tools image location.
+CODEQL_DEFAULT_BIN = Path("/opt/sast/codeql/codeql")
+
+
+def codeql_bin() -> Path | None:
+    """The CodeQL CLI for the real-bundle tests, or None when there is none."""
+    configured = os.environ.get("CODEQL_BIN")
+    candidate = Path(configured) if configured else CODEQL_DEFAULT_BIN
+    return candidate if candidate.is_file() and os.access(candidate, os.X_OK) else None
+
+
+@pytest.fixture
+def codeql_bundle() -> Path:
+    """The unpacked CodeQL bundle folder. Skips, saying why, when no CLI is found."""
+    cli = codeql_bin()
+    if cli is None:
+        where = os.environ.get("CODEQL_BIN") or str(CODEQL_DEFAULT_BIN)
+        pytest.skip(f"CodeQL CLI not found at {where}: set CODEQL_BIN to the codeql launcher of an "
+                    "unpacked 2.27.1 bundle to run the real-bundle tests")
+    return cli.parent
 
 
 def fixture_json(name: str) -> dict:

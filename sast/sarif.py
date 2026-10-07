@@ -5,11 +5,19 @@ What each field is built from:
 - ``ruleId``: the CWE table (``sast.cwe_map.task_rule``). An LLM02 result is
   HIGH when one of its CWEs shows data leaving its boundary, else MEDIUM.
 - ``locations[0]``: the match.
-- ``codeFlows``: never emitted. A code flow may only come from a dataflow trace
-  the tool itself reported, and Semgrep OSS 1.179.0 puts no trace in its JSON
-  output without a login. A one-step flow made from the match alone would earn
-  path credit through the grader's line tolerance with nothing behind it.
+- ``codeFlows``: written only from a dataflow trace the tool itself reported
+  (``Finding.trace``), taken from the first finding of the merged group that
+  has one, as ``codeFlows[0].threadFlows[0].locations``. The first step
+  (threadFlowLocation) gets ``properties.role = "source"``, the last gets
+  ``"sink"`` and the steps in between get no role, because no tool says which
+  of them is a root cause or a context step. A one-step trace is a sink only.
+  With no trace there is no ``codeFlows``: a flow made up from the match alone
+  would earn path credit through the grader's line tolerance with nothing
+  behind it. Semgrep OSS 1.179.0 gives no trace in JSON without a login, so
+  Semgrep results never carry one. CodeQL path queries do.
 - ``properties.cwe``: every CWE of every rule merged into the result.
+- ``properties.toolProperties``: tool labels from ``Finding.extra`` (for example
+  SonarQube's sonarType). Not read by the grader.
 - ``properties.heuristics``: ``controlStatus``, ``residualRisk`` and
   ``recommendations`` from ``sast.heuristics`` (fixed tables, not analysis),
   plus the table ``version``. They sit under their own key so the grader, which
@@ -28,7 +36,7 @@ from collections import Counter
 from typing import Any
 
 from . import cwe_map, heuristics
-from .findings import Finding
+from .findings import Finding, TraceStep
 
 SCHEMA = "https://json.schemastore.org/sarif-2.1.0.json"
 _LEVEL_RANK = {"note": 0, "warning": 1, "error": 2}
@@ -40,6 +48,19 @@ def _region(file: str, start: int, end: int) -> dict[str, Any]:
         "artifactLocation": {"uri": file},
         "region": {"startLine": int(start), "endLine": int(max(end, start))},
     }
+
+
+def _code_flows(trace: tuple[TraceStep, ...]) -> list[dict[str, Any]]:
+    """SARIF codeFlows from a tool-reported trace (see the module docstring)."""
+    locations = []
+    last = len(trace) - 1
+    for i, step in enumerate(trace):
+        location: dict[str, Any] = {"location": {"physicalLocation": _region(step.file, step.start_line, step.end_line)}}
+        role = "sink" if i == last else ("source" if i == 0 else None)
+        if role:
+            location["properties"] = {"role": role}
+        locations.append(location)
+    return [{"threadFlows": [{"locations": locations}]}]
 
 
 def _group(findings: list[Finding]) -> tuple[dict[tuple[str, int, str], dict[str, Any]], Counter[str], int]:
@@ -63,6 +84,8 @@ def _group(findings: list[Finding]) -> tuple[dict[tuple[str, int, str], dict[str
                 "cwes": list(f.cwes),
                 "tool_rule_ids": [f.tool_rule_id],
                 "residual_risk": f.residual_risk,
+                "trace": f.trace,
+                "extra": {k: [v] for k, v in f.extra},
                 "members": [f],
             }
             continue
@@ -76,6 +99,12 @@ def _group(findings: list[Finding]) -> tuple[dict[tuple[str, int, str], dict[str
         group["cwes"] += [c for c in f.cwes if c not in group["cwes"]]
         if f.tool_rule_id not in group["tool_rule_ids"]:
             group["tool_rule_ids"].append(f.tool_rule_id)
+        if not group["trace"] and f.trace:
+            group["trace"] = f.trace
+        for k, v in f.extra:
+            values = group["extra"].setdefault(k, [])
+            if v not in values:
+                values.append(v)
         group["members"].append(f)
     for group in groups.values():
         group["rule"] = cwe_map.task_rule(group["cwes"])
@@ -97,14 +126,20 @@ def build(findings: list[Finding], *, tool_name: str, tool_version: str) -> tupl
     for (file, start, _family), g in sorted(groups.items(), key=lambda kv: (kv[0][0], kv[0][1], kv[1]["rule"])):
         rule = g["rule"]
         end = max(g["end_line"], start)
-        results.append({
+        result: dict[str, Any] = {
             "ruleId": rule,
             "level": g["level"],
             "message": {"text": g["message"] or rule},
             "locations": [{"physicalLocation": _region(file, start, end)}],
+        }
+        if g["trace"]:
+            result["codeFlows"] = _code_flows(g["trace"])
+        result.update({
             "properties": {
                 "cwe": g["cwes"],
                 "toolRuleIds": g["tool_rule_ids"],
+                **({"toolProperties": {k: v[0] if len(v) == 1 else v for k, v in g["extra"].items()}}
+                   if g["extra"] else {}),
                 # Never scored: see the module docstring.
                 "heuristics": {
                     "controlStatus": heuristics.CONTROL_STATUS,
@@ -114,6 +149,7 @@ def build(findings: list[Finding], *, tool_name: str, tool_version: str) -> tupl
                 },
             },
         })
+        results.append(result)
 
     used = sorted({r["ruleId"] for r in results})
     sarif = {

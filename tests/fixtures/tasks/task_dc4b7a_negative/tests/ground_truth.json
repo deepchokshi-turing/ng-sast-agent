@@ -1,0 +1,133 @@
+{
+ "schema_version": "gt-0.1",
+ "task_id": "task_dc4b7a_negative",
+ "family_id": "fam_1934",
+ "variant_id": "var_a",
+ "variant_role": "negative",
+ "risk_types_present": [],
+ "matching": {
+  "line_tolerance": 10,
+  "path_line_tolerance": 10,
+  "require_cwe": true
+ },
+ "contrast_rule_ids": [
+  "LLM03.EA.PERMISSIONS",
+  "LLM02.SID.HIGH"
+ ],
+ "fixed_locations": [
+  {
+   "file": "src/crewai_rag_web_mini/tools/rag/rag_tool.py",
+   "start_line": 104,
+   "end_line": 116,
+   "why": "add imports validate_url and defines the keyword check helper"
+  },
+  {
+   "file": "src/crewai_rag_web_mini/tools/rag/rag_tool.py",
+   "start_line": 117,
+   "end_line": 140,
+   "why": "positional items with an http, https or file scheme are validated before they reach the adapter"
+  },
+  {
+   "file": "src/crewai_rag_web_mini/tools/rag/rag_tool.py",
+   "start_line": 141,
+   "end_line": 150,
+   "why": "url, website, github_url and youtube_url keywords are validated and only checked items are forwarded"
+  },
+  {
+   "file": "src/crewai_rag_web_mini/rag/data_types.py",
+   "start_line": 80,
+   "end_line": 80,
+   "why": "from_content no longer treats file:// strings as URLs"
+  },
+  {
+   "file": "src/crewai_rag_web_mini/rag/loaders/webpage_loader.py",
+   "start_line": 7,
+   "end_line": 7,
+   "why": "the loader imports safe_get instead of requests"
+  },
+  {
+   "file": "src/crewai_rag_web_mini/rag/loaders/webpage_loader.py",
+   "start_line": 27,
+   "end_line": 27,
+   "why": "the page is fetched with safe_get, which validates every hop and pins the connection"
+  },
+  {
+   "file": "src/crewai_rag_web_mini/security/safe_path.py",
+   "start_line": 1,
+   "end_line": 150,
+   "why": "new module: validate_url and is_blocked_ip reject private, loopback, link-local, shared and other non-global addresses"
+  },
+  {
+   "file": "src/crewai_rag_web_mini/security/safe_requests.py",
+   "start_line": 1,
+   "end_line": 145,
+   "why": "new module: safe_get turns automatic redirects off and validates every Location target before following it"
+  },
+  {
+   "file": "src/crewai_rag_web_mini/security/pinned_adapter.py",
+   "start_line": 1,
+   "end_line": 147,
+   "why": "new module: the transport resolves once, rejects blocked addresses, connects to the checked address and checks the peer again"
+  },
+  {
+   "file": "src/crewai_rag_web_mini/security/__init__.py",
+   "start_line": 1,
+   "end_line": 1,
+   "why": "new security package"
+  }
+ ],
+ "fix_changed_files": [
+  "src/crewai_rag_web_mini/tools/rag/rag_tool.py",
+  "src/crewai_rag_web_mini/rag/data_types.py",
+  "src/crewai_rag_web_mini/rag/loaders/webpage_loader.py",
+  "src/crewai_rag_web_mini/security/__init__.py",
+  "src/crewai_rag_web_mini/security/safe_path.py",
+  "src/crewai_rag_web_mini/security/safe_requests.py",
+  "src/crewai_rag_web_mini/security/pinned_adapter.py"
+ ],
+ "findings": [],
+ "negative_analyses": [
+  {
+   "id": "N1",
+   "kind": "minimal_contrast",
+   "contrast_of": "F1",
+   "file": "src/crewai_rag_web_mini/tools/rag/rag_tool.py",
+   "start_line": 117,
+   "end_line": 150,
+   "rationale": "The model still chooses the URL, but RagTool.add runs validate_url on it, which rejects http://inventory.internal/stock because it resolves to a loopback address. WebPageLoader then fetches with safe_get, which re-validates every redirect target and connects through a transport that checks the resolved and connected address, so a 302 from a public page or a rebinding answer is refused too."
+  },
+  {
+   "id": "N2",
+   "kind": "minimal_contrast",
+   "contrast_of": "F2",
+   "file": "src/crewai_rag_web_mini/rag/loaders/webpage_loader.py",
+   "start_line": 27,
+   "end_line": 38,
+   "rationale": "agent.run is unchanged and still appends search results to the conversation, but after the change only public page text or an error string can be indexed, so no internal service response reaches the model provider or the user. WebPageLoader now fetches with safe_get, so an internal response body never becomes page text."
+  },
+  {
+   "id": "N3",
+   "kind": "hard_negative_trap",
+   "file": "src/crewai_rag_web_mini/security/safe_path.py",
+   "start_line": 26,
+   "end_line": 28,
+   "trap_rule_prefixes": [
+    "LLM03"
+   ],
+   "why_not_a_finding": "CREWAI_TOOLS_ALLOW_UNSAFE_PATHS turns URL validation off, but it is an operator-only environment flag that defaults to off, nothing in config/ or the entrypoint sets it, and nothing the model or a page controls can set it."
+  }
+ ],
+ "evidence": {
+  "advisory": "https://github.com/advisories/GHSA-pgf5-gw7r-wxg7",
+  "cve": "CVE-2026-2286",
+  "upstream_fix_commit": "9325e2f6a4608a2869872c464c1e2bc8ddecfd4c",
+  "upstream_fix_summary": "9325e2f (PR #5310, 1.14.0) added validate_url (http and https only, private and reserved addresses blocked) in RagTool.add for positional URLs and the url, website, github_url and youtube_url keywords, and stopped DataTypes.from_content from treating file:// as a URL. It checked only the first URL and one DNS answer. 3dc8c45 moved WebPageLoader to safe_get with per-redirect validation, and 9b1f4938 (refined in d6e2af70) pinned each connection to the validated address."
+ },
+ "scoring_weights": {
+  "detection": 0.35,
+  "classification": 0.05,
+  "path": 0.3,
+  "controls": 0.15,
+  "recommendations": 0.15
+ }
+}

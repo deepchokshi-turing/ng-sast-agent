@@ -8,8 +8,8 @@ tool inside the task sandbox, scans `/app/repo`, and writes
 | Agent | Import path | Status |
 |---|---|---|
 | Semgrep OSS 1.179.0 | `sast.semgrep.agent:SemgrepAgent` | ready |
-| CodeQL | `sast.codeql.agent:CodeQLAgent` | planned |
-| SonarQube | `sast.sonarqube.agent:SonarQubeAgent` | planned |
+| CodeQL 2.27.1 (research use only) | `sast.codeql.agent:CodeQLAgent` | ready, run with Harbor on the 0.4.0 image (see [CodeQL agent](#codeql-agent)) |
+| SonarQube (server you host) | `sast.sonarqube.agent:SonarQubeAgent` | ready, run with Harbor against SonarQube Community Build 26.9 (see [SonarQube agent](#sonarqube-agent)) |
 
 The design, and the red-team review behind it, is in
 [docs/semgrep-agent-plan.md](docs/semgrep-agent-plan.md).
@@ -42,8 +42,9 @@ PYTHONPATH=$PWD .venv/bin/harbor run -y -p dev/tasks -n 4 -a sast.semgrep.agent:
 python3 tools/report.py jobs/semgrep --tasks dev/tasks
 ```
 
-Expected on the sample tasks (agent 0.2.0 checked in Harbor on 2026-10-07; the
-0.3.0 figures come from grading the recorded Semgrep output in the unit tests):
+Expected on the sample tasks (agent 0.2.0 checked in Harbor on 2026-10-07. The
+other figures come from grading the recorded Semgrep output in the unit tests,
+which still pass at 0.4.0):
 
 | Task | Semgrep | Oracle | Why |
 |---|---|---|---|
@@ -79,17 +80,17 @@ for Intel/AMD machines and most Linux servers, `arm64` for Apple-silicon Macs.
 They load it once:
 
 ```bash
-docker load -i sast-tools_0.3.0_amd64.tar.gz    # gives the local tag sast-tools:0.3.0
+docker load -i sast-tools_0.4.0_amd64.tar.gz    # gives the local tag sast-tools:0.4.0
 ```
 
-After that, task Dockerfiles with `ARG SAST_TOOLS_IMAGE=sast-tools:0.3.0` build
+After that, task Dockerfiles with `ARG SAST_TOOLS_IMAGE=sast-tools:0.4.0` build
 locally as-is. This covers local `harbor run` only: Daytona can't see a loaded
 image, so platform runs still install at setup until the image is in a registry.
 
 Then, in each task's `environment/Dockerfile`:
 
 ```dockerfile
-ARG SAST_TOOLS_IMAGE=<registry path>/sast-tools:0.3.0
+ARG SAST_TOOLS_IMAGE=<registry path>/sast-tools:0.4.0
 FROM ${SAST_TOOLS_IMAGE} AS sast-tools
 
 FROM python:3.11-slim            # the task's own base image, unchanged
@@ -101,11 +102,14 @@ The agent checks the copied install against its pins (`/opt/sast/install.json`,
 the venv, the merged rules and `semgrep --version`). If they match it skips the
 download, and setup takes seconds. If they don't match, or nothing was copied, it
 installs as before. `/opt/sast` brings its own CPython, so it works on any base
-image with glibc ≥ 2.34. Daytona must be able to pull the image, so it has to
+image with glibc ≥ 2.34. The image also holds the CodeQL 2.27.1 bundle at
+`/opt/sast/codeql` (the linux64 bundle on amd64, the linux-arm64 bundle on
+arm64, each checked against its sha256 in `sast/codeql/pins.py` while the image
+builds) and sonar-scanner. Daytona must be able to pull the image, so it has to
 live in a registry. A local `docker save` only helps local runs. The tag is the
 agent version, read from `pyproject.toml` (the script stops if it differs from
 `sast.__version__`), so bump both together and rebuild. The sample task
-Dockerfiles pin `sast-tools:0.3.0`, and a unit test checks that they match the
+Dockerfiles pin `sast-tools:0.4.0`, and a unit test checks that they match the
 agent version.
 
 ## What a run does
@@ -265,6 +269,320 @@ the expected scan time plus 120 s.
   whole repo and matches by ±10 lines and OWASP prefix.
 - On full repos, extra findings lower F1. A zero-finding (fixed-twin) task scores
   1.0 only if the SARIF is completely empty.
+
+## CodeQL agent
+
+`sast.codeql.agent:CodeQLAgent` (agent name `codeql-sast`) runs the CodeQL
+2.27.1 bundle on the task's Python code and writes the same SARIF profile as
+the Semgrep agent, graded by the same `tests/grade.py`. CodeQL is used for
+research and experimentation only. Its licence terms for commercial use are
+revisited if a contract follows, so don't use it in client work until then.
+
+### Run
+
+The bundle is too big to download in Harbor's 300 s setup window, so it isn't
+installed at setup and there is no download fallback. It has to be in the task
+image at `/opt/sast/codeql`, which the `sast-tools:0.4.0` image provides for
+both amd64 and arm64. Setup only checks it (`sast/codeql/install.py`): the CLI
+must report 2.27.1 and the bundle's `codeql/python-queries` pack must be 1.8.11,
+or the trial fails with a message that names the image to use.
+
+```bash
+PYTHONPATH=$PWD .venv/bin/harbor run -y -p <tasks> -n 4 -a sast.codeql.agent:CodeQLAgent -o jobs/codeql
+python3 tools/report.py jobs/codeql --tasks <tasks>
+```
+
+The only option is `scan_budget_sec`. Unknown keys are accepted and recorded,
+as for the Semgrep agent.
+
+### What a run does
+
+1. Reads the scope from `metadata.scanner_roots` and `metadata.excluded_paths`
+   through `sast/scope.py`, which every agent shares. A path with a "/" is
+   anchored at the repository root, a plain name such as `tests` means that
+   name at any depth, and bytecode is always left out.
+2. Lists the Python files (`*.py`, `*.pyi`) under the roots and keeps those in
+   scope. None at all fails the trial before CodeQL starts, because CodeQL
+   would have nothing to analyse.
+3. Writes a CodeQL config file from the scope. `paths` holds the folder roots
+   and `paths-ignore` the excludes (a plain name is also written as
+   `**/<name>`). CodeQL 2.27.1's Python extractor crashes when `paths` names a
+   file (tested on `pyproject.toml`), so file roots aren't written. A Python
+   file root brings in its folder instead, and other files are skipped.
+4. `codeql database create --language=python --build-mode=none
+   --source-root=/app/repo` with that config.
+5. `codeql database analyze` with the bundle's
+   `qlpacks/codeql/python-queries/1.8.11/codeql-suites/python-security-extended.qls`,
+   `--format=sarif-latest`. Both steps get `--threads` from the task's cpus and
+   `--ram` from its `memory_mb` minus 512, never below 1024.
+6. Checks the result (see the failure policy below), turns each result into a
+   finding and drops results outside the scope. A finding's CWEs are the rule's
+   `external/cwe/cwe-NNN` tags in order, and its location is `locations[0]`
+   relative to `/app/repo`. The ruleId then comes from the shared CWE table, as
+   for Semgrep.
+
+### Failure policy
+
+These fail the trial with `ScannerError`, so it is recorded as errored and never
+graded as "found nothing".
+
+- No Python file in the scope, or none of the scan roots exists.
+- `database create` or `database analyze` exits non-zero, runs out of time
+  (124) or is killed (137). The error text quotes CodeQL's real error lines
+  only: its "A fatal error occurred" line, a line tagged `[ERROR]`, and the
+  extractor's Python exception line as the cause. A line that merely contains
+  the word, such as "0 errors", is never picked.
+- A missing or unreadable SARIF file, or a run CodeQL marks with
+  `executionSuccessful: false`.
+- The `py/summary/lines-of-code` metric is 0. CodeQL then extracted nothing and
+  still exits 0, which was checked on a repository with no Python in scope.
+- The metric is missing from the SARIF. The suite always reports it, so its
+  absence means the run cannot show that any code was analysed.
+- An extraction notification at error level that names an in-scope file.
+
+**Extraction problems, and why only error level fails.** Every run's
+`toolExecutionNotifications` are read. Notes and level "none" are telemetry and
+file lists and are ignored. Errors and warnings are recorded in the metadata
+under `codeql_extraction` (counts, the first 50 of each, whether each names an
+in-scope file, and `files_not_extracted`). The rule comes from real output.
+On all 28 dataset tasks and the three sample tasks CodeQL 2.27.1 reported no
+warning or error at all. On a crafted repository with a syntax error in one
+file and a non-UTF-8 byte in another, it skipped both files and said so with
+`py/diagnostics/syntax-error` and `py/diagnostics/extraction-warnings` at
+warning level, analysed the rest and exited 0. So an unparseable file is a
+warning, recorded with its path in `files_not_extracted`. It does not fail the
+trial: it is a property of the code that a re-run cannot change, and the rest
+of the scope was analysed. If no file could be read at all, lines of code is 0
+and the trial fails anyway. An error-level notification never appeared. One
+that names an in-scope file would mean CodeQL itself failed on code it should
+have analysed, so it fails the trial. One outside the scope is only recorded.
+
+### What it emits
+
+- **`codeFlows` are real CodeQL paths.** When a path query reports a dataflow
+  path, its first thread flow becomes the result's `codeFlows`. The first step
+  is marked `source`, the last `sink`, and the steps in between get no role.
+  A plain problem query has no path and gets no `codeFlows`. With the default
+  (remote) threat model, CodeQL found no path result on any of the 28 twin
+  tasks, so in practice the path sub-score is 0 on them for now. The
+  `smoke_web_eval` sample task shows the other side: an HTTP query parameter
+  reaches `eval`, CodeQL reports the 12-step path, and the task's grader gives
+  0.70 (detection, classification and path) where the same finding without its
+  path gets 0.40.
+- `residualRisk` (heuristic only, under `properties.heuristics`, never scored)
+  comes from the rule's `security-severity`: 7.0 and above is high, 4.0 to 6.9
+  medium, lower low.
+- Artifacts, kept after a failed scan too: `codeql-config.json` (the scope file
+  CodeQL was given), `codeql.sarif` (CodeQL's own output), `codeql-logs.tar.gz`
+  (the database's `log` and `diagnostic` folders, packed in a `finally` block),
+  and the usual `findings.sarif`, `metadata.json` and `install.log`. Packing the
+  logs is best effort. Its outcome is `codeql_logs_packed` in the metadata, and
+  a failure there never fails a good scan.
+
+### Measured on the real tasks (2026-10-08)
+
+The agent's two CodeQL commands, with its scope file and the tasks' own limits
+(1 CPU, so `--threads=1`, and 2048 MB, so `--ram=1536`), were run on all 28
+harbor tasks with the 2.27.1 bundle, each under `/usr/bin/time -v`. The
+process-tree figure is the largest sum of resident memory over CodeQL and all
+its child processes, sampled every 0.1 s, which is closer to what the sandbox's
+memory limit counts. The host had 2 CPUs and 8 GB and ran nothing else heavy.
+
+| | Result |
+|---|---|
+| Runs that completed | 28 of 28 (both steps exit 0, `executionSuccessful` true) |
+| `database create` | 6.4 to 7.5 s, median 7.1 s |
+| `database analyze` | 20.0 to 27.2 s, median 22.0 s |
+| Both steps | 26.5 to 34.2 s, median 29.0 s, against a scan budget of 780 s |
+| Peak memory, largest process (`time -v`) | create 147 to 178 MB, analyze 827 to 947 MB |
+| Peak memory, process tree | create 281 to 325 MB, analyze 831 to 950 MB, against 2048 MB |
+| Lines of Python extracted | 249 to 1725, median 751 |
+| Warning or error notifications | none |
+| Tasks with any result | 6, both twins of `4da5ab`, `795c39` and `dc4b7a` |
+
+The six results are `py/insecure-protocol` (CWE-327) in `4da5ab`'s HTTP shim
+and `py/incomplete-url-substring-sanitization` (CWE-20) in `data_types.py` in
+`795c39` and `dc4b7a`. They are the same in both twins of each pair and are not
+the labelled bugs. Neither CWE is in the shared table, so nothing is reported.
+The tasks' 2 GB and 900 s leave a wide margin, so no task change is needed for
+CodeQL.
+
+Recorded output (CodeQL 2.27.1, graded by each task's own grader in
+`tests/test_codeql_normalise.py`):
+
+| Task | CodeQL results | Reported | Reward |
+|---|---|---|---|
+| `task_7f3a91` | 0 | 0 | 0.00 |
+| `smoke_eval` | 0 (the `eval` input is model output, not a CodeQL source) | 0 | 0.00 |
+| `smoke_web_eval` | 1 (`py/code-injection`, CWE-94, with its path) | 1 | 0.70 |
+| `task_3920a8_positive` / `_negative` | 0 / 0 | 0 / 0 | 0.00 / 1.00 |
+| `task_4da5ab_positive` / `_negative` | 1 / 1 (`py/insecure-protocol`, CWE-327) | 0 / 0 | 0.00 / 1.00 |
+| `task_bd9abf_positive` / `_negative` | 0 / 0 | 0 / 0 | 0.00 / 1.00 |
+| `task_dc4b7a_positive` / `_negative` | 1 / 1 (`py/incomplete-url-substring-sanitization`, CWE-20) | 0 / 0 | 0.00 / 1.00 |
+
+Where each recording came from is in `tests/fixtures/README.md`. The tests that
+run the real CLI look for it at `$CODEQL_BIN` (the `codeql` launcher of an
+unpacked bundle) or `/opt/sast/codeql/codeql`, and skip with that reason when
+neither exists. Every other test reads only files inside this repository.
+
+## SonarQube agent
+
+SonarQube is a server, not a CLI, so this agent needs one you run yourself.
+The agent runs `sonar-scanner` inside the task sandbox against that server,
+reads the results back through the web API (also from inside the sandbox), and
+writes the same SARIF as the Semgrep agent. It keeps both issues of type
+VULNERABILITY and Security Hotspots. The design is in
+[docs/superpowers/specs/2026-10-07-codeql-sonarqube-agents-design.md](docs/superpowers/specs/2026-10-07-codeql-sonarqube-agents-design.md).
+
+### 1. Start the server
+
+```bash
+docker run -d --name sonarqube -p 9000:9000 sonarqube:26.9.0.129388-community
+```
+
+This is the Community Build the agent was checked against, so use this exact
+tag and every run talks to the same server. Wait until
+`curl -s localhost:9000/api/system/status` says `"status":"UP"` (a minute or
+two on first start), then log in at http://localhost:9000 as `admin`/`admin`
+and set a new password.
+
+### 2. Create a token
+
+In the UI, open My Account, then Security, and generate a **user token**. The
+user needs the global permissions Execute Analysis and Create Projects, and
+Administer on the projects it creates so the agent can delete them afterwards.
+The `admin` user has all of these. A project or global analysis token is not
+enough, because the agent also deletes the project.
+
+### 3. Tell the agent where the server is
+
+Both variables are read on the host when the scan starts. A missing one fails
+the trial before anything runs.
+
+```bash
+export SONAR_HOST_URL=http://host.docker.internal:9000
+export SONAR_TOKEN=<the token>
+```
+
+`SONAR_HOST_URL` is the server **as the sandbox sees it**, not as your shell
+sees it. Inside a Docker sandbox on Docker Desktop (macOS, Windows) that is
+`http://host.docker.internal:9000`. On Linux, either add
+`--add-host=host.docker.internal:host-gateway` to the sandbox or use the
+bridge address (usually `http://172.17.0.1:9000`). The agent checks the server
+from inside the sandbox before it scans, so a wrong address fails fast with a
+clear message.
+
+How the token reaches the sandbox: Harbor turns the environment of an exec
+call into command-line arguments (`docker compose exec -e NAME=value`, and
+`env NAME=value` on Daytona), which any process listing shows. So the agent
+never passes the token that way. It uploads the token as a file into a
+directory under its work dir that only the sandbox user can open, makes the
+file mode 600, and points `fetch.py` at it with `SONAR_TOKEN_FILE`. The scanner
+gets the token from the sandbox shell, as
+`SONAR_TOKEN="$(cat <file>)" exec sonar-scanner ...`, so it is in the scanner's
+own environment but in no command line Harbor builds. The file is deleted when
+the scan ends, also after a failure, and the metadata records
+`token_file_removed`. The token is never in a log, an artifact or the run
+metadata, and the command output that is kept is scrubbed of it in case a tool
+prints it. The unit tests check all of this.
+
+### 4. Run
+
+The task image must carry the scanner, so build it from the tools image
+`sast-tools:0.4.0` (see "Pre-built tools image" above). The scanner is not
+downloaded at setup.
+
+```bash
+PYTHONPATH=$PWD .venv/bin/harbor run -y -p dev/tasks -n 2 -a sast.sonarqube.agent:SonarQubeAgent -o jobs/sonarqube
+```
+
+Keep `-n` small: every trial is analysed by the same server, which handles one
+background task at a time on the Community Build.
+
+### What a run does
+
+1. **setup**: `install.py` checks `/opt/sast/sonar-scanner` (the scanner and its
+   bundled JRE, pinned in [sast/sonarqube/pins.py](sast/sonarqube/pins.py)) and
+   runs `sonar-scanner -v`.
+2. **run**:
+   - The token file is written as described above.
+   - `fetch.py check` asks the server for its status (must be `UP`), checks the
+     token, and records the server version, the edition and the default Python
+     quality profile.
+   - `sonar-scanner` analyses `/app/repo` as a throwaway project
+     `sast-<12 random hex>` (the agent never sees the task id), with
+     `sonar.sources` from the task's `scanner_roots`, `sonar.exclusions` from
+     its `excluded_paths` (a path with a slash, like `src/vendor`, is that
+     path from the repo root, and a plain name, like `tests`, is that name at
+     any depth, as for Semgrep), `sonar.python.version=3` and
+     `sonar.scm.disabled=true`. Its working files go under the agent's work
+     directory, so a read-only repository is fine.
+   - `fetch.py collect` waits for the server's background task to reach
+     `SUCCESS`, pages through the vulnerabilities (`types=VULNERABILITY`) and
+     the hotspots, and looks up each rule once. `api/rules/show` gives its name
+     and type, and `api/rules/search?rule_key=<key>&facets=cwe&ps=1` gives its
+     CWEs as the `cwe` facet. Community Build 26.9 does not return
+     `securityStandards` from `api/rules/show`, so the facet is the only CWE
+     source. A rule the server does not find (404 or an empty answer) is
+     recorded under `rule_errors`, keeps no CWE and does not stop the run.
+     Then it reads the project's Python quality profile and deletes the
+     project. A delete that fails does not fail the run, and the metadata says
+     the project was left.
+   - Each issue's own `type` is checked again, and anything other than
+     `VULNERABILITY` is skipped and counted (`issues_not_vulnerability`).
+   - The CWEs are mapped with the same table as Semgrep (`cwe-map-3`), with
+     the rule below.
+3. **Failures are errors**: a server that is down, a refused token (HTTP 401)
+   or missing permission (403), a scanner error, a background task that ends
+   `FAILED` or `CANCELED`, or running out of budget raises `ScannerError`. The
+   budget covers the check, the scan and the collection together.
+
+#### How a rule's CWE set is mapped
+
+`cwe-map-3` maps a finding by its rule's primary CWE, so that a rule whose main
+weakness is out of scope is never reported through a secondary CWE. The cwe
+facet is an unordered set and Sonar names no primary. The agent therefore maps
+each CWE of the rule on its own, as if it were the primary one, and reports
+the result only when every CWE gives the same answer. That answer is then
+what `cwe-map-3` would give whichever CWE is primary, and the CWEs are passed
+on in numeric order so the table's primary lookup returns it. When all the
+CWEs are unmapped, the result is passed on and counted as unmapped like any
+other agent's. When the answers differ (two families, or a family and an
+unmapped CWE) the result is dropped as ambiguous and listed in
+`results_cwe_ambiguous`. `results_by_cwe_decision` counts the four outcomes
+(`none`, `unmapped`, `mapped`, `ambiguous`). This rule was fixed from the
+table's own intent, not tuned on task labels. For example `python:S5332`
+(CWE-200 and CWE-319) is ambiguous, because CWE-200 maps to LLM02 and CWE-319
+is unmapped, and `python:S4423` (CWE-295, 326, 327) is unmapped.
+
+#### No traces
+
+SonarQube results never carry a trace (no `codeFlows`). The Community Build
+has no taint engine, so its issues come with empty `flows`, and the order of a
+flow's locations was never checked against a real taint flow. The metadata
+still counts `flows_raw` and `issues_with_flows`, so a server that does return
+flows is noticed.
+
+Options (`--ak key=value`): `scan_roots`, `exclude` and `scan_budget_sec` as for
+Semgrep, and `keep_project=true` to leave the project on the server so you can
+look at it in the UI.
+
+The metadata records, under `sonarqube`: the host URL, server version, edition,
+quality profile, project key, whether it was deleted (also after a timeout),
+the background task, the token file's path and whether it was removed, and the
+kept findings per `sonarType`. At the top level it records the counts above
+(`rule_cwe_source`, `rules_without_cwe`, `rule_lookup_errors`,
+`results_by_cwe_decision`, `results_cwe_ambiguous`,
+`issues_not_vulnerability`, `flows_raw`). The raw API responses are in the
+trial artifacts as `sonarqube.json`, next to `sonar-scanner.log`.
+
+The normaliser tests run on responses recorded from a real run (server
+26.9.0.129388 Community, scanner 8.1.0.6389, 2026-10-07), in
+`tests/fixtures/sonarqube_26.9_<task>.json`. Those were written by the older
+fetch.py without the cwe facet, so they hold no CWE and nothing is reported
+from them, which the tests check. A fresh recording with the facet will be
+added after the next real run
+([tests/test_sonarqube_normalise.py](tests/test_sonarqube_normalise.py)).
 
 ## Development
 

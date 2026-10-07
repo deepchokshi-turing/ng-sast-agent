@@ -88,7 +88,7 @@ def test_happy_path_writes_sarif_logs_and_metadata(tmp_path):
     assert meta["model_ignored"] == "openai/gpt-5"
     assert meta["cwe_map"] == "cwe-map-3"
     assert meta["heuristics"] == "heuristics-1"
-    assert meta["agent_version"] == "0.3.0+semgrep-1.179.0"
+    assert meta["agent_version"] == "0.4.0+semgrep-1.179.0"
     assert meta["scan_budget_sec"] == 780
     assert meta["results_emitted"] == 2  # the eval() and the merged shell=True pair
     assert meta["findings_compact"][0][-1] == "LLM03.EA.FUNCTIONALITY"
@@ -208,3 +208,19 @@ def test_in_scope():
     assert in_scope("lib/a.py", ["."], [])
     assert not in_scope("src/calc_agent/__pycache__/agent.cpython-311.pyc", roots, excludes)
     assert not in_scope("src/old.pyc", ["."], [])
+
+
+def test_scope_module_is_shared_and_old_imports_keep_working():
+    import sast.scope as scope
+    from sast.codeql import agent as codeql_agent
+    from sast.semgrep import agent as semgrep_agent
+
+    assert semgrep_agent.in_scope is scope.in_scope is codeql_agent.in_scope
+    assert semgrep_agent.ALWAYS_EXCLUDE is scope.ALWAYS_EXCLUDE
+    assert scope.task_scope([], []) == (["."], [])
+    assert scope.task_scope(["src/", "config"], ["tests"]) == (["src", "config"], ["tests"])
+    for bad in (["/etc"], ["../x"], ["-rf"]):
+        with pytest.raises(ScannerError, match="relative path inside the repository"):
+            scope.task_scope(bad, [])
+    assert scope.repo_path("/app/repo/./src/a.py") == "src/a.py"
+    assert scope.repo_path("./src\\b.py") == "src/b.py"

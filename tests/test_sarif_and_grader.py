@@ -3,7 +3,7 @@
 import json
 
 from sast import sarif
-from sast.findings import Finding
+from sast.findings import Finding, TraceStep
 from sast.semgrep.normalise import normalise
 from tests.conftest import SAMPLE_TASKS, fixture_json
 
@@ -58,6 +58,47 @@ def test_results_are_sorted_and_unmapped_are_counted():
              r["locations"][0]["physicalLocation"]["region"]["startLine"]) for r in doc["runs"][0]["results"]]
     assert keys == [("a.py", 2), ("a.py", 9), ("b.py", 1)]
     assert stats["unmapped_by_cwe"] == {"CWE-1236": 1, "none": 1}
+
+
+def flow_steps(result):
+    (flow,) = result["codeFlows"]
+    (thread,) = flow["threadFlows"]
+    return [(l["location"]["physicalLocation"]["artifactLocation"]["uri"],
+             l["location"]["physicalLocation"]["region"]["startLine"],
+             l["location"]["physicalLocation"]["region"]["endLine"],
+             (l.get("properties") or {}).get("role")) for l in thread["locations"]]
+
+
+def test_a_tool_trace_becomes_the_code_flow():
+    trace = (TraceStep("src/a.py", 3, 3), TraceStep("src/b.py", 10, 12), TraceStep("src/a.py", 8, 8))
+    finding = Finding("r1", ("CWE-95",), "src/a.py", 8, 8, "m", "error", trace=trace)
+    doc, _ = sarif.build([finding], tool_name="codeql", tool_version="x")
+    (result,) = doc["runs"][0]["results"]
+    # Source first, sink last, no role in between: no tool says what the middle steps are.
+    assert flow_steps(result) == [("src/a.py", 3, 3, "source"), ("src/b.py", 10, 12, None), ("src/a.py", 8, 8, "sink")]
+    assert "properties" not in result["codeFlows"][0]["threadFlows"][0]["locations"][1]
+    assert not {"controlStatus", "residualRisk", "recommendations"} & set(result["properties"])
+
+
+def test_a_one_step_trace_is_a_sink_only():
+    finding = Finding("r1", ("CWE-95",), "a.py", 8, 8, "m", "error", trace=(TraceStep("a.py", 8, 8),))
+    doc, _ = sarif.build([finding], tool_name="codeql", tool_version="x")
+    assert flow_steps(doc["runs"][0]["results"][0]) == [("a.py", 8, 8, "sink")]
+
+
+def test_a_merged_result_takes_the_first_member_with_a_trace():
+    traced = (TraceStep("a.py", 1, 1), TraceStep("a.py", 8, 8))
+    doc, _ = sarif.build(
+        [f(rule="a"), Finding("c", ("CWE-94",), "src/calc_agent/agent.py", 8, 8, "m", "warning", trace=traced)],
+        tool_name="codeql", tool_version="x",
+    )
+    (result,) = doc["runs"][0]["results"]
+    assert result["properties"]["toolRuleIds"] == ["a", "c"]
+    assert flow_steps(result) == [("a.py", 1, 1, "source"), ("a.py", 8, 8, "sink")]
+
+
+def test_findings_have_no_trace_by_default():
+    assert f().trace == ()
 
 
 def test_empty_is_a_valid_sarif():
@@ -203,3 +244,24 @@ def test_grader_ignores_the_heuristics(grade_sarif):
     for r in doc["runs"][0]["results"]:
         r["properties"]["heuristics"] = {"controlStatus": "partial", "residualRisk": "low", "recommendations": []}
     assert grade_sarif("smoke_eval", doc)["reward"] == base["reward"]
+
+
+def test_tool_labels_go_to_tool_properties_and_merge():
+    from sast.findings import Finding
+    from sast import sarif as sarif_mod
+
+    base = dict(cwes=("CWE-22",), file="src/a.py", start_line=10, end_line=10, message="m", level="warning")
+    findings = [
+        Finding(tool_rule_id="python:S1", extra=(("sonarType", "VULNERABILITY"),), **base),
+        Finding(tool_rule_id="python:S2", extra=(("sonarType", "SECURITY_HOTSPOT"),), **base),
+        Finding(tool_rule_id="other", cwes=("CWE-22",), file="src/b.py", start_line=3, end_line=3, message="m",
+                level="warning"),
+    ]
+    document, _ = sarif_mod.build(findings, tool_name="t", tool_version="1")
+    results = document["runs"][0]["results"]
+    a = next(r for r in results if r["locations"][0]["physicalLocation"]["artifactLocation"]["uri"] == "src/a.py")
+    b = next(r for r in results if r["locations"][0]["physicalLocation"]["artifactLocation"]["uri"] == "src/b.py")
+    assert a["properties"]["toolProperties"] == {"sonarType": ["VULNERABILITY", "SECURITY_HOTSPOT"]}
+    assert "toolProperties" not in b["properties"]
+    for r in results:
+        assert not {"controlStatus", "residualRisk", "recommendations"} & set(r["properties"])

@@ -384,4 +384,4 @@ Measurements 2 to 4 of the client spec (path, controls, recommendations) score
   `dev/tasks/` stays untracked, and a missing fixtures folder fails the test
   run instead of skipping tests. `tools/build_tools_image.sh` tags `sast-tools`
   with the version in `pyproject.toml`, and the sample task Dockerfiles pin
-  `sast-tools:0.3.0`.
+  `sast-tools:0.4.0`.

@@ -1,0 +1,232 @@
+{
+ "ce_task": {
+  "analysisId": "69fb52cf-f9b8-4cb0-aae9-43cdcfe0194d",
+  "componentId": "3a6fcc10-e018-4c09-b0cd-fc5ac7458d24",
+  "componentKey": "sast-b61c1ede198d",
+  "componentName": "sast-b61c1ede198d",
+  "componentQualifier": "TRK",
+  "executedAt": "2026-10-07T19:19:01+0000",
+  "executionTimeMs": 1693,
+  "hasScannerContext": true,
+  "id": "80d6bc2d-b07d-406d-83a7-20e38736cc4e",
+  "infoMessages": [],
+  "startedAt": "2026-10-07T19:19:00+0000",
+  "status": "SUCCESS",
+  "submittedAt": "2026-10-07T19:18:55+0000",
+  "submitterLogin": "admin",
+  "type": "REPORT",
+  "warningCount": 0,
+  "warnings": []
+ },
+ "delete_error": null,
+ "deleted": true,
+ "error": null,
+ "fetch_format": 1,
+ "hotspots_pages": [
+  {
+   "components": [],
+   "hotspots": [],
+   "paging": {
+    "pageIndex": 1,
+    "pageSize": 500,
+    "total": 0
+   }
+  }
+ ],
+ "issues_pages": [
+  {
+   "components": [
+    {
+     "enabled": true,
+     "key": "sast-b61c1ede198d",
+     "longName": "sast-b61c1ede198d",
+     "name": "sast-b61c1ede198d",
+     "qualifier": "TRK"
+    },
+    {
+     "enabled": true,
+     "key": "sast-b61c1ede198d:src/pydantic_ai_mini/_compat/httpx2.py",
+     "longName": "src/pydantic_ai_mini/_compat/httpx2.py",
+     "name": "httpx2.py",
+     "path": "src/pydantic_ai_mini/_compat/httpx2.py",
+     "qualifier": "FIL"
+    }
+   ],
+   "effortTotal": 2,
+   "facets": [],
+   "issues": [
+    {
+     "author": "",
+     "cleanCodeAttribute": "TRUSTWORTHY",
+     "cleanCodeAttributeCategory": "RESPONSIBLE",
+     "codeVariants": [],
+     "component": "sast-b61c1ede198d:src/pydantic_ai_mini/_compat/httpx2.py",
+     "creationDate": "2026-10-07T19:18:23+0000",
+     "debt": "2min",
+     "effort": "2min",
+     "flows": [],
+     "fromSonarQubeUpdate": false,
+     "hash": "9bf98d3f807fb43e63d009689b302eb4",
+     "impacts": [
+      {
+       "severity": "HIGH",
+       "softwareQuality": "SECURITY"
+      }
+     ],
+     "internalTags": [],
+     "issueStatus": "OPEN",
+     "key": "6307b446-8417-4442-a3e4-0fff3a95901b",
+     "line": 145,
+     "linkedTicketStatus": "NOT_LINKED",
+     "message": "Use a stronger protocol, or upgrade to Python 3.10+ which uses secure defaults.",
+     "messageFormattings": [],
+     "prioritizedRule": false,
+     "project": "sast-b61c1ede198d",
+     "quickFixAvailable": false,
+     "rule": "python:S4423",
+     "scope": "MAIN",
+     "severity": "CRITICAL",
+     "status": "OPEN",
+     "tags": [
+      "cwe",
+      "privacy"
+     ],
+     "textRange": {
+      "endLine": 145,
+      "endOffset": 46,
+      "startLine": 145,
+      "startOffset": 18
+     },
+     "type": "VULNERABILITY",
+     "updateDate": "2026-10-07T19:18:23+0000"
+    }
+   ],
+   "p": 1,
+   "paging": {
+    "pageIndex": 1,
+    "pageSize": 500,
+    "total": 1
+   },
+   "ps": 500,
+   "total": 1
+  }
+ ],
+ "kept": false,
+ "project_key": "sast-b61c1ede198d",
+ "quality_profiles": {
+  "actions": {
+   "create": true
+  },
+  "profiles": [
+   {
+    "actions": {
+     "associateProjects": false,
+     "copy": true,
+     "delete": false,
+     "edit": false,
+     "setAsDefault": false
+    },
+    "activeDeprecatedRuleCount": 0,
+    "activeRuleCount": 398,
+    "isBuiltIn": true,
+    "isDefault": true,
+    "isInherited": false,
+    "key": "d3cf3dde-998b-4c25-bc8b-514f04c2dc3e",
+    "language": "py",
+    "languageName": "Python",
+    "lastUsed": "2026-10-07T19:18:23+0000",
+    "name": "Sonar way",
+    "rulesUpdatedAt": "2026-10-07T18:30:01+0000"
+   }
+  ]
+ },
+ "report_task": {
+  "ceTaskId": "80d6bc2d-b07d-406d-83a7-20e38736cc4e",
+  "ceTaskUrl": "http://host.docker.internal:9000/api/ce/task?id=80d6bc2d-b07d-406d-83a7-20e38736cc4e",
+  "projectKey": "sast-b61c1ede198d"
+ },
+ "rules": {
+  "python:S4423": {
+   "actives": [],
+   "rule": {
+    "cleanCodeAttribute": "TRUSTWORTHY",
+    "cleanCodeAttributeCategory": "RESPONSIBLE",
+    "createdAt": "2026-10-07T18:29:44+0000",
+    "debtRemFnType": "CONSTANT_ISSUE",
+    "defaultDebtRemFnType": "CONSTANT_ISSUE",
+    "defaultRemFnBaseEffort": "2min",
+    "defaultRemFnType": "CONSTANT_ISSUE",
+    "descriptionSections": [
+     {
+      "content": "<h4>Noncompliant code example</h4>\n<pre data-diff-id=\"1\" data-diff-type=\"noncompliant\">\nfrom aws_cdk.aws_apigateway import DomainName, SecurityPolicy\n\nclass ExampleStack(Stack):\n    def __init__(self, scope: Construct, construct_id: str, **kwargs) -&gt; None:\n        super().__init__(scope, construct_id, **kwargs)\n        DomainName(self, \"example\",\n            domain_name=\"example.com\",\n            certificate=certificate,\n            security_policy=SecurityPolicy.TLS_1_0 # Noncompliant\n        )\n</pre>\n<p>By default, AWS\u2019s OpenSearch service <code>CfnDomains</code> enables TLS 1.0, a weak cryptographic algorithm.</p>\n<pre data-diff-id=\"2\" data-diff-type=\"noncompliant\">\nfrom aws_cdk.aws_opensearchservice import CfnDomain, EngineVersion\n\nclass ExampleStack(Stack):\n    def __init__(self, scope: Construct, construct_id: str, **kwargs) -&gt; None:\n        super().__init__(scope, construct_id, **kwargs)\n        CfnDomain(self, \"example\",\n            version=EngineVersion.OPENSEARCH_1_3\n        ) # Noncompliant\n</pre>\n<h4>Compliant solution</h4>\n<pre data-diff-id=\"1\" data-diff-type=\"compliant\">\nfrom aws_cdk.aws_apigateway import DomainName, SecurityPolicy\n\nclass ExampleStack(Stack):\n    def __init__(self, scope: Construct, construct_id: str, **kwargs) -&gt; None:\n        super().__init__(scope, construct_id, **kwargs)\n        DomainName(self, \"example\",\n            domain_name=\"example.com\",\n            certificate=certificate,\n            security_policy=SecurityPolicy.TLS_1_2\n        )\n</pre>\n<pre data-diff-id=\"2\" data-diff-type=\"compliant\">\nfrom aws_cdk.aws_opensearchservice import CfnDomain, EngineVersion\nclass ExampleStack(Stack):\n    def __init__(self, scope: Construct, construct_id: str, **kwargs) -&gt; None:\n        super().__init__(scope, construct_id, **kwargs)\n        CfnDomain(self, \"example\",\n            version=EngineVersion.OPENSEARCH_1_3\n            domain_endpoint_options=CfnDomain.DomainEndpointOptionsProperty(\n                tls_security_policy=\"Policy-Min-TLS-1-2-2019-07\"\n            )\n        )\n</pre>\n<h3>How does this work?</h3>\n<p>As a rule of thumb, by default you should use the cryptographic algorithms and mechanisms that are considered strong by the cryptographic\ncommunity.</p>\n<p>The best choices at the moment are the following.</p>\n<h4>Use TLS v1.2 or TLS v1.3</h4>\n<p>Even though TLS V1.3 is available, using TLS v1.2 is still considered good and secure practice by the cryptography community.\n  <br></p>\n<p>The use of TLS v1.2 ensures compatibility with a wide range of platforms and enables seamless communication between different systems that do not\nyet have TLS v1.3 support.</p>\n<p>The only drawback depends on whether the framework used is outdated: its TLS v1.2 settings may enable older and insecure cipher suites that are\ndeprecated as insecure.</p>\n<p>On the other hand, TLS v1.3 removes support for older and weaker cryptographic algorithms, eliminates known vulnerabilities from previous TLS\nversions, and improves performance.</p>",
+      "context": {
+       "displayName": "AWS CDK",
+       "key": "aws_cdk"
+      },
+      "key": "how_to_fix"
+     },
+     {
+      "content": "<h4>Noncompliant code example</h4>\n<pre data-diff-id=\"21\" data-diff-type=\"noncompliant\">\nimport ssl\n\nssl.SSLContext(ssl.PROTOCOL_SSLv3) # Noncompliant\n</pre>\n<h4>Compliant solution</h4>\n<pre data-diff-id=\"21\" data-diff-type=\"compliant\">\nimport ssl\n\ncontext = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)\ncontext.minimum_version = ssl.TLSVersion.TLSv1_2\n</pre>\n<h3>How does this work?</h3>\n<p>As a rule of thumb, by default you should use the cryptographic algorithms and mechanisms that are considered strong by the cryptographic\ncommunity.</p>\n<p>The best choices at the moment are the following.</p>\n<h4>Use TLS v1.2 or TLS v1.3</h4>\n<p>Even though TLS V1.3 is available, using TLS v1.2 is still considered good and secure practice by the cryptography community.\n  <br></p>\n<p>The use of TLS v1.2 ensures compatibility with a wide range of platforms and enables seamless communication between different systems that do not\nyet have TLS v1.3 support.</p>\n<p>The only drawback depends on whether the framework used is outdated: its TLS v1.2 settings may enable older and insecure cipher suites that are\ndeprecated as insecure.</p>\n<p>On the other hand, TLS v1.3 removes support for older and weaker cryptographic algorithms, eliminates known vulnerabilities from previous TLS\nversions, and improves performance.</p>",
+      "context": {
+       "displayName": "Python Standard Library",
+       "key": "python_standard_library"
+      },
+      "key": "how_to_fix"
+     },
+     {
+      "content": "<p>This vulnerability exposes encrypted data to a number of attacks whose goal is to recover the plaintext.</p>",
+      "key": "introduction"
+     },
+     {
+      "content": "<p>Encryption algorithms are essential for protecting sensitive information and ensuring secure communications in a variety of domains. They are used\nfor several important reasons:</p>\n<ul>\n  <li>Confidentiality, privacy, and intellectual property protection</li>\n  <li>Security during transmission or on storage devices</li>\n  <li>Data integrity, general trust, and authentication</li>\n</ul>\n<p>When selecting encryption algorithms, tools, or combinations, you should also consider two things:</p>\n<ol>\n  <li>No encryption is unbreakable.</li>\n  <li>The strength of an encryption algorithm is usually measured by the effort required to crack it within a reasonable time frame.</li>\n</ol>\n<p>For these reasons, as soon as cryptography is included in a project, it is important to choose encryption algorithms that are considered strong and\nsecure by the cryptography community.</p>\n<p>To provide communication security over a network, SSL and TLS are generally used. However, it is important to note that the following protocols are\nall considered weak by the cryptographic community, and are officially deprecated:</p>\n<ul>\n  <li>SSL versions 1.0, 2.0 and 3.0</li>\n  <li>TLS versions 1.0 and 1.1</li>\n</ul>\n<p>When these unsecured protocols are used, it is best practice to expect a breach: that a user or organization with malicious intent will perform\nmathematical attacks on this data after obtaining it by other means.</p>\n<h3>What is the potential impact?</h3>\n<p>After retrieving encrypted data and performing cryptographic attacks on it on a given timeframe, attackers can recover the plaintext that\nencryption was supposed to protect.</p>\n<p>Depending on the recovered data, the impact may vary.</p>\n<p>Below are some real-world scenarios that illustrate the potential impact of an attacker exploiting the vulnerability.</p>\n<h4>Additional attack surface</h4>\n<p>By modifying the plaintext of the encrypted message, an attacker may be able to trigger additional vulnerabilities in the code. An attacker can\nfurther exploit a system to obtain more information.\n  <br>\n  Encrypted values are often considered trustworthy because it would not be possible for a third party to modify them under normal circumstances.</p>\n<h4>Breach of confidentiality and privacy</h4>\n<p>When encrypted data contains personal or sensitive information, its retrieval by an attacker can lead to privacy violations, identity theft,\nfinancial loss, reputational damage, or unauthorized access to confidential systems.</p>\n<p>In this scenario, the company, its employees, users, and partners could be seriously affected.</p>\n<p>The impact is twofold, as data breaches and exposure of encrypted data can undermine trust in the organization, as customers, clients and\nstakeholders may lose confidence in the organization\u2019s ability to protect their sensitive data.</p>\n<h4>Legal and compliance issues</h4>\n<p>In many industries and locations, there are legal and compliance requirements to protect sensitive data. If encrypted data is compromised and the\nplaintext can be recovered, companies face legal consequences, penalties, or violations of privacy laws.</p>",
+      "key": "root_cause"
+     },
+     {
+      "content": "<h4>Noncompliant code example</h4>\n<pre data-diff-id=\"11\" data-diff-type=\"noncompliant\">\nfrom OpenSSL import SSL\n\nSSL.Context(SSL.SSLv3_METHOD)  # Noncompliant\n</pre>\n<h4>Compliant solution</h4>\n<pre data-diff-id=\"11\" data-diff-type=\"compliant\">\nfrom OpenSSL import SSL\n\ncontext = SSL.Context(SSL.TLS_SERVER_METHOD)\ncontext.set_min_proto_version(SSL.TLS1_2_VERSION)\n</pre>\n<h3>How does this work?</h3>\n<p>As a rule of thumb, by default you should use the cryptographic algorithms and mechanisms that are considered strong by the cryptographic\ncommunity.</p>\n<p>The best choices at the moment are the following.</p>\n<h4>Use TLS v1.2 or TLS v1.3</h4>\n<p>Even though TLS V1.3 is available, using TLS v1.2 is still considered good and secure practice by the cryptography community.\n  <br></p>\n<p>The use of TLS v1.2 ensures compatibility with a wide range of platforms and enables seamless communication between different systems that do not\nyet have TLS v1.3 support.</p>\n<p>The only drawback depends on whether the framework used is outdated: its TLS v1.2 settings may enable older and insecure cipher suites that are\ndeprecated as insecure.</p>\n<p>On the other hand, TLS v1.3 removes support for older and weaker cryptographic algorithms, eliminates known vulnerabilities from previous TLS\nversions, and improves performance.</p>",
+      "context": {
+       "displayName": "OpenSSL",
+       "key": "openssl"
+      },
+      "key": "how_to_fix"
+     },
+     {
+      "content": "<h3>Articles &amp; blog posts</h3>\n<ul>\n  <li><a href=\"https://en.wikipedia.org/wiki/Padding_oracle_attack\">Wikipedia, Padding Oracle Attack</a></li>\n  <li><a href=\"https://en.wikipedia.org/wiki/Chosen-ciphertext_attack\">Wikipedia, Chosen-Ciphertext Attack</a></li>\n  <li><a href=\"https://en.wikipedia.org/wiki/Chosen-plaintext_attack\">Wikipedia, Chosen-Plaintext Attack</a></li>\n  <li><a href=\"https://en.wikipedia.org/wiki/Semantic_security\">Wikipedia, Semantically Secure Cryptosystems</a></li>\n  <li><a href=\"https://en.wikipedia.org/wiki/Optimal_asymmetric_encryption_padding\">Wikipedia, OAEP</a></li>\n  <li><a href=\"https://en.wikipedia.org/wiki/Galois/Counter_Mode\">Wikipedia, Galois/Counter Mode</a></li>\n</ul>\n<h3>Standards</h3>\n<ul>\n  <li>OWASP - <a href=\"https://owasp.org/Top10/A02_2021-Cryptographic_Failures/\">Top 10 2021 Category A2 - Cryptographic Failures</a></li>\n  <li>OWASP - <a href=\"https://owasp.org/Top10/A07_2021-Identification_and_Authentication_Failures/\">Top 10 2021 Category A7 - Identification and\n  Authentication Failures</a></li>\n  <li>OWASP - <a href=\"https://owasp.org/www-project-top-ten/2017/A3_2017-Sensitive_Data_Exposure\">Top 10 2017 Category A3 - Sensitive Data\n  Exposure</a></li>\n  <li>OWASP - <a href=\"https://owasp.org/www-project-top-ten/2017/A6_2017-Security_Misconfiguration\">Top 10 2017 Category A6 - Security\n  Misconfiguration</a></li>\n  <li>CWE - <a href=\"https://cwe.mitre.org/data/definitions/327\">CWE-327 - Use of a Broken or Risky Cryptographic Algorithm</a></li>\n</ul>",
+      "key": "resources"
+     }
+    ],
+    "educationPrinciples": [],
+    "impacts": [
+     {
+      "severity": "HIGH",
+      "softwareQuality": "SECURITY"
+     }
+    ],
+    "isExternal": false,
+    "isTemplate": false,
+    "key": "python:S4423",
+    "lang": "py",
+    "langName": "Python",
+    "name": "Weak SSL/TLS protocols should not be used",
+    "params": [],
+    "remFnBaseEffort": "2min",
+    "remFnOverloaded": false,
+    "remFnType": "CONSTANT_ISSUE",
+    "repo": "python",
+    "scope": "MAIN",
+    "severity": "CRITICAL",
+    "status": "READY",
+    "sysTags": [
+     "cwe",
+     "privacy"
+    ],
+    "tags": [],
+    "type": "VULNERABILITY",
+    "updatedAt": "2026-10-07T18:29:44+0000"
+   }
+  }
+ },
+ "server": {
+  "host_url": "http://host.docker.internal:9000",
+  "version": "26.9.0.129388"
+ }
+}

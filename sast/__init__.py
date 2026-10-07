@@ -5,4 +5,4 @@ the eval platform puts this repository on Harbor's PYTHONPATH and installs
 nothing, so a third-party import here would break loading on the worker.
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"

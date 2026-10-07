@@ -46,12 +46,16 @@ These hold for all three agents and are tested for each.
 
 ```
 sast/
-  base.py            unchanged lifecycle, budget, artifacts, error policy
+  base.py            lifecycle, budget, artifacts, error policy, and the root
+                     and CPU checks every agent uses
+  scope.py           the task scope every agent shares: repo-relative roots
+                     and excludes, in_scope (added 2026-10-08, from PR #2)
   findings.py        Finding gains an optional trace (see 3.1)
   sarif.py           writes codeFlows only when a Finding has a trace
   cwe_map.py         shared, unchanged
   heuristics.py      shared, unchanged
-  semgrep/           unchanged apart from the image build
+  semgrep/           unchanged apart from the image build and using scope.py
+                     (it still re-exports in_scope for older imports)
   codeql/
     pins.py          CodeQL bundle version, URL and sha256 per arch, suite
     install.py       checks /opt/sast/codeql against the pins
@@ -87,16 +91,26 @@ download does not fit in the 300 s setup limit.
 
 Scan, inside the sandbox:
 
-1. Write a CodeQL config file with `paths` = `scanner_roots` and
-   `paths-ignore` = `excluded_paths`.
-2. `codeql database create <db> --language=python --build-mode=none
+1. List the Python files under the roots and keep those in scope. None is a
+   `ScannerError` before CodeQL runs.
+2. Write a CodeQL config file with `paths` = the folder roots of
+   `scanner_roots` and `paths-ignore` = `excluded_paths`.
+3. `codeql database create <db> --language=python --build-mode=none
    --source-root=/app/repo --codescanning-config=<config> --threads=<cpus>
    --ram=<memory budget>`.
-3. `codeql database analyze <db> <python security-extended suite from the
+4. `codeql database analyze <db> <python security-extended suite from the
    bundle> --format=sarif-latest --output=<out>/codeql.sarif
    --threads=<cpus> --ram=<memory budget>`.
-4. Any non-zero exit, a missing output file or unreadable SARIF is a
-   `ScannerError`.
+5. Any non-zero exit, a missing output file, unreadable SARIF or
+   `executionSuccessful: false` is a `ScannerError`. So is a
+   `py/summary/lines-of-code` metric of 0 or a SARIF without that metric
+   (added 2026-10-08, after CodeQL was seen to exit 0 with nothing extracted).
+6. Extraction notifications (`toolExecutionNotifications`) at warning and
+   error level are recorded in the metadata. Only an error-level one that names
+   an in-scope file is a `ScannerError`. On the 28 dataset tasks there were
+   none, and files CodeQL could not parse (syntax error, bad encoding) come out
+   at warning level with the rest analysed, so they are recorded, not fatal.
+   The README gives the evidence.
 
 Normalise: for each result, the CWEs are the rule's `external/cwe/cwe-NNN`
 tags in order. The location is `locations[0]`, made relative to `/app/repo`.
@@ -108,8 +122,10 @@ outside the task scope are dropped, as in the Semgrep agent.
 Memory budget: the sandbox memory from the task settings minus 512 MB for the
 OS and the agent, never below 1024 MB.
 
-Artifacts: `codeql.sarif` and the CodeQL log directory, plus the usual
-`findings.sarif`, `metadata.json` and `install.log`.
+Artifacts: the config file, `codeql.sarif` and the database's `log` and
+`diagnostic` folders packed as `codeql-logs.tar.gz`, plus the usual
+`findings.sarif`, `metadata.json` and `install.log`. All are kept after a
+failed scan too, and packing the logs can never fail a good scan.
 
 ## 5. SonarQube agent
 
@@ -121,10 +137,17 @@ Configuration, read on the host from environment variables at the start of
 - `SONAR_TOKEN`, required. A user token with permission to create and delete
   projects and to browse issues and hotspots.
 
-A missing variable is a `ScannerError` before anything runs. The token is
-passed only through the `env` of the sandbox commands that need it. It is
-never written to a file, a log, the command line or the metadata, and a test
-checks that it does not appear in any saved artifact.
+A missing variable is a `ScannerError` before anything runs. Harbor puts exec
+environment variables on the command line (`docker compose exec -e`, and
+`env NAME=value` on Daytona), so the token never goes through exec env. The
+agent uploads it to a mode 600 file in a mode 700 folder under the work
+directory. `fetch.py` reads it from that file, and the scanner runs as
+`SONAR_TOKEN="$(cat <file>)" exec sonar-scanner ...`, so the token is in the
+scanner's environment but in no command line Harbor builds. The file is
+removed in a `finally` block. Tests check that the token appears in no exec
+command, exec env, log, metadata, artifact or file left in the sandbox.
+(Revised 2026-10-08 after review. The first version passed the token through
+exec env.)
 
 Scan, inside the sandbox:
 
@@ -142,15 +165,25 @@ Scan, inside the sandbox:
    `SUCCESS`. `FAILED`, `CANCELED` or running out of budget is a
    `ScannerError`.
 4. It pages through `api/issues/search` with `types=VULNERABILITY` and
-   `api/hotspots/search`, then calls `api/rules/show` once per rule to read
-   its security standards (`cwe:NNN`). Raw responses go to
+   `api/hotspots/search`. Per rule it calls `api/rules/show` (name, type) and
+   `api/rules/search?rule_key=<key>&facets=cwe`, because SonarQube 26.9's
+   rules/show does not return security standards. The cwe facet is the only
+   place the rule's CWEs appear, as an unordered set. A 404 or empty answer
+   for one rule is recorded and does not stop the run. Raw responses go to
    `sonarqube.json`.
 5. It deletes the project (`api/projects/delete`). If deleting fails, the run
    still succeeds and the metadata says the project was left behind.
 
-Normalise: CWEs come from the rule's security standards in the order the
-server returns them. A vulnerability's `flows`, when present, become the
-trace. Hotspots have no flows. Each result records `sonarType`
+Normalise: SonarQube gives a rule's CWEs as an unordered set with no primary
+CWE, while cwe-map-3 maps by the primary CWE. So each CWE is mapped on its own
+as if it were the primary. A result is reported only when every CWE lands in
+the same family (or all are unmapped, which reports nothing). Mixed sets are
+dropped as ambiguous and counted. This gives the cwe-map-3 answer for any
+choice of primary, and was fixed before looking at task labels. Example:
+python:S5332 (CWE-200, CWE-319) is ambiguous and dropped. No trace is ever
+emitted from SonarQube: the Community Build has no taint engine, the recorded
+issues carry no flows, and the flow order was never verified. Raw flow counts
+are kept in the metadata. Each result records `sonarType`
 (`VULNERABILITY` or `SECURITY_HOTSPOT`) in its properties so the report can
 split them later. `residualRisk` (heuristic only) comes from the issue
 severity or the hotspot's vulnerability probability.
@@ -168,7 +201,9 @@ checks that before scanning.
 `images/sast-tools/Dockerfile` gains two install steps, each checking a
 pinned sha256:
 
-- CodeQL bundle 2.27.1 for linux64 into `/opt/sast/codeql`.
+- CodeQL bundle 2.27.1 into `/opt/sast/codeql`, the linux64 asset on amd64
+  and the linux-arm64 asset on arm64 (arm64 added 2026-10-08, sha256 from the
+  GitHub release, as PR #2 pins it). There is no download at setup.
 - sonar-scanner CLI with its bundled JRE for linux-x64 into
   `/opt/sast/sonar-scanner`. The exact version and hash are taken from
   binaries.sonarsource.com during implementation and written into

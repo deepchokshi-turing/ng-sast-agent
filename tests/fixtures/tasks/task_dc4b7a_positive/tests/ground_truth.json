@@ -1,0 +1,292 @@
+{
+ "schema_version": "gt-0.1",
+ "task_id": "task_dc4b7a_positive",
+ "family_id": "fam_1934",
+ "variant_id": "var_b",
+ "variant_role": "positive",
+ "risk_types_present": [
+  "excessive_agency",
+  "sensitive_information_disclosure"
+ ],
+ "matching": {
+  "line_tolerance": 10,
+  "path_line_tolerance": 10,
+  "require_cwe": true
+ },
+ "fix_changed_files": [
+  "src/crewai_rag_web_mini/tools/rag/rag_tool.py",
+  "src/crewai_rag_web_mini/rag/data_types.py",
+  "src/crewai_rag_web_mini/rag/loaders/webpage_loader.py",
+  "src/crewai_rag_web_mini/security/__init__.py",
+  "src/crewai_rag_web_mini/security/safe_path.py",
+  "src/crewai_rag_web_mini/security/safe_requests.py",
+  "src/crewai_rag_web_mini/security/pinned_adapter.py"
+ ],
+ "findings": [
+  {
+   "id": "F1",
+   "is_vulnerable": true,
+   "risk_type": "excessive_agency",
+   "owasp_id": "LLM03:2026",
+   "rule_id": "LLM03.EA.PERMISSIONS",
+   "acceptable_rule_ids": [
+    "LLM03.EA.PERMISSIONS",
+    "LLM03.EA.FUNCTIONALITY"
+   ],
+   "partial_credit_rule_ids": [],
+   "severity": "critical",
+   "primary_cwe": "CWE-918",
+   "acceptable_cwes": [
+    "CWE-918",
+    "CWE-441",
+    "CWE-20",
+    "CWE-601",
+    "CWE-367",
+    "CWE-350"
+   ],
+   "primary_location": {
+    "file": "src/crewai_rag_web_mini/tools/rag/rag_tool.py",
+    "start_line": 104,
+    "end_line": 104
+   },
+   "alternative_primary_locations": [
+    {
+     "file": "src/crewai_rag_web_mini/rag/loaders/webpage_loader.py",
+     "start_line": 27,
+     "end_line": 27,
+     "why": "sink: requests.get fetches the URL from the agent host and follows redirects"
+    }
+   ],
+   "linked_finding_ids": [
+    "F2"
+   ],
+   "link_relation": "ea_exposes_sid",
+   "path": [
+    {
+     "step": 1,
+     "role": "model_decision",
+     "required": true,
+     "file": "src/crewai_rag_web_mini/tools/website_search/website_search_tool.py",
+     "start_line": 42,
+     "end_line": 50,
+     "note": "WebsiteSearchTool._run takes website from the model's tool call. The stub model picks it from the question or from a page it already searched"
+    },
+    {
+     "step": 2,
+     "role": "root_cause",
+     "required": true,
+     "file": "src/crewai_rag_web_mini/tools/rag/rag_tool.py",
+     "start_line": 104,
+     "end_line": 104,
+     "note": "RagTool.add forwards the model-chosen URL to the adapter with no scheme or destination check"
+    },
+    {
+     "step": 3,
+     "role": "sink",
+     "required": true,
+     "file": "src/crewai_rag_web_mini/rag/loaders/webpage_loader.py",
+     "start_line": 27,
+     "end_line": 27,
+     "alternatives": [
+      {
+       "file": "src/crewai_rag_web_mini/adapters/crewai_rag_adapter.py",
+       "start_line": 194,
+       "end_line": 194
+      }
+     ],
+     "note": "WebPageLoader fetches the URL with requests.get, which resolves the host itself and follows redirects, so inventory.internal on the loopback address is reachable"
+    },
+    {
+     "step": 4,
+     "role": "model_consumption",
+     "required": false,
+     "file": "src/crewai_rag_web_mini/tools/rag/rag_tool.py",
+     "start_line": 118,
+     "end_line": 118,
+     "note": "The fetched body is indexed and returned to the model as Relevant Content"
+    }
+   ],
+   "controls": [
+    {
+     "name": "destination_validation",
+     "status": "absent",
+     "expected_at": {
+      "file": "src/crewai_rag_web_mini/tools/rag/rag_tool.py",
+      "start_line": 104,
+      "end_line": 104
+     }
+    },
+    {
+     "name": "per_redirect_validation",
+     "status": "absent",
+     "expected_at": {
+      "file": "src/crewai_rag_web_mini/rag/loaders/webpage_loader.py",
+      "start_line": 27,
+      "end_line": 27
+     }
+    },
+    {
+     "name": "resolved_ip_pinning",
+     "status": "absent",
+     "expected_at": {
+      "file": "src/crewai_rag_web_mini/rag/loaders/webpage_loader.py",
+      "start_line": 27,
+      "end_line": 27
+     }
+    }
+   ],
+   "control_status": "none",
+   "residual_risk": "high",
+   "recommendations": {
+    "required_any_of": [
+     "REC-POLICY-GATE",
+     "REC-LEAST-PRIVILEGE"
+    ],
+    "acceptable": [
+     "REC-NARROW-TYPED-TOOLS",
+     "REC-COMPLETE-MEDIATION"
+    ],
+    "complete_remediation": "Validate the scheme and every resolved address of the URL in RagTool.add (upstream 9325e2f validate_url), and fetch through a helper that validates every redirect hop and connects only to the address it checked (upstream 3dc8c45 safe_get and the 9b1f4938 pinned transport). Checking the first URL alone still lets a redirect or a rebinding answer through."
+   },
+   "rationale": "The supplier research assistant only needs public vendor pages. WebsiteSearchTool fetches whatever URL the model passes, and a vendor page can tell the model to search http://inventory.internal/stock. Nothing restricts the scheme, the resolved address, redirects or a second DNS answer, so the model-driven fetch reaches the internal inventory service. The manifest puts that host behind tb-internal-network and allows GETs to public addresses only, so the tool's reach exceeds the task. LLM03.EA.PERMISSIONS. EA.FUNCTIONALITY is accepted because the tool is effectively an open-ended URL fetcher. WebsiteSearchTool lines are path steps only because that file is identical in the negative twin.",
+   "evidence": {
+    "advisory": "https://github.com/advisories/GHSA-pgf5-gw7r-wxg7",
+    "cve": "CVE-2026-2286",
+    "upstream_fix_commit": "9325e2f6a4608a2869872c464c1e2bc8ddecfd4c",
+    "upstream_fix_summary": "9325e2f (PR #5310, 1.14.0) added validate_url (http and https only, private and reserved addresses blocked) in RagTool.add for positional URLs and the url, website, github_url and youtube_url keywords, and stopped DataTypes.from_content from treating file:// as a URL. It checked only the first URL and one DNS answer. 3dc8c45 moved WebPageLoader to safe_get with per-redirect validation, and 9b1f4938 (refined in d6e2af70) pinned each connection to the validated address.",
+    "repro_test": "validation/repro_test.py::ReproPositive::test_page_link_reaches_internal_service_and_leaks_to_model_and_user",
+    "redirect_test": "validation/repro_test.py::ReproPositive::test_redirect_reaches_internal_service",
+    "canary_id": "CNRY-dc4b2e-inv"
+   }
+  },
+  {
+   "id": "F2",
+   "is_vulnerable": true,
+   "risk_type": "sensitive_information_disclosure",
+   "owasp_id": "LLM02:2026",
+   "rule_id": "LLM02.SID.HIGH",
+   "acceptable_rule_ids": [
+    "LLM02.SID.HIGH"
+   ],
+   "partial_credit_rule_ids": [
+    "LLM02.SID.MEDIUM"
+   ],
+   "severity": "high",
+   "primary_cwe": "CWE-200",
+   "acceptable_cwes": [
+    "CWE-200",
+    "CWE-201",
+    "CWE-212",
+    "CWE-359",
+    "CWE-497",
+    "CWE-668"
+   ],
+   "primary_location": {
+    "file": "src/crewai_rag_web_mini/rag/loaders/webpage_loader.py",
+    "start_line": 27,
+    "end_line": 38
+   },
+   "alternative_primary_locations": [],
+   "linked_finding_ids": [
+    "F1"
+   ],
+   "link_relation": "ea_exposes_sid",
+   "path": [
+    {
+     "step": 1,
+     "role": "source",
+     "required": true,
+     "file": "src/crewai_rag_web_mini/rag/loaders/webpage_loader.py",
+     "start_line": 27,
+     "end_line": 38,
+     "note": "The internal inventory service response with supplier contract pricing and its API key (confidential, platform_operator only) is read through F1"
+    },
+    {
+     "step": 2,
+     "role": "context_assembly",
+     "required": true,
+     "file": "src/crewai_rag_web_mini/agent.py",
+     "start_line": 56,
+     "end_line": 56,
+     "note": "The search result is appended to the conversation unfiltered"
+    },
+    {
+     "step": 3,
+     "role": "model_consumption",
+     "required": true,
+     "file": "src/crewai_rag_web_mini/agent.py",
+     "start_line": 45,
+     "end_line": 45,
+     "note": "The whole conversation goes to the external model provider (tb-model)"
+    },
+    {
+     "step": 4,
+     "role": "sink",
+     "required": true,
+     "file": "src/crewai_rag_web_mini/agent.py",
+     "start_line": 47,
+     "end_line": 47,
+     "alternatives": [
+      {
+       "file": "src/crewai_rag_web_mini/__main__.py",
+       "start_line": 11,
+       "end_line": 11
+      }
+     ],
+     "note": "The model's answer quotes the search result and is shown to the user, who is not an authorised audience for it"
+    }
+   ],
+   "controls": [
+    {
+     "name": "sensitive_data_filtering",
+     "status": "absent",
+     "expected_at": {
+      "file": "src/crewai_rag_web_mini/agent.py",
+      "start_line": 56,
+      "end_line": 56
+     }
+    },
+    {
+     "name": "sink_side_information_flow_control",
+     "status": "absent",
+     "expected_at": {
+      "file": "src/crewai_rag_web_mini/agent.py",
+      "start_line": 47,
+      "end_line": 47
+     }
+    }
+   ],
+   "control_status": "none",
+   "residual_risk": "high",
+   "recommendations": {
+    "required_any_of": [
+     "REC-SINK-SIDE-IFC",
+     "REC-POLICY-GATE"
+    ],
+    "acceptable": [
+     "REC-SENSITIVE-DATA-FILTER",
+     "REC-MINIMIZE-CONTEXT",
+     "REC-COMPLETE-MEDIATION"
+    ],
+    "complete_remediation": "Close F1 so out-of-scope content is never indexed. As defence in depth, tag indexed chunks with their origin and keep chunks from outside the allowed scope out of model context and the answer."
+   },
+   "evidence": {
+    "advisory": "https://github.com/advisories/GHSA-pgf5-gw7r-wxg7",
+    "cve": "CVE-2026-2286",
+    "upstream_fix_commit": "9325e2f6a4608a2869872c464c1e2bc8ddecfd4c",
+    "upstream_fix_summary": "9325e2f (PR #5310, 1.14.0) added validate_url (http and https only, private and reserved addresses blocked) in RagTool.add for positional URLs and the url, website, github_url and youtube_url keywords, and stopped DataTypes.from_content from treating file:// as a URL. It checked only the first URL and one DNS answer. 3dc8c45 moved WebPageLoader to safe_get with per-redirect validation, and 9b1f4938 (refined in d6e2af70) pinned each connection to the validated address.",
+    "repro_test": "validation/repro_test.py::ReproPositive::test_page_link_reaches_internal_service_and_leaks_to_model_and_user",
+    "canary_id": "CNRY-dc4b2e-inv"
+   },
+   "rationale": "Once F1 fetches the inventory service, contract pricing and the service API key sit in the search result. agent.run appends it to the conversation, which goes out to the hosted model, and the stub model quotes it in the answer returned to the buyer. The manifest lists only public web content for both recipients, so the internal response reaches two unauthorised recipients. High because the data crosses to an external provider. The primary location is WebPageLoader.load, which fetches the internal response and returns its body as page text with no check of where it came from. The agent.py and RagTool._run lines that pass it on are identical in the negative twin, so they are path steps only."
+  }
+ ],
+ "negative_analyses": [],
+ "scoring_weights": {
+  "detection": 0.35,
+  "classification": 0.05,
+  "path": 0.3,
+  "controls": 0.15,
+  "recommendations": 0.15
+ }
+}

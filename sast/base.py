@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import shlex
 import tempfile
 import time
 from abc import abstractmethod
@@ -277,6 +278,31 @@ class ScannerAgent(BaseAgent):
                 f"{what} {reason} (exit {result.return_code}). Last output: {_tail(result.stdout or result.stderr, 600)}"
             )
         return result
+
+    async def _existing_roots(self, environment: BaseEnvironment, roots: list[str], meta: dict[str, Any]) -> list[str]:
+        """The scan roots that exist in /app/repo. Missing ones are recorded in
+        ``meta["scan_roots_missing"]``, and none at all is a ScannerError."""
+        if roots == ["."]:
+            return roots
+        checks = "; ".join(
+            f"if [ -e {shlex.quote(p)} ]; then echo OK {shlex.quote(p)}; else echo MISSING {shlex.quote(p)}; fi"
+            for p in roots
+        )
+        result = await self._exec(environment, checks, timeout_sec=60, what="checking scan roots", cwd=REPO_DIR)
+        present = [line[3:] for line in (result.stdout or "").splitlines() if line.startswith("OK ")]
+        missing = [p for p in roots if p not in present]
+        meta["scan_roots_missing"] = missing
+        if not present:
+            raise ScannerError(f"none of the scan roots exist in {REPO_DIR}: {', '.join(roots)}")
+        return [p for p in roots if p in present]
+
+    async def _nproc(self, environment: BaseEnvironment) -> int:
+        """The sandbox's CPU count, 1 when it cannot be read."""
+        result = await self._exec(environment, "nproc 2>/dev/null || echo 1", timeout_sec=60, what="counting CPUs")
+        try:
+            return max(1, int((result.stdout or "1").strip().splitlines()[0]))
+        except (ValueError, IndexError):
+            return 1
 
     async def _choose_work_dir(self, environment: BaseEnvironment) -> str:
         for candidate in WORK_DIR_CANDIDATES:

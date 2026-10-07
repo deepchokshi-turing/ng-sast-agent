@@ -247,7 +247,7 @@ def test_ground_truth_shingles(tmp_path, text, leaks):
 
 
 @pytest.mark.parametrize("dockerfile", [
-    "ARG IMG=sast-tools:0.3.0\nFROM ${IMG} AS tools\nFROM python:3.12-slim\nCOPY --from=tools /opt/sast /opt/sast\n"
+    "ARG IMG=sast-tools:0.4.0\nFROM ${IMG} AS tools\nFROM python:3.12-slim\nCOPY --from=tools /opt/sast /opt/sast\n"
     "COPY repo/ /app/repo/\n",
     "FROM python:3.12-slim\nCOPY ./repo /app/repo\n",
     'FROM python:3.12-slim\nCOPY ["repo", "/app/repo"]\n',

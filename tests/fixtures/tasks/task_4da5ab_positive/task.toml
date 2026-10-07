@@ -1,0 +1,40 @@
+version = "1.0"
+
+[metadata]
+author_name = "Turing"
+category = "security-static-analysis"
+tags = ["owasp-llm-2026", "static-scanner-eval"]
+difficulty = "hard"
+
+# Spec 5.2 task-level fields (non-label)
+schema_version = "0.1"
+task_id = "task_4da5ab_positive"
+repository_id = "repo_pydantic_pydantic-ai"
+family_id = "fam_983e"
+variant_id = "var_b"
+related_variant_ids = ["fam_983e:var_a"]
+source_origin = "adapted_open_source"
+source_url = "https://github.com/pydantic/pydantic-ai"
+source_commit = "f9ffee3488cd276a350588fd5358ac68ad843c95"
+license = "MIT"
+modifications = "The download helpers of pydantic-ai at f9ffee3 extracted into pydantic_ai_mini with a urllib httpx shim, a scripted model and an intranet help-desk app."
+languages = ["python"]
+frameworks = ["pydantic-ai"]
+package_versions = { python = ">=3.10", pydantic-ai-slim = "2.43.1.dev22" }
+architecture = "single agent with a model-driven web fetch tool"
+entrypoint = "python -m pydantic_ai_mini \"<question>\""
+build_command = "python -m compileall -q src"
+test_command = "python -m unittest discover -s tests -q"
+scanner_roots = ["src", "config", "fixtures", "security_manifest.json", "pyproject.toml"]
+excluded_paths = ["tests"]
+
+[agent]
+timeout_sec = 900.0
+
+[verifier]
+timeout_sec = 120.0
+
+[environment]
+build_timeout_sec = 600.0
+cpus = 1
+memory_mb = 2048
