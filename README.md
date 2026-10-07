@@ -42,13 +42,14 @@ PYTHONPATH=$PWD .venv/bin/harbor run -y -p dev/tasks -n 4 -a sast.semgrep.agent:
 python3 tools/report.py jobs/semgrep --tasks dev/tasks
 ```
 
-Expected on the dev tasks (checked 2026-10-07):
+Expected on the dev tasks (agent 0.2.0 checked in Harbor on 2026-10-07; the 0.3.0
+`smoke_eval` figure is from grading the recorded Semgrep output in the unit tests):
 
 | Task | Semgrep | Oracle | Why |
 |---|---|---|---|
-| `smoke_eval` | 0.40 | 1.0 | finds the `eval()`: detection 0.35 + classification 0.05. Also checks that `excluded_paths` (`src/calc_agent/thirdparty`, which has its own `eval()`) is honoured, and that an unrelated `shell=True` helper outside `fix_changed_files` is `fp_outside_scope`, not a false positive. Tools pre-baked |
+| `smoke_eval` | 1.00 (0.40 before 0.3.0) | 1.0 | finds the `eval()`. Since 0.3.0 the result also carries a one-step codeFlow at the match, `controlStatus: none`, `residualRisk: high` (rule impact HIGH) and `REC-NARROW-TYPED-TOOLS`. The full path score is a line-tolerance effect: every path step of this tiny task is within 10 lines of the match, and no trace was used. Also checks that `excluded_paths` (`src/calc_agent/thirdparty`, which has its own `eval()`) is honoured, and that an unrelated `shell=True` helper outside `fix_changed_files` is `fp_outside_scope`, not a false positive. Tools pre-baked |
 | `smoke_eval_twin` | 1.00 | 1.0 | fixed twin of `smoke_eval` with `fixed_locations`: nothing near the fixed code, the unrelated helper is `fp_outside_scope` (the old grader scored this 0). Tools pre-baked |
-| `smoke_eval_node` | 0.40 | 1.0 | same, on a Node image whose python3 has no pip or venv (installs at setup) |
+| `smoke_eval_node` | 0.96 (0.40 before 0.3.0; graded from the recorded output, not re-run in Harbor) | 1.0 | same, on a Node image whose python3 has no pip or venv (installs at setup) |
 | `smoke_empty` | 1.00 | 1.0 | clean code, empty SARIF. Tools pre-baked |
 | `task_7f3a91` | 0.00 | 1.0 | Semgrep reports only CSV injection (CWE-1236), outside the task's scope (installs at setup) |
 
@@ -97,7 +98,9 @@ download, and setup takes seconds. If they don't match, or nothing was copied, i
 installs as before. `/opt/sast` brings its own CPython, so it works on any base
 image with glibc ≥ 2.34. Daytona must be able to pull the image, so it has to
 live in a registry; a local `docker save` only helps local runs. The tag is the
-agent version: bump both together.
+agent version: bump both together. (Agent 0.3.0 changed only the SARIF
+writer, not `pins.py`, so a `sast-tools:0.2.0` image still passes the install
+check; the dev task Dockerfiles still point at 0.2.0.)
 
 ## What a run does
 
@@ -129,9 +132,10 @@ agent version: bump both together.
      (tests/, vendor/, node_modules/, ... are skipped), and compiled bytecode
      (`__pycache__/`, `*.pyc`, `*.pyo`) is always skipped: it's a build output,
      and task images that run tests or `compileall` are full of it;
+   - runs with `--dataflow-traces`, so taint rules carry `extra.dataflow_trace`;
    - keeps `category: security` results and maps each one's CWE to a task ruleId
-     ([sast/cwe_map.py](sast/cwe_map.py), `cwe-map-2`);
-   - writes the SARIF.
+     ([sast/cwe_map.py](sast/cwe_map.py), `cwe-map-3`);
+   - writes the SARIF, with the fields below.
 
 ### Decisions (all fixed before any results; see the plan for reasons)
 
@@ -143,10 +147,41 @@ agent version: bump both together.
     storage, and XXE aren't mapped.
   - Unmapped CWEs (XSS, crypto, CSRF, ...) are outside the five ruleIds and are
     not reported; they're still counted in the metadata.
-- **No `codeFlows`, `controlStatus`, `residualRisk` or `recommendations`.** Free
-  Semgrep without login puts no dataflow trace in JSON/SARIF (checked on
-  1.179.0), and the rest needs judgment. So the **maximum reward per finding is
-  0.40**.
+- **LLM02 severity (cwe-map-3).** The CWE still picks the family. An LLM02
+  result is `LLM02.SID.HIGH` when any of its CWEs is CWE-201, 918, 319, 532 or
+  359 (weaknesses defined by data leaving its boundary), or when its dataflow
+  trace ends in a network, email, file-write or logging call (a regex over the
+  sink code Semgrep printed, `sast/heuristics.py`). Otherwise it's
+  `LLM02.SID.MEDIUM`. Before 0.3.0 every LLM02 result was HIGH.
+- **`codeFlows` come only from the tool.** With a dataflow trace, the flow is the
+  trace's taint source (role `source`, the innermost location for a source
+  inside a called function) and then the match (role `sink`). Intermediate
+  variables are left out: a variable on the taint path is propagation, and
+  `context_assembly` (data placed into model context) would overstate what the
+  tool knows. Without a trace the flow is the match alone as `sink`. No step is
+  made up. Semgrep 1.179.0 without login printed no trace on the dev tasks, so in
+  practice most flows are one step, and they earn path credit only where a
+  ground-truth step sits within the path tolerance of the match.
+- **`properties.cwe`** lists every CWE of every rule merged into the result, as
+  `"CWE-<n>"`.
+- **`controlStatus`, `residualRisk` and `recommendations` are heuristics, not
+  semantic analysis** ([sast/heuristics.py](sast/heuristics.py), `heuristics-1`):
+  - `controlStatus` is always `none`: the tool reports a finding because it saw
+    no sanitiser on the path. It never claims `partial` or `complete`.
+  - `residualRisk` is the rule's own rating: severity ERROR or `impact: HIGH`
+    gives `high`, WARNING gives `medium`, INFO gives `low`. A merged result
+    takes the highest.
+  - `recommendations` come from a fixed table keyed by the emitted ruleId
+    (HIGH: `REC-SINK-SIDE-IFC`, MEDIUM: `REC-SENSITIVE-DATA-FILTER`,
+    FUNCTIONALITY: `REC-NARROW-TYPED-TOOLS`, PERMISSIONS: `REC-LEAST-PRIVILEGE`)
+    plus a few CWE-specific ids within the same family (authorisation CWEs add
+    `REC-AUTHZ-BEFORE-RETRIEVAL`, log/exposure CWEs add
+    `REC-SENSITIVE-DATA-FILTER`, CWE-250 adds `REC-USER-SECURITY-CONTEXT`). Only
+    ids from the task's catalogue are used.
+  - All three were written from the client spec and the rules' metadata, before
+    any results, and are the same for every task. They will often be wrong where
+    a task has a partial control or a residual risk that differs from the rule's
+    rating.
 - **Merged rule files.** Semgrep starts one `semgrep-core` process to validate
   *each* rule file. On a 1-CPU sandbox that took 244 s with 898 files, and 1.8 s
   with 5 merged files. Rule ids are set to what Semgrep would have reported, so
@@ -178,9 +213,10 @@ The Semgrep version and the rules are pinned in
 
 ## What the platform keeps from a trial
 
-- `result.json` → `agent_result.metadata`: versions, rules digest, CWE map
-  version, scan settings, counts (`results_raw`, `findings_security`,
-  `findings_mapped`, `results_emitted`, `unmapped_by_cwe`), timings, and
+- `result.json` → `agent_result.metadata`: versions, rules digest, CWE map and
+  heuristics versions, scan settings, counts (`results_raw`, `findings_security`,
+  `findings_with_dataflow_trace`, `findings_mapped`, `results_emitted`,
+  `results_with_trace_source`, `unmapped_by_cwe`), timings, and
   `findings_compact`. That last one lists every security finding (rule, CWEs,
   file, lines, emitted ruleId or null), capped at 5,000.
 - `agent/setup/stdout.txt` holds the install log; `agent/command-1/stdout.txt`
@@ -199,8 +235,9 @@ as the headline for SAST, **detection pooled across tasks**:
 - **location + acceptable-CWE recall**;
 - zero-finding tasks with no false positive.
 
-The composite task reward is shown too, but a scanner can earn at most 0.40 of
-it, because path, controls and recommendations need judgment.
+The composite task reward is shown too. Since 0.3.0 the path, controls and
+recommendations sub-scores are filled, but from the tool's trace (if any) and
+fixed heuristics, so read them as such and not as the scanner's judgment.
 
 ## Sizing real tasks
 
@@ -223,7 +260,7 @@ the expected scan time plus 120 s.
 
 ```bash
 uv sync
-.venv/bin/python -m pytest          # 82 tests, no Docker needed
+.venv/bin/python -m pytest          # no Docker or Semgrep needed
 tools/check_merged_rules.sh         # after changing pins.py; needs Docker
 ```
 

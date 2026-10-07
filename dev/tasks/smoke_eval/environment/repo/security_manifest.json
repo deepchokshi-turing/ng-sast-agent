@@ -1,7 +1,0 @@
-{
-  "manifest_version": "0.1",
-  "application": "calc_agent",
-  "intended_task": "Answer arithmetic questions. The calculator tool may only evaluate arithmetic.",
-  "actors": [{"id": "user"}, {"id": "llm", "description": "untrusted with respect to what code runs"}],
-  "authorized_actions": [{"actor": "llm", "action": "calculate", "constraint": "arithmetic only"}]
-}

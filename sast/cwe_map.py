@@ -1,4 +1,4 @@
-"""CWE -> task ruleId, version ``cwe-map-2``. Frozen: changing it is a new version.
+"""CWE -> task ruleId, version ``cwe-map-3``. Frozen: changing it is a new version.
 
 The task asks every agent, LLM or scanner, to report only five ruleIds
 (``instruction.md``). A scanner reports CWEs, so each CWE is assigned to one of
@@ -10,8 +10,14 @@ them **by what the CWE means**, using the scope definitions in the instruction:
   reaching model-visible state or crossing a trust boundary; a secret sitting in
   code (hard-coded credentials), weak transport or storage, or XML entity
   handling are not such flows, so they are not mapped.
-  Always HIGH, never MEDIUM: a scanner cannot tell whether a trust boundary is
-  crossed, and the grader only uses the prefix to match.
+  The table names the LLM02 *family* (written as ``SID_HIGH``); the emitted
+  severity is chosen by :func:`task_rule` (cwe-map-3): ``LLM02.SID.HIGH`` when
+  any of the finding's CWEs is in :data:`BOUNDARY_CWES` (201, 918, 319, 532,
+  359: weaknesses defined by data leaving its boundary) or when its dataflow
+  trace ends in a network, email, file-write or logging call
+  (``sast.heuristics.boundary_sink_kind``); otherwise ``LLM02.SID.MEDIUM``.
+  918 and 319 never put a finding into LLM02 on their own (918 is
+  FUNCTIONALITY, 319 is unmapped); as a secondary CWE they still raise it.
 - ``LLM03.EA.FUNCTIONALITY``: the weakness lets a tool or code path do more than
   its job (code or command execution, query injection, SSRF, path traversal and
   other name resolution, deserialisation, reflection).
@@ -38,18 +44,23 @@ History:
 - cwe-map-2 (2026-10-07, before any dataset run): this table. Review point: 257
   of the 321 security rules mapped to LLM02 under map-1 were hard-coded
   credential rules (CWE-798), which are not disclosure flows.
+- cwe-map-3 (2026-10-07, before any dataset run): same table; LLM02 results are
+  now MEDIUM unless a boundary CWE or a boundary-crossing trace sink makes them
+  HIGH (:func:`task_rule`). Before, every LLM02 result was HIGH.
 """
 
 from __future__ import annotations
 
-VERSION = "cwe-map-2"
+VERSION = "cwe-map-3"
 
 SID_HIGH = "LLM02.SID.HIGH"
+SID_MEDIUM = "LLM02.SID.MEDIUM"
 EA_FUNCTIONALITY = "LLM03.EA.FUNCTIONALITY"
 EA_PERMISSIONS = "LLM03.EA.PERMISSIONS"
 
 RULE_DESCRIPTIONS = {
-    SID_HIGH: "Sensitive data can reach an unauthorised party",
+    SID_HIGH: "Sensitive data can reach an unauthorised party across a trust boundary",
+    SID_MEDIUM: "Sensitive data can reach model-visible or other unprotected state",
     EA_FUNCTIONALITY: "A tool or code path can do more than its task requires",
     EA_PERMISSIONS: "Privilege or permission scope exceeds what the operation requires",
 }
@@ -111,3 +122,23 @@ def rule_for(cwes: list[str] | tuple[str, ...]) -> str | None:
         return None
     entry = CWE_MAP.get(cwes[0])
     return entry[0] if entry is not None else None
+
+
+#: CWEs whose definition is data leaving its authorisation or trust boundary.
+BOUNDARY_CWES = frozenset({"CWE-201", "CWE-918", "CWE-319", "CWE-532", "CWE-359"})
+
+
+def task_rule(cwes: list[str] | tuple[str, ...], *, boundary_sink: bool = False) -> str | None:
+    """The ruleId a result is emitted under.
+
+    :func:`rule_for` picks the family from the primary CWE. An LLM02 result is
+    ``LLM02.SID.HIGH`` when any CWE is in :data:`BOUNDARY_CWES` or the tool's
+    dataflow trace ends in a boundary-crossing call (``boundary_sink``), and
+    ``LLM02.SID.MEDIUM`` otherwise. Other families are unchanged.
+    """
+    rule = rule_for(cwes)
+    if rule != SID_HIGH:
+        return rule
+    if boundary_sink or BOUNDARY_CWES.intersection(cwes):
+        return SID_HIGH
+    return SID_MEDIUM

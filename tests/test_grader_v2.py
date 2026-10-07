@@ -80,4 +80,4 @@ def test_tasks_without_the_new_fields_score_as_before(tmp_path, task, doc):
     old = run(V1, doc, truth(task), tmp_path)
     new = run(V2, doc, truth(task), tmp_path)
     assert new.pop("fp_outside_scope") == 0
-    assert new == old
+    assert {k: new[k] for k in old} == old  # v3 only adds keys (task-level flags)

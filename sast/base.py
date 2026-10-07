@@ -30,7 +30,7 @@ from harbor.environments.base import BaseEnvironment, ExecResult
 from harbor.models.agent.context import AgentContext
 from harbor.models.trial.result import AgentInfo
 
-from . import __version__, cwe_map, sarif, task_config
+from . import __version__, cwe_map, heuristics, sarif, task_config
 from .errors import ScannerError
 from .findings import Finding
 from .task_config import TaskSettings
@@ -141,6 +141,7 @@ class ScannerAgent(BaseAgent):
             "tool": self.tool_name,
             "tool_version": self.tool_version(),
             "cwe_map": cwe_map.VERSION,
+            "heuristics": heuristics.VERSION,
             "install": getattr(self, "_install", None),
             "model_ignored": self.model_name,
             "options_ignored": sorted((getattr(self.options, "model_extra", None) or {}).keys()),
@@ -162,7 +163,7 @@ class ScannerAgent(BaseAgent):
             built, stats = sarif.build(findings, tool_name=self.tool_name, tool_version=self.tool_version())
             meta.update(stats)
             meta["findings_security"] = len(findings)
-            rows = [f.compact(cwe_map.rule_for(f.cwes)) for f in findings]
+            rows = [f.compact(rule) for f, rule in zip(findings, sarif.emitted_rules(findings))]
             meta["findings_compact_columns"] = ["tool_rule_id", "cwes", "file", "start_line", "end_line", "rule_id"]
             meta["findings_compact"] = rows[:MAX_COMPACT_FINDINGS]
             meta["findings_compact_truncated"] = len(rows) > MAX_COMPACT_FINDINGS

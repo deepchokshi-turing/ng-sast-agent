@@ -1,0 +1,345 @@
+{
+  "_comment": "CRAFTED, not recorded: Semgrep 1.179.0 --json --dataflow-traces shape (semgrep_output_v1 match_dataflow_trace). Paths follow dev/tasks/task_7f3a91 but the findings are synthetic.",
+  "version": "1.179.0",
+  "results": [
+    {
+      "check_id": "crafted.taint.tenant-data-to-email",
+      "path": "src/support_copilot/retrieval.py",
+      "start": {
+        "line": 11,
+        "col": 5,
+        "offset": 0
+      },
+      "end": {
+        "line": 11,
+        "col": 30,
+        "offset": 0
+      },
+      "extra": {
+        "message": "crafted crafted.taint.tenant-data-to-email",
+        "metadata": {
+          "cwe": [
+            "CWE-862: Missing Authorization",
+            "CWE-200: Exposure of Sensitive Information to an Unauthorized Actor"
+          ],
+          "category": "security",
+          "impact": "MEDIUM",
+          "likelihood": "MEDIUM",
+          "confidence": "MEDIUM",
+          "subcategory": [
+            "vuln"
+          ]
+        },
+        "severity": "WARNING",
+        "fingerprint": "requires login",
+        "lines": "requires login",
+        "validation_state": "NO_VALIDATOR",
+        "engine_kind": "OSS",
+        "dataflow_trace": {
+          "taint_source": [
+            "CliLoc",
+            [
+              {
+                "path": "src/support_copilot/store.py",
+                "start": {
+                  "line": 21,
+                  "col": 5,
+                  "offset": 0
+                },
+                "end": {
+                  "line": 21,
+                  "col": 30,
+                  "offset": 0
+                }
+              },
+              "json.loads(path.read_text())"
+            ]
+          ],
+          "intermediate_vars": [
+            {
+              "location": {
+                "path": "src/support_copilot/store.py",
+                "start": {
+                  "line": 22,
+                  "col": 5,
+                  "offset": 0
+                },
+                "end": {
+                  "line": 22,
+                  "col": 30,
+                  "offset": 0
+                }
+              },
+              "content": "tickets"
+            },
+            {
+              "location": {
+                "path": "src/support_copilot/retrieval.py",
+                "start": {
+                  "line": 10,
+                  "col": 5,
+                  "offset": 0
+                },
+                "end": {
+                  "line": 10,
+                  "col": 30,
+                  "offset": 0
+                }
+              },
+              "content": "rows"
+            }
+          ],
+          "taint_sink": [
+            "CliCall",
+            [
+              [
+                {
+                  "path": "src/support_copilot/retrieval.py",
+                  "start": {
+                    "line": 11,
+                    "col": 5,
+                    "offset": 0
+                  },
+                  "end": {
+                    "line": 11,
+                    "col": 30,
+                    "offset": 0
+                  }
+                },
+                "notify(rows)"
+              ],
+              [],
+              [
+                "CliLoc",
+                [
+                  {
+                    "path": "src/support_copilot/tools.py",
+                    "start": {
+                      "line": 18,
+                      "col": 5,
+                      "offset": 0
+                    },
+                    "end": {
+                      "line": 18,
+                      "col": 30,
+                      "offset": 0
+                    }
+                  },
+                  "smtp.send_message(msg)"
+                ]
+              ]
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "check_id": "crafted.taint.pii-into-prompt",
+      "path": "src/support_copilot/agent.py",
+      "start": {
+        "line": 30,
+        "col": 5,
+        "offset": 0
+      },
+      "end": {
+        "line": 30,
+        "col": 30,
+        "offset": 0
+      },
+      "extra": {
+        "message": "crafted crafted.taint.pii-into-prompt",
+        "metadata": {
+          "cwe": [
+            "CWE-200: Exposure of Sensitive Information to an Unauthorized Actor"
+          ],
+          "category": "security",
+          "impact": "LOW",
+          "likelihood": "MEDIUM",
+          "confidence": "MEDIUM",
+          "subcategory": [
+            "vuln"
+          ]
+        },
+        "severity": "INFO",
+        "fingerprint": "requires login",
+        "lines": "requires login",
+        "validation_state": "NO_VALIDATOR",
+        "engine_kind": "OSS",
+        "dataflow_trace": {
+          "taint_source": [
+            "CliCall",
+            [
+              [
+                {
+                  "path": "src/support_copilot/agent.py",
+                  "start": {
+                    "line": 25,
+                    "col": 5,
+                    "offset": 0
+                  },
+                  "end": {
+                    "line": 25,
+                    "col": 30,
+                    "offset": 0
+                  }
+                },
+                "load_user(uid)"
+              ],
+              [
+                {
+                  "location": {
+                    "path": "src/support_copilot/users.py",
+                    "start": {
+                      "line": 9,
+                      "col": 5,
+                      "offset": 0
+                    },
+                    "end": {
+                      "line": 9,
+                      "col": 30,
+                      "offset": 0
+                    }
+                  },
+                  "content": "record"
+                }
+              ],
+              [
+                "CliLoc",
+                [
+                  {
+                    "path": "src/support_copilot/users.py",
+                    "start": {
+                      "line": 8,
+                      "col": 5,
+                      "offset": 0
+                    },
+                    "end": {
+                      "line": 8,
+                      "col": 30,
+                      "offset": 0
+                    }
+                  },
+                  "USERS[uid]"
+                ]
+              ]
+            ]
+          ],
+          "intermediate_vars": [
+            {
+              "location": {
+                "path": "src/support_copilot/agent.py",
+                "start": {
+                  "line": 28,
+                  "col": 5,
+                  "offset": 0
+                },
+                "end": {
+                  "line": 28,
+                  "col": 30,
+                  "offset": 0
+                }
+              },
+              "content": "profile"
+            }
+          ],
+          "taint_sink": [
+            "CliLoc",
+            [
+              {
+                "path": "src/support_copilot/agent.py",
+                "start": {
+                  "line": 30,
+                  "col": 5,
+                  "offset": 0
+                },
+                "end": {
+                  "line": 30,
+                  "col": 30,
+                  "offset": 0
+                }
+              },
+              "system = f\"...{profile}\""
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "check_id": "crafted.pattern.eval",
+      "path": "src/support_copilot/tools.py",
+      "start": {
+        "line": 40,
+        "col": 5,
+        "offset": 0
+      },
+      "end": {
+        "line": 40,
+        "col": 30,
+        "offset": 0
+      },
+      "extra": {
+        "message": "crafted crafted.pattern.eval",
+        "metadata": {
+          "cwe": [
+            "CWE-95: Eval Injection"
+          ],
+          "category": "security",
+          "impact": "HIGH",
+          "likelihood": "MEDIUM",
+          "confidence": "MEDIUM",
+          "subcategory": [
+            "vuln"
+          ]
+        },
+        "severity": "ERROR",
+        "fingerprint": "requires login",
+        "lines": "requires login",
+        "validation_state": "NO_VALIDATOR",
+        "engine_kind": "OSS"
+      }
+    },
+    {
+      "check_id": "crafted.best-practice",
+      "path": "src/support_copilot/tools.py",
+      "start": {
+        "line": 41,
+        "col": 5,
+        "offset": 0
+      },
+      "end": {
+        "line": 41,
+        "col": 30,
+        "offset": 0
+      },
+      "extra": {
+        "message": "crafted crafted.best-practice",
+        "metadata": {
+          "cwe": [],
+          "category": "best-practice",
+          "impact": "LOW",
+          "likelihood": "MEDIUM",
+          "confidence": "MEDIUM",
+          "subcategory": [
+            "vuln"
+          ]
+        },
+        "severity": "INFO",
+        "fingerprint": "requires login",
+        "lines": "requires login",
+        "validation_state": "NO_VALIDATOR",
+        "engine_kind": "OSS"
+      }
+    }
+  ],
+  "errors": [],
+  "paths": {
+    "scanned": [
+      "src/support_copilot/agent.py",
+      "src/support_copilot/retrieval.py",
+      "src/support_copilot/store.py",
+      "src/support_copilot/tools.py",
+      "src/support_copilot/users.py"
+    ]
+  },
+  "skipped_rules": []
+}

@@ -46,3 +46,21 @@ def test_authorisation_on_data_is_disclosure():
     # that preserve its authorisation boundary".
     for cwe in ("CWE-285", "CWE-639", "CWE-862", "CWE-863"):
         assert cwe_map.rule_for((cwe,)) == cwe_map.SID_HIGH
+
+
+def test_llm02_is_medium_unless_a_boundary_is_shown():
+    assert cwe_map.task_rule(("CWE-200",)) == cwe_map.SID_MEDIUM
+    assert cwe_map.task_rule(("CWE-862",)) == cwe_map.SID_MEDIUM
+    assert cwe_map.task_rule(("CWE-200",), boundary_sink=True) == cwe_map.SID_HIGH
+    for cwe in ("CWE-201", "CWE-532", "CWE-359"):
+        assert cwe_map.task_rule((cwe,)) == cwe_map.SID_HIGH, cwe
+    # 918 and 319 raise an LLM02 result as secondary CWEs, but never make one.
+    assert cwe_map.task_rule(("CWE-200", "CWE-918")) == cwe_map.SID_HIGH
+    assert cwe_map.task_rule(("CWE-200", "CWE-319")) == cwe_map.SID_HIGH
+    assert cwe_map.task_rule(("CWE-918",)) == cwe_map.EA_FUNCTIONALITY
+    assert cwe_map.task_rule(("CWE-319",)) is None
+    # Other families ignore the boundary.
+    assert cwe_map.task_rule(("CWE-95",), boundary_sink=True) == cwe_map.EA_FUNCTIONALITY
+    assert cwe_map.task_rule(("CWE-250",)) == cwe_map.EA_PERMISSIONS
+    assert cwe_map.VERSION == "cwe-map-3"
+    assert cwe_map.SID_MEDIUM in cwe_map.RULE_DESCRIPTIONS

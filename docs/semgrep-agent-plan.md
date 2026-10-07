@@ -347,3 +347,22 @@ From Haseeb's review, checked one by one. The README is the current reference.
   `dev/tasks/smoke_eval` now carries that case as a regression check.
 - **Not agent issues:** grader and ground-truth design (twin scoring, region
   width, sink alternatives, trap windows) belong to the task format.
+
+## 11. Client-spec coverage (2026-10-07, v0.3.0, cwe-map-3)
+
+Measurements 2 to 4 of the client spec scored 0 by design until now. The README
+is the reference. In short:
+
+- The scan runs with `--dataflow-traces`. A taint trace becomes the codeFlow
+  (`source`, then the match as `sink`). Without one, the match alone is the
+  `sink`. Intermediate variables are not emitted (no honest role). This reverses
+  the section 3.3 decision on one-step flows at the client's request. The
+  README states that their path credit comes from line tolerance.
+- LLM02 is MEDIUM unless a boundary CWE (201, 918, 319, 532, 359) or a trace
+  sink that is a network, email, file-write or logging call makes it HIGH.
+- `controlStatus` (`none`), `residualRisk` (rule severity/impact) and
+  `recommendations` (fixed table by ruleId and CWE) are documented heuristics
+  in `sast/heuristics.py`.
+- The traces are tested against a crafted fixture in Semgrep's documented JSON
+  shape (`tests/fixtures/crafted_semgrep_dataflow_trace.json`). A real run with
+  traces has not been recorded yet.
