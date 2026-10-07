@@ -12,14 +12,14 @@ from harbor.models.agent.context import AgentContext
 
 from sast.errors import ScannerError
 from sast.semgrep.agent import SemgrepAgent
-from tests.conftest import DEV_TASKS, FIXTURES
+from tests.conftest import SAMPLE_TASKS, FIXTURES
 
 
 class FakeSandbox:
     """Just enough of BaseEnvironment: a dict file system and scripted exec."""
 
     def __init__(self, task: str, semgrep_output: bytes | None, scan_exit: int = 0, install_exit: int = 0):
-        self.environment_dir = DEV_TASKS / task / "environment"
+        self.environment_dir = SAMPLE_TASKS / task / "environment"
         self.files: dict[str, bytes] = {}
         self.commands: list[tuple[str, dict | None]] = []
         self.semgrep_output = semgrep_output
@@ -80,7 +80,7 @@ def test_happy_path_writes_sarif_logs_and_metadata(tmp_path):
     scan_log = (tmp_path / "command-1" / "stdout.txt").read_text()
     assert "--exclude tests" in scan_log and "--include /src" in scan_log and "--jobs 1" in scan_log
     assert "--max-memory 1536" in scan_log
-    assert "--dataflow-traces" in scan_log
+    assert "--dataflow-traces" not in scan_log  # no JSON trace without login
     assert "--no-rewrite-rule-ids" in scan_log and "/opt/sast/rules-merged/generic_secrets.yaml" in scan_log
 
     meta = context.metadata
@@ -89,7 +89,6 @@ def test_happy_path_writes_sarif_logs_and_metadata(tmp_path):
     assert meta["cwe_map"] == "cwe-map-3"
     assert meta["heuristics"] == "heuristics-1"
     assert meta["agent_version"] == "0.3.0+semgrep-1.179.0"
-    assert meta["findings_with_dataflow_trace"] == 0
     assert meta["scan_budget_sec"] == 780
     assert meta["results_emitted"] == 2  # the eval() and the merged shell=True pair
     assert meta["findings_compact"][0][-1] == "LLM03.EA.FUNCTIONALITY"

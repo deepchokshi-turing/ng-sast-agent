@@ -1,5 +1,7 @@
-"""tools/report.py category math (checked against a hand-computed example) and
-tools/leak_scan.py on a small twin pair."""
+"""tools/report.py category math (checked against a hand-computed example),
+per-role reward means and the loose risk table, and tools/leak_scan.py (the
+heuristic leak check) on a small twin pair, including the ground-truth shingle
+check and the Dockerfile check."""
 
 from __future__ import annotations
 
@@ -92,6 +94,58 @@ def test_measurements_and_fp_out(report):
     assert "fp_out" in stdout and "youden" in stdout and "| category |" in md
 
 
+def test_reward_is_reported_per_role_never_combined(tmp_path):
+    trials = {
+        "pos": reward(1, 0.0, {EA: (1, 0)}, {"EA"}, set(), reward=0.2),
+        "neg_clean": reward(0, 1.0, {EA: (0, 0)}, set(), set(), reward=1.0),
+        "neg_near": reward(0, 0.0, {EA: (0, 1)}, set(), {"EA"}, reward=0.0,
+                           **{"neg.fail.near_fix": 1, "neg.fail.trap": 0}),
+        "neg_trap": reward(0, 0.0, {EA: (0, 1)}, set(), {"EA"}, reward=0.0,
+                           **{"neg.fail.near_fix": 0, "neg.fail.trap": 1}),
+    }
+    files = []
+    for name, r in trials.items():
+        f = tmp_path / name / "verifier" / "reward.json"
+        f.parent.mkdir(parents=True)
+        f.write_text(json.dumps(r))
+        files.append(str(f))
+    out = tmp_path / "report"
+    proc = subprocess.run([sys.executable, str(REPORT), *files, "--write", str(out)],
+                          check=True, capture_output=True, text=True)
+    summary = json.loads((out / "report.json").read_text())["summary"]
+    roles = summary["reward_by_role"]
+    assert roles["positive"] == {"tasks": 1, "mean_reward": pytest.approx(0.2)}
+    assert roles["negative"]["tasks"] == 3 and roles["negative"]["mean_reward"] == pytest.approx(1 / 3)
+    assert (roles["negative"]["failed"], roles["negative"]["failed_near_fix"], roles["negative"]["failed_trap"]) == (3 - 1, 1, 1)
+    assert "mean_reward" not in summary  # no mean over positives and negatives together
+    md = (out / "report.md").read_text()
+    for text in (proc.stdout, md):
+        assert "positives only (1 tasks): 0.200" in text
+        assert "negatives only (3 tasks): 0.333" in text and "near the fix 1, on a trap 1" in text
+        assert "not a score" in text and "Harbor" in text
+        assert "0.40" not in text and "ceiling" not in text
+        assert "mean task reward (composite" not in text
+
+
+def test_report_text_has_no_stale_ceiling():
+    assert "0.40" not in REPORT.read_text() and "ceiling" not in REPORT.read_text()
+
+
+def test_loose_risk_table_is_separate(tmp_path):
+    loose = reward(1, 0.0, {SID: (1, 0)}, {"SID"}, set(), **{"tl.pred_loose.SID": 1, "tl.pred_loose.EA": 0})
+    f = tmp_path / "t" / "verifier" / "reward.json"
+    f.parent.mkdir(parents=True)
+    f.write_text(json.dumps(loose))
+    out = tmp_path / "report"
+    proc = subprocess.run([sys.executable, str(REPORT), str(f), "--write", str(out)], check=True,
+                          capture_output=True, text=True)
+    summary = json.loads((out / "report.json").read_text())["summary"]
+    sid = "sensitive_information_disclosure"
+    assert (summary["risk_types"][sid]["TP"], summary["risk_types"][sid]["FN"]) == (0, 1)
+    assert (summary["risk_types_loose"][sid]["TP"], summary["risk_types_loose"][sid]["FN"]) == (1, 0)
+    assert "loose" in proc.stdout
+
+
 def test_job_directory_mode_still_works(tmp_path):
     job = tmp_path / "jobs" / "2026-10-07__run"
     for name, r in list(TRIALS.items())[:4]:
@@ -123,7 +177,11 @@ def make_twin(root: Path, tool_neg: str = "def write(p):\n    return safe(p)\n")
         (repo / "fixtures" / "secret.env").write_text("TOKEN=CNRY-abc123-tok\n")
         (repo / "src" / "mini" / "app.py").write_text("print('hi')\n")
         (repo / "src" / "mini" / "tool.py").write_text(tool)
-        (t / "tests" / "ground_truth.json").write_text(json.dumps({"fix_changed_files": ["src/mini/tool.py"]}))
+        (t / "tests" / "ground_truth.json").write_text(json.dumps({
+            "fix_changed_files": ["src/mini/tool.py"],
+            "findings": [{"id": "F1", "rationale": "The model picks any path and the notes tool writes there unchecked."}],
+            "evidence": {"upstream_fix_summary": "resolve the target and refuse paths outside the notes folder"},
+        }))
         (t / "validation" / "provenance.json").write_text(json.dumps({"qc": {"label_leak_scan": None}}))
 
 
@@ -146,6 +204,17 @@ def test_clean_twin_passes_and_writes_qc(tmp_path):
     (lambda t: (t / "environment/repo/src/mini/app.py").write_text("print('bye')\n"), "outside fix_changed_files"),
     (lambda t: (t / "environment/repo/fixtures/secret.env").write_text("TOKEN=other\n"), "manifest or fixtures"),
     (lambda t: (t / "environment/repo/security_manifest.json").write_text("{}"), "manifest or fixtures"),
+    (lambda t: (t / "environment/repo/src/mini/tool.py").write_text(
+        "# Resolve the target, and refuse paths OUTSIDE the notes-folder.\ndef write(p):\n    return safe(p)\n"),
+     "ground-truth text from evidence.upstream_fix_summary appears in environment/repo/src/mini/tool.py"),
+    (lambda t: (t / "environment/Dockerfile").write_text("FROM python:3.12-slim\nCOPY tests/ /app/tests/\n"),
+     "Dockerfile copies tests/"),
+    (lambda t: (t / "environment/Dockerfile").write_text("FROM python:3.12-slim\nCOPY . /app/\n"),
+     "Dockerfile copies ."),
+    (lambda t: (t / "environment/Dockerfile").write_text('FROM python:3.12-slim\nADD ["repo/", "x.txt", "/app/"]\n'),
+     "Dockerfile copies x.txt"),
+    (lambda t: (t / "environment/Dockerfile").write_text("FROM python:3.12-slim\nCOPY repo/ \\\n  ../tests /app/\n"),
+     "Dockerfile copies ../tests"),
 ])
 def test_problems_fail_the_scan(tmp_path, mutate, message):
     make_twin(tmp_path)
@@ -155,6 +224,41 @@ def test_problems_fail_the_scan(tmp_path, mutate, message):
     assert "task_abc_negative  FAIL" in proc.stdout
     qc = json.loads((tmp_path / "task_abc_negative" / "validation" / "provenance.json").read_text())["qc"]
     assert qc["label_leak_scan"] == "fail"
+
+
+def test_output_calls_itself_heuristic(tmp_path):
+    make_twin(tmp_path)
+    proc = leak(tmp_path)
+    assert "heuristic leak check" in proc.stdout and "not proof" in proc.stdout
+    assert "heuristic" in LEAK.read_text().split("\n\n")[0].lower()
+
+
+@pytest.mark.parametrize("text, leaks", [
+    ("# the model picks any path and the notes\n", True),     # six words of the rationale, case ignored
+    ("# the model picks any path\n", False),                   # five words only
+    ("# The model picks any\n# path and the notes\n", True),  # line breaks do not hide it
+])
+def test_ground_truth_shingles(tmp_path, text, leaks):
+    make_twin(tmp_path)
+    for role in ("positive", "negative"):
+        (tmp_path / f"task_abc_{role}" / "environment/repo/src/mini/app.py").write_text(text)
+    proc = leak(tmp_path)
+    assert ("ground-truth text from findings[0].rationale" in proc.stdout) is leaks, proc.stdout
+
+
+@pytest.mark.parametrize("dockerfile", [
+    "ARG IMG=sast-tools:0.3.0\nFROM ${IMG} AS tools\nFROM python:3.12-slim\nCOPY --from=tools /opt/sast /opt/sast\n"
+    "COPY repo/ /app/repo/\n",
+    "FROM python:3.12-slim\nCOPY ./repo /app/repo\n",
+    'FROM python:3.12-slim\nCOPY ["repo", "/app/repo"]\n',
+    "FROM python:3.12-slim\nCOPY --chown=app:app repo/ /app/repo/\n",
+])
+def test_dockerfile_copying_only_repo_passes(tmp_path, dockerfile):
+    make_twin(tmp_path)
+    for role in ("positive", "negative"):
+        (tmp_path / f"task_abc_{role}" / "environment/Dockerfile").write_text(dockerfile)
+    proc = leak(tmp_path)
+    assert proc.returncode == 0, proc.stdout
 
 
 def test_missing_twin_is_reported(tmp_path):

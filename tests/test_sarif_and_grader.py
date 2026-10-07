@@ -5,7 +5,7 @@ import json
 from sast import sarif
 from sast.findings import Finding
 from sast.semgrep.normalise import normalise
-from tests.conftest import fixture_json
+from tests.conftest import SAMPLE_TASKS, fixture_json
 
 
 def f(file="src/calc_agent/agent.py", line=8, cwes=("CWE-95",), rule="r1", level="warning"):
@@ -26,13 +26,12 @@ def test_profile_shape():
     assert region == {"startLine": 8, "endLine": 8}
     assert all(isinstance(v, int) for v in region.values())
     assert result["properties"] == {
-        "cwe": ["CWE-95"], "toolRuleIds": ["r1"], "controlStatus": "none", "residualRisk": "medium",
-        "recommendations": ["REC-NARROW-TYPED-TOOLS"], "dataflowTrace": False, "boundarySink": None,
+        "cwe": ["CWE-95"], "toolRuleIds": ["r1"],
+        "heuristics": {"controlStatus": "none", "residualRisk": "medium",
+                       "recommendations": ["REC-NARROW-TYPED-TOOLS"], "version": "heuristics-1"},
     }
-    # No trace: one step, the match itself, as the sink.
-    (step,) = result["codeFlows"][0]["threadFlows"][0]["locations"]
-    assert step["properties"] == {"role": "sink"}
-    assert step["location"]["physicalLocation"] == result["locations"][0]["physicalLocation"]
+    # No trace from the tool, so no code flow, not even a one-step one.
+    assert "codeFlows" not in result
     assert stats["results_emitted"] == 1
     json.dumps(doc)  # serialisable
 
@@ -73,11 +72,11 @@ def test_grader_scores_the_eval_hit(grade_sarif):
     score = grade_sarif("smoke_eval", doc)
     assert (score["tp"], score["fp"], score["fn"]) == (1, 0, 0)
     assert score["fp_outside_scope"] == 1  # maintenance.py: not a file the fix changed
-    # controlStatus "none", residualRisk "high" (impact HIGH) and REC-NARROW-TYPED-TOOLS all
-    # score. The path is full only because this tiny task's steps (lines 8 and 12) sit
-    # inside the 10-line tolerance of the one-step flow at the match: no trace was used.
-    assert (score["controls"], score["recommendations"], score["path"]) == (1.0, 1.0, 1.0)
-    assert score["reward"] == 1.0
+    # Path, controls and recommendations score 0 by design: no trace, and the
+    # heuristics sit under properties.heuristics, which the grader does not read.
+    assert (score["controls"], score["recommendations"], score["path"]) == (0.0, 0.0, 0.0)
+    assert score["classification"] == 1.0
+    assert score["reward"] == 0.4  # detection and classification only, the scanner ceiling
 
 
 def test_grader_twin_passes_with_findings_elsewhere(grade_sarif):
@@ -117,97 +116,56 @@ def test_grader_extra_result_in_a_fixed_file_lowers_detection(grade_sarif):
     assert score["detection"] < 1.0
 
 
-# ---- codeFlows, CWE lists, heuristics, LLM02 severity ---------------------------
+# ---- CWE lists, heuristics, LLM02 severity ------------------------------------
 
 import re  # noqa: E402
-from pathlib import Path  # noqa: E402
 
 from sast import cwe_map, heuristics  # noqa: E402
-from sast.findings import TraceStep  # noqa: E402
 
-INSTRUCTION = Path(__file__).resolve().parents[1] / "dev/tasks/task_7f3a91/instruction.md"
-
-
-def results_by_tool_rule(doc):
-    return {r["properties"]["toolRuleIds"][0]: r for r in doc["runs"][0]["results"]}
+INSTRUCTION = SAMPLE_TASKS / "task_7f3a91" / "instruction.md"
 
 
-def steps(result):
-    return [(s["properties"]["role"],
-             s["location"]["physicalLocation"]["artifactLocation"]["uri"],
-             s["location"]["physicalLocation"]["region"]["startLine"])
-            for s in result["codeFlows"][0]["threadFlows"][0]["locations"]]
+def test_no_result_has_a_code_flow_or_scored_heuristic():
+    for name in ("semgrep_1.179.0_smoke_eval.json", "semgrep_1.179.0_smoke_eval_twin.json",
+                 "semgrep_1.179.0_task_7f3a91.json"):
+        doc, _ = semgrep_sarif(name)
+        for r in doc["runs"][0]["results"]:
+            assert "codeFlows" not in r
+            assert not {"controlStatus", "residualRisk", "recommendations"} & set(r["properties"])
+            assert set(r["properties"]["heuristics"]) == {"controlStatus", "residualRisk", "recommendations", "version"}
 
 
-def test_trace_becomes_source_then_sink_and_nothing_is_invented():
-    doc, stats = semgrep_sarif("crafted_semgrep_dataflow_trace.json")
-    by_rule = results_by_tool_rule(doc)
-    email = by_rule["crafted.taint.tenant-data-to-email"]
-    # Intermediate variables are propagation, not context assembly: left out.
-    assert steps(email) == [("source", "src/support_copilot/store.py", 21),
-                            ("sink", "src/support_copilot/retrieval.py", 11)]
-    assert steps(by_rule["crafted.taint.pii-into-prompt"]) == [
-        ("source", "src/support_copilot/users.py", 8), ("sink", "src/support_copilot/agent.py", 30)]
-    assert steps(by_rule["crafted.pattern.eval"]) == [("sink", "src/support_copilot/tools.py", 40)]
-    for r in doc["runs"][0]["results"]:
-        roles = [role for role, _, _ in steps(r)]
-        assert set(roles) <= {"source", "sink"} and roles[-1] == "sink"
-    assert stats["results_with_trace_source"] == 2
+def test_all_cwes_of_the_rules_are_listed():
+    doc, _ = sarif.build([f(rule="a", cwes=("CWE-862", "CWE-200")), f(rule="b", cwes=("CWE-200", "CWE-359"))],
+                         tool_name="semgrep", tool_version="x")
+    (result,) = doc["runs"][0]["results"]
+    assert result["properties"]["cwe"] == ["CWE-862", "CWE-200", "CWE-359"]
+    assert all(re.fullmatch(r"CWE-[1-9]\d*", c) for c in result["properties"]["cwe"])
 
 
-def test_all_cwes_of_the_rule_are_listed():
-    doc, _ = semgrep_sarif("crafted_semgrep_dataflow_trace.json")
-    for r in doc["runs"][0]["results"]:
-        assert all(re.fullmatch(r"CWE-[1-9]\d*", c) for c in r["properties"]["cwe"])
-    assert results_by_tool_rule(doc)["crafted.taint.tenant-data-to-email"]["properties"]["cwe"] == [
-        "CWE-862", "CWE-200"]
-
-
-def test_llm02_severity_from_trace_sink_and_boundary_cwes():
-    doc, _ = semgrep_sarif("crafted_semgrep_dataflow_trace.json")
-    by_rule = results_by_tool_rule(doc)
-    email = by_rule["crafted.taint.tenant-data-to-email"]
-    assert email["ruleId"] == "LLM02.SID.HIGH"  # trace ends in smtp.send_message
-    assert email["properties"]["boundarySink"] == "email"
-    prompt = by_rule["crafted.taint.pii-into-prompt"]
-    assert prompt["ruleId"] == "LLM02.SID.MEDIUM" and prompt["properties"]["boundarySink"] is None
-    # No trace: a boundary CWE decides; otherwise MEDIUM.
+def test_llm02_severity_from_boundary_cwes():
     doc, _ = sarif.build([f(file="a.py", cwes=("CWE-200", "CWE-532")), f(file="b.py", cwes=("CWE-862",))],
                          tool_name="semgrep", tool_version="x")
     assert [r["ruleId"] for r in doc["runs"][0]["results"]] == ["LLM02.SID.HIGH", "LLM02.SID.MEDIUM"]
 
 
-def test_a_boundary_sink_needs_a_trace():
-    # Sink code is only ever read from a trace; a finding without one is judged by CWE.
-    plain = f(cwes=("CWE-200",))
-    assert sarif.boundary_sink(plain) is None
-    traced = Finding("r", ("CWE-200",), "a.py", 5, 5, "m", "warning",
-                     trace_source=TraceStep("a.py", 2, 2, "x"), trace_sink_code=("requests.post(url, data=x)",))
-    assert sarif.boundary_sink(traced) == "network"
-
-
 def test_high_and_medium_on_one_line_stay_one_result():
-    traced = Finding("t", ("CWE-200",), "a.py", 5, 5, "m", "warning",
-                     trace_source=TraceStep("a.py", 2, 2, "x"), trace_sink_code=("logger.info(x)",))
+    high = Finding("h", ("CWE-532",), "a.py", 5, 5, "m", "warning")
     plain = Finding("p", ("CWE-209",), "a.py", 5, 5, "m", "warning")
-    doc, stats = sarif.build([plain, traced], tool_name="semgrep", tool_version="x")
+    doc, stats = sarif.build([plain, high], tool_name="semgrep", tool_version="x")
     (result,) = doc["runs"][0]["results"]
-    assert result["ruleId"] == "LLM02.SID.HIGH" and result["properties"]["boundarySink"] == "logging"
-    assert steps(result) == [("source", "a.py", 2), ("sink", "a.py", 5)]
-    assert sarif.emitted_rules([plain, traced]) == ["LLM02.SID.HIGH", "LLM02.SID.HIGH"]
+    assert result["ruleId"] == "LLM02.SID.HIGH"
+    assert sarif.emitted_rules([plain, high]) == ["LLM02.SID.HIGH", "LLM02.SID.HIGH"]
     assert stats["results_emitted"] == 1
 
 
-def test_controls_risk_and_recommendations():
-    doc, _ = semgrep_sarif("crafted_semgrep_dataflow_trace.json")
-    by_rule = results_by_tool_rule(doc)
-    email = by_rule["crafted.taint.tenant-data-to-email"]["properties"]
-    assert email["controlStatus"] == "none" and email["residualRisk"] == "medium"
-    assert email["recommendations"] == ["REC-AUTHZ-BEFORE-RETRIEVAL", "REC-SENSITIVE-DATA-FILTER",
-                                        "REC-SINK-SIDE-IFC"]
-    prompt = by_rule["crafted.taint.pii-into-prompt"]["properties"]
-    assert prompt["residualRisk"] == "low" and prompt["recommendations"] == ["REC-SENSITIVE-DATA-FILTER"]
-    ev = by_rule["crafted.pattern.eval"]["properties"]
+def test_heuristic_risk_and_recommendations():
+    doc, _ = sarif.build([Finding("t", ("CWE-862", "CWE-200"), "a.py", 5, 5, "m", "warning"),
+                          Finding("e", ("CWE-95",), "b.py", 3, 3, "m", "error", residual_risk="high")],
+                         tool_name="semgrep", tool_version="x")
+    disclosure, ev = (r["properties"]["heuristics"] for r in doc["runs"][0]["results"])
+    assert disclosure["controlStatus"] == "none" and disclosure["residualRisk"] == "medium"
+    assert disclosure["recommendations"] == ["REC-AUTHZ-BEFORE-RETRIEVAL", "REC-SENSITIVE-DATA-FILTER"]
     assert ev["residualRisk"] == "high" and ev["recommendations"] == ["REC-NARROW-TYPED-TOOLS"]
 
 
@@ -216,7 +174,7 @@ def test_merged_result_takes_the_highest_residual_risk():
                           Finding("b", ("CWE-94",), "a.py", 3, 3, "m", "error", residual_risk="high")],
                          tool_name="semgrep", tool_version="x")
     (result,) = doc["runs"][0]["results"]
-    assert result["properties"]["residualRisk"] == "high"
+    assert result["properties"]["heuristics"]["residualRisk"] == "high"
 
 
 def test_recommendation_ids_are_the_instructions_catalogue():
@@ -238,15 +196,10 @@ def test_driver_reports_the_versions():
     assert {r["id"] for r in doc["runs"][0]["tool"]["driver"]["rules"]} == {"LLM03.EA.FUNCTIONALITY"}
 
 
-def test_grader_scores_a_traced_disclosure(grade_sarif):
-    # Contract check on the reference task with the crafted trace: everything the
-    # grader reads is present and well-formed. Not a claim about real Semgrep runs.
-    doc, _ = semgrep_sarif("crafted_semgrep_dataflow_trace.json")
-    doc["runs"][0]["results"] = [r for r in doc["runs"][0]["results"]
-                                 if r["properties"]["toolRuleIds"] == ["crafted.taint.tenant-data-to-email"]]
-    score = grade_sarif("task_7f3a91", doc)
-    assert (score["tp"], score["fp"], score["fn"]) == (1, 0, 0)
-    assert score["classification"] == 1.0          # LLM02.SID.HIGH and CWE-862 acceptable
-    assert score["controls"] == 0.75               # controlStatus right, residualRisk medium vs high
-    assert score["recommendations"] == 1.0         # all three are applicable
-    assert 0.0 < score["path"] < 1.0               # root cause covered, model steps and tools.py sink not
+def test_grader_ignores_the_heuristics(grade_sarif):
+    # The same detection scores the same whatever the heuristic tables say.
+    doc, _ = semgrep_sarif("semgrep_1.179.0_smoke_eval.json")
+    base = grade_sarif("smoke_eval", doc)
+    for r in doc["runs"][0]["results"]:
+        r["properties"]["heuristics"] = {"controlStatus": "partial", "residualRisk": "low", "recommendations": []}
+    assert grade_sarif("smoke_eval", doc)["reward"] == base["reward"]

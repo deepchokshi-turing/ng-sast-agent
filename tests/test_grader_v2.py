@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import DEV_TASKS, ROOT
+from tests.conftest import ROOT, SAMPLE_TASKS
 
 V2 = ROOT / "task_format" / "grade.py"
 #: The original grader as shipped in the reference task, kept for comparison.
@@ -39,7 +39,7 @@ def sarif(*results):
 
 
 def truth(task):
-    return json.loads((DEV_TASKS / task / "tests" / "ground_truth.json").read_text())
+    return json.loads((SAMPLE_TASKS / task / "tests" / "ground_truth.json").read_text())
 
 
 TWIN = "smoke_eval_twin"

@@ -1,4 +1,4 @@
-"""Fixed rules for the SARIF fields a pattern scanner cannot measure, ``heuristics-1``.
+"""Fixed tables for the fields a pattern scanner cannot measure, ``heuristics-1``.
 
 ``controlStatus``, ``residualRisk`` and ``recommendations`` need judgment about
 the code around a finding. A pattern or taint scanner has none, so these values
@@ -6,24 +6,29 @@ come from small, fixed tables and are the same for every task. They are
 heuristics, not semantic analysis, and were written from the task's
 recommendation catalogue and the rules' own metadata without looking at labels.
 
-- ``controlStatus`` is always ``"none"``. A taint or pattern rule reports a
-  finding exactly when it saw no sanitiser on the path, so "none" is what the
-  tool itself is claiming. It never claims "partial" or "complete".
+The SARIF writer puts them under ``properties.heuristics``, never in the
+top-level fields the grader scores. They are reported as a separate heuristic
+track, because a constant that happens to match the dataset's most common label
+would otherwise raise a tool-only score with nothing the tool found.
+
+- ``controlStatus`` is always ``"none"``. That is what a taint rule claims (it
+  reports a finding only when it saw no sanitiser on the path). A pattern or
+  audit rule makes no claim about controls at all, so for those results the
+  value is a default, not a measurement.
 - ``residualRisk`` follows the rule's own severity and impact metadata:
   severity ERROR (or CRITICAL/HIGH) or ``metadata.impact: HIGH`` gives
-  ``high``; else severity WARNING/MEDIUM gives ``medium``; else INFO/LOW gives
+  ``high``, else severity WARNING/MEDIUM gives ``medium``, else INFO/LOW gives
   ``low``. Anything unrecognised is ``medium``.
 - ``recommendations`` come from :data:`RULE_RECOMMENDATIONS` (one per task
   ruleId) plus :data:`CWE_RECOMMENDATIONS` (CWE-specific, only within the same
-  ruleId family), using only the task's REC-* catalogue ids.
-- A dataflow sink "crosses a boundary" (used to pick ``LLM02.SID.HIGH`` over
-  ``MEDIUM``) when the code the tool printed at the sink looks like a network,
-  email, file-write or logging call (:data:`BOUNDARY_SINK_PATTERNS`).
+  ruleId family), using only the task's REC-* catalogue ids. The per-rule choice
+  is the author's pick of the control that fits a pattern finding best. It does
+  not follow the order in which the client spec lists the controls (the spec
+  lists REC-MINIMIZE-TOOLS first for excessive functionality and
+  REC-AUTHZ-BEFORE-RETRIEVAL first for SID Medium).
 """
 
 from __future__ import annotations
-
-import re
 
 VERSION = "heuristics-1"
 
@@ -46,7 +51,7 @@ CATALOGUE = (
     "REC-POLICY-GATE",
 )
 
-#: The control the client spec lists first for each risk the agent reports.
+#: One control per ruleId the agent reports (see the module docstring).
 RULE_RECOMMENDATIONS: dict[str, tuple[str, ...]] = {
     # Data crosses a boundary: block it at the sink.
     "LLM02.SID.HIGH": ("REC-SINK-SIDE-IFC",),
@@ -81,21 +86,6 @@ CWE_RECOMMENDATIONS: dict[tuple[str, str], tuple[str, ...]] = {
     ("LLM03", "CWE-250"): ("REC-USER-SECURITY-CONTEXT",),
 }
 
-#: Code at a sink that sends data out of the process: network, email, file
-#: write or logging. Matched case-insensitively against what the tool printed.
-BOUNDARY_SINK_PATTERNS: dict[str, re.Pattern[str]] = {
-    "network": re.compile(
-        r"\b(requests|httpx|aiohttp|urllib\d?|urlopen|http\.client|axios|fetch|webhook|socket)"
-        r"\b|\.(post|put|patch|request|send)\s*\(", re.IGNORECASE),
-    "email": re.compile(r"smtp|send_?mail|send_?email|nodemailer|\bmail\b", re.IGNORECASE),
-    "file_write": re.compile(
-        r"\.write(lines)?\s*\(|write_(text|bytes)\s*\(|writeFile(Sync)?\s*\(|appendFile(Sync)?\s*\(|"
-        r"\bjson\.dump\s*\(|createWriteStream", re.IGNORECASE),
-    "logging": re.compile(
-        r"\b(logging|logger|log|console)\s*\.\s*(debug|info|warn|warning|error|exception|critical|log|trace)\b",
-        re.IGNORECASE),
-}
-
 _HIGH = {"ERROR", "CRITICAL", "HIGH"}
 _MEDIUM = {"WARNING", "MEDIUM"}
 _LOW = {"INFO", "LOW", "INVENTORY", "EXPERIMENT"}
@@ -121,10 +111,3 @@ def recommendations(rule: str, cwes: list[str] | tuple[str, ...]) -> list[str]:
         chosen.update(CWE_RECOMMENDATIONS.get((family, cwe), ()))
     return [rec for rec in CATALOGUE if rec in chosen]
 
-
-def boundary_sink_kind(code: str) -> str | None:
-    """"network", "email", "file_write" or "logging" if the sink code looks like one."""
-    for kind, pattern in BOUNDARY_SINK_PATTERNS.items():
-        if pattern.search(code or ""):
-            return kind
-    return None

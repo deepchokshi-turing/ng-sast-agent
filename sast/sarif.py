@@ -3,17 +3,19 @@
 What each field is built from:
 
 - ``ruleId``: the CWE table (``sast.cwe_map.task_rule``). An LLM02 result is
-  HIGH when a CWE or the trace's sink shows data leaving its boundary, else MEDIUM.
+  HIGH when one of its CWEs shows data leaving its boundary, else MEDIUM.
 - ``locations[0]``: the match.
-- ``codeFlows[0].threadFlows[0].locations``: only what the tool reported. With a
-  Semgrep dataflow trace: the trace's taint source (role ``source``), then the
-  match (role ``sink``). Without one: the match alone as ``sink``. Intermediate
-  variables are not emitted: a variable on the taint path is propagation, and
-  none of the task's roles (``context_assembly`` means data placed into model
-  context) describes it honestly. No step is ever made up.
+- ``codeFlows``: never emitted. A code flow may only come from a dataflow trace
+  the tool itself reported, and Semgrep OSS 1.179.0 puts no trace in its JSON
+  output without a login. A one-step flow made from the match alone would earn
+  path credit through the grader's line tolerance with nothing behind it.
 - ``properties.cwe``: every CWE of every rule merged into the result.
-- ``properties.controlStatus``, ``residualRisk`` and ``recommendations``: fixed
-  heuristics from ``sast.heuristics``, not semantic analysis.
+- ``properties.heuristics``: ``controlStatus``, ``residualRisk`` and
+  ``recommendations`` from ``sast.heuristics`` (fixed tables, not analysis),
+  plus the table ``version``. They sit under their own key so the grader, which
+  reads only the top-level ``properties.controlStatus``, ``residualRisk`` and
+  ``recommendations``, never scores them. Reports show them as a separate
+  heuristic track.
 
 The grader matches each ground-truth finding to the first result near it, in
 results order, so results are sorted (file, line, ruleId) to make that order
@@ -31,17 +33,6 @@ from .findings import Finding
 SCHEMA = "https://json.schemastore.org/sarif-2.1.0.json"
 _LEVEL_RANK = {"note": 0, "warning": 1, "error": 2}
 _RISK_RANK = {"low": 0, "medium": 1, "high": 2}
-
-
-def boundary_sink(finding: Finding) -> str | None:
-    """The kind of boundary-crossing call at the end of the finding's trace, if any."""
-    if not finding.has_trace:
-        return None
-    for code in finding.trace_sink_code:
-        kind = heuristics.boundary_sink_kind(code)
-        if kind:
-            return kind
-    return None
 
 
 def _region(file: str, start: int, end: int) -> dict[str, Any]:
@@ -72,9 +63,6 @@ def _group(findings: list[Finding]) -> tuple[dict[tuple[str, int, str], dict[str
                 "cwes": list(f.cwes),
                 "tool_rule_ids": [f.tool_rule_id],
                 "residual_risk": f.residual_risk,
-                "boundary_sink": boundary_sink(f),
-                "traced": f if f.trace_source is not None else None,
-                "has_trace": f.has_trace,
                 "members": [f],
             }
             continue
@@ -88,13 +76,9 @@ def _group(findings: list[Finding]) -> tuple[dict[tuple[str, int, str], dict[str
         group["cwes"] += [c for c in f.cwes if c not in group["cwes"]]
         if f.tool_rule_id not in group["tool_rule_ids"]:
             group["tool_rule_ids"].append(f.tool_rule_id)
-        group["boundary_sink"] = group["boundary_sink"] or boundary_sink(f)
-        if group["traced"] is None and f.trace_source is not None:
-            group["traced"] = f
-        group["has_trace"] = group["has_trace"] or f.has_trace
         group["members"].append(f)
     for group in groups.values():
-        group["rule"] = cwe_map.task_rule(group["cwes"], boundary_sink=group["boundary_sink"] is not None)
+        group["rule"] = cwe_map.task_rule(group["cwes"])
     return groups, dropped_by_cwe, mapped
 
 
@@ -103,28 +87,6 @@ def emitted_rules(findings: list[Finding]) -> list[str | None]:
     groups, _, _ = _group(findings)
     by_id = {id(m): g["rule"] for g in groups.values() for m in g["members"]}
     return [by_id.get(id(f)) for f in findings]
-
-
-def _code_flow(file: str, start: int, end: int, group: dict[str, Any]) -> dict[str, Any]:
-    steps = []
-    traced: Finding | None = group["traced"]
-    if traced is not None and traced.trace_source is not None:
-        src = traced.trace_source
-        steps.append({
-            "location": {
-                "physicalLocation": _region(src.file, src.start_line, src.end_line),
-                "message": {"text": "Taint source reported by Semgrep" + (f": {src.content}" if src.content else "")},
-            },
-            "properties": {"role": "source"},
-        })
-    steps.append({
-        "location": {
-            "physicalLocation": _region(file, start, end),
-            "message": {"text": "Match reported by " + ", ".join(group["tool_rule_ids"])},
-        },
-        "properties": {"role": "sink"},
-    })
-    return {"threadFlows": [{"locations": steps}]}
 
 
 def build(findings: list[Finding], *, tool_name: str, tool_version: str) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -140,15 +102,16 @@ def build(findings: list[Finding], *, tool_name: str, tool_version: str) -> tupl
             "level": g["level"],
             "message": {"text": g["message"] or rule},
             "locations": [{"physicalLocation": _region(file, start, end)}],
-            "codeFlows": [_code_flow(file, start, end, g)],
             "properties": {
                 "cwe": g["cwes"],
                 "toolRuleIds": g["tool_rule_ids"],
-                "controlStatus": heuristics.CONTROL_STATUS,
-                "residualRisk": g["residual_risk"],
-                "recommendations": heuristics.recommendations(rule, g["cwes"]),
-                "dataflowTrace": g["has_trace"],
-                "boundarySink": g["boundary_sink"],
+                # Never scored: see the module docstring.
+                "heuristics": {
+                    "controlStatus": heuristics.CONTROL_STATUS,
+                    "residualRisk": g["residual_risk"],
+                    "recommendations": heuristics.recommendations(rule, g["cwes"]),
+                    "version": heuristics.VERSION,
+                },
             },
         })
 
@@ -177,8 +140,5 @@ def build(findings: list[Finding], *, tool_name: str, tool_version: str) -> tupl
         "unmapped_by_cwe": dict(sorted(dropped_by_cwe.items())),
         "results_emitted": len(results),
         "results_by_rule": dict(sorted(Counter(r["ruleId"] for r in results).items())),
-        "results_with_trace_source": sum(
-            1 for r in results if r["codeFlows"][0]["threadFlows"][0]["locations"][0]["properties"]["role"] == "source"
-        ),
     }
     return sarif, stats

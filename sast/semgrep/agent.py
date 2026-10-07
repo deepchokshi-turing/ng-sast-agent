@@ -140,9 +140,8 @@ class SemgrepAgent(ScannerAgent):
         command = [
             f"{work}/venv/bin/semgrep", "scan",
             "--metrics=off", "--disable-version-check", "--no-git-ignore", "--json", "--quiet",
-            # Taint rules then carry extra.dataflow_trace (source -> sink), which
-            # becomes the result's codeFlow. Rules without taint mode give none.
-            "--dataflow-traces",
+            # No --dataflow-traces: Semgrep OSS 1.179.0 puts no trace in its JSON
+            # without a login, so there is nothing to read (see normalise.py).
             # Merged per folder at install; ids already carry their original path.
             "--no-rewrite-rule-ids",
             *[arg for d in pins.RULES_DIRS for arg in ("--config", f"{work}/rules-merged/{d.replace('/', '_')}.yaml")],

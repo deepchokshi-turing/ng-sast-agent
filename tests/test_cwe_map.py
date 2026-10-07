@@ -2,6 +2,7 @@ import re
 from pathlib import Path
 
 from sast import cwe_map
+from tests.conftest import SAMPLE_TASKS
 
 TASK_RULE_IDS = {"LLM02.SID.HIGH", "LLM02.SID.MEDIUM", "LLM03.EA.FUNCTIONALITY",
                  "LLM03.EA.PERMISSIONS", "LLM03.EA.AUTONOMY"}
@@ -16,7 +17,7 @@ def test_every_entry_is_a_task_rule_id_with_a_reason():
 
 
 def test_rule_ids_are_the_ones_the_instruction_defines():
-    instruction = (Path(__file__).resolve().parents[1] / "dev/tasks/task_7f3a91/instruction.md").read_text()
+    instruction = (SAMPLE_TASKS / "task_7f3a91" / "instruction.md").read_text()
     for rule in {r for r, _ in cwe_map.CWE_MAP.values()}:
         assert f"`{rule}`" in instruction
 
@@ -51,7 +52,6 @@ def test_authorisation_on_data_is_disclosure():
 def test_llm02_is_medium_unless_a_boundary_is_shown():
     assert cwe_map.task_rule(("CWE-200",)) == cwe_map.SID_MEDIUM
     assert cwe_map.task_rule(("CWE-862",)) == cwe_map.SID_MEDIUM
-    assert cwe_map.task_rule(("CWE-200",), boundary_sink=True) == cwe_map.SID_HIGH
     for cwe in ("CWE-201", "CWE-532", "CWE-359"):
         assert cwe_map.task_rule((cwe,)) == cwe_map.SID_HIGH, cwe
     # 918 and 319 raise an LLM02 result as secondary CWEs, but never make one.
@@ -60,7 +60,7 @@ def test_llm02_is_medium_unless_a_boundary_is_shown():
     assert cwe_map.task_rule(("CWE-918",)) == cwe_map.EA_FUNCTIONALITY
     assert cwe_map.task_rule(("CWE-319",)) is None
     # Other families ignore the boundary.
-    assert cwe_map.task_rule(("CWE-95",), boundary_sink=True) == cwe_map.EA_FUNCTIONALITY
+    assert cwe_map.task_rule(("CWE-95", "CWE-532")) == cwe_map.EA_FUNCTIONALITY
     assert cwe_map.task_rule(("CWE-250",)) == cwe_map.EA_PERMISSIONS
     assert cwe_map.VERSION == "cwe-map-3"
     assert cwe_map.SID_MEDIUM in cwe_map.RULE_DESCRIPTIONS

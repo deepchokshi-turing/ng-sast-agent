@@ -58,57 +58,6 @@ def test_results_without_a_line_are_skipped():
     assert findings == []
 
 
-# ---- dataflow traces (crafted fixture in Semgrep's documented JSON shape) -------
-
-CRAFTED = "crafted_semgrep_dataflow_trace.json"
-
-
-def crafted():
-    findings, counts = normalise(fixture_json(CRAFTED))
-    return {f.tool_rule_id: f for f in findings}, counts
-
-
-def test_cliloc_source_intermediate_vars_and_call_sink_are_read():
-    by_rule, counts = crafted()
-    f = by_rule["crafted.taint.tenant-data-to-email"]
-    assert f.has_trace
-    assert (f.trace_source.file, f.trace_source.start_line, f.trace_source.content) == (
-        "src/support_copilot/store.py", 21, "json.loads(path.read_text())")
-    assert [(s.file, s.start_line, s.content) for s in f.trace_intermediate] == [
-        ("src/support_copilot/store.py", 22, "tickets"), ("src/support_copilot/retrieval.py", 10, "rows")]
-    # Every level of an interprocedural sink, outermost first.
-    assert f.trace_sink_code == ("notify(rows)", "smtp.send_message(msg)")
-    assert f.cwes == ("CWE-862", "CWE-200")
-    assert counts["findings_with_dataflow_trace"] == 2
-
-
-def test_clicall_source_is_the_innermost_location():
-    by_rule, _ = crafted()
-    src = by_rule["crafted.taint.pii-into-prompt"].trace_source
-    assert (src.file, src.start_line, src.content) == ("src/support_copilot/users.py", 8, "USERS[uid]")
-
-
-def test_no_trace_means_no_trace_fields():
-    by_rule, _ = crafted()
-    f = by_rule["crafted.pattern.eval"]
-    assert not f.has_trace
-    assert f.trace_source is None and f.trace_intermediate == () and f.trace_sink_code == ()
-    assert "crafted.best-practice" not in by_rule
-
-
-@pytest.mark.parametrize("trace", [
-    "garbage", {}, {"taint_source": ["CliLoc", "bad"]}, {"taint_source": ["Unknown", []]},
-    {"intermediate_vars": [{"location": {"path": "a.py", "start": {"line": 0}}}]},
-    {"taint_source": ["CliCall", [None, [], None]]},
-])
-def test_malformed_traces_are_ignored_not_invented(trace):
-    doc = {"results": [{"check_id": "x", "path": "a.py", "start": {"line": 3}, "end": {"line": 3},
-                        "extra": {"severity": "ERROR", "dataflow_trace": trace,
-                                  "metadata": {"category": "security", "cwe": "CWE-95"}}}]}
-    (f,), _ = normalise(doc)
-    assert not f.has_trace
-
-
 @pytest.mark.parametrize("severity, impact, expected", [
     ("ERROR", "LOW", "high"),
     ("WARNING", "HIGH", "high"),
@@ -125,8 +74,17 @@ def test_residual_risk_follows_severity_and_impact(severity, impact, expected):
     assert f.residual_risk == expected
 
 
-def test_recorded_fixtures_have_no_trace():
-    # Semgrep 1.179.0 without login printed no trace on the dev tasks.
-    findings, counts = normalise(fixture_json("semgrep_1.179.0_smoke_eval.json"))
-    assert counts["findings_with_dataflow_trace"] == 0 and not any(f.has_trace for f in findings)
-    assert {f.residual_risk for f in findings} == {"high"}  # eval: impact HIGH; subprocess: ERROR
+@pytest.mark.parametrize("name", [
+    "semgrep_1.179.0_smoke_eval.json", "semgrep_1.179.0_smoke_eval_twin.json",
+    "semgrep_1.179.0_smoke_eval_node.json", "semgrep_1.179.0_smoke_empty.json",
+    "semgrep_1.179.0_task_7f3a91.json",
+])
+def test_recorded_output_has_no_dataflow_trace(name):
+    # No recorded run carries a dataflow_trace. Semgrep OSS 1.179.0 writes none in
+    # JSON without a login, even under --dataflow-traces, so the agent reads none.
+    assert all("dataflow_trace" not in (r.get("extra") or {}) for r in fixture_json(name)["results"])
+
+
+def test_residual_risk_on_recorded_output():
+    findings, _ = normalise(fixture_json("semgrep_1.179.0_smoke_eval.json"))
+    assert {f.residual_risk for f in findings} == {"high"}  # eval: impact HIGH, subprocess: ERROR

@@ -5,8 +5,12 @@
     python tools/report.py <trial>/verifier/reward.json [...more reward.json files]
 
 The task reward is a composite built for agents that also explain paths,
-controls and recommendations, so a scanner can earn at most 0.40 of it. The
-report therefore shows several views:
+controls and recommendations, and a plain scanner that reports no paths,
+controls or recommendations earns only part of it. The task reward also means
+different things on positives and negatives, since an empty SARIF scores 1.0
+on every negative. The report therefore never averages it over both, and
+warns that Harbor's own job-level mean in result.json is not a score. It shows
+these views:
 
 - **Per trial**: reward, tp, fp, fn, ``fp_out`` (grader v2+ ``fp_outside_scope``:
   results outside the files the fix changed or away from the fixed code, not
@@ -21,7 +25,12 @@ report therefore shows several views:
   mean TPR.
 - **Risk types** (client measurement 1): a binary table each for
   sensitive_information_disclosure and excessive_agency, and the exact-set
-  result for tasks labelled both, one, or neither.
+  result for tasks labelled both, one, or neither. A risk counts as predicted
+  only from results matched to a finding or failing a negative (grader
+  ``tl.pred``). The looser grader flag ``tl.pred_loose`` gets its own table.
+- **Task reward by role**: mean reward over positives and over negatives,
+  separately, and how many negatives failed near the fix or on a trap
+  (grader ``neg.fail.near_fix`` and ``neg.fail.trap``).
 - **Measurements** (client measurements 2 to 4): mean path, controls and
   recommendations score over positive tasks (missed findings count 0).
 
@@ -78,7 +87,7 @@ def ground_truth_hits(rows: list, truth: dict) -> tuple[int, int, int]:
 
 
 def trial_results(job: Path) -> list[tuple[Path, dict]]:
-    """Trial result.json files (they carry a trial_name; the job's own does not)."""
+    """Trial result.json files (they carry a trial_name, the job's own does not)."""
     found = []
     for result_file in sorted(job.glob("*/result.json")):
         data = json.loads(result_file.read_text())
@@ -97,7 +106,9 @@ def labels_from(rewards: dict) -> dict:
     risks = {}
     for short in RISKS:
         if f"tl.truth.{short}" in rewards:
-            risks[short] = {"truth": int(rewards[f"tl.truth.{short}"]), "pred": int(rewards.get(f"tl.pred.{short}", 0))}
+            pred = int(rewards.get(f"tl.pred.{short}", 0))
+            risks[short] = {"truth": int(rewards[f"tl.truth.{short}"]), "pred": pred,
+                            "pred_loose": int(rewards.get(f"tl.pred_loose.{short}", pred))}
     return {"categories": cats, "risks": risks}
 
 
@@ -113,6 +124,8 @@ def base_row(task: str, rewards: dict, status: str = "ok", error: str = "") -> d
         "fp_out": rewards.get("fp_outside_scope"),
         **{m: rewards.get(m) for m in MEASURES},
         "sarif_missing": bool(rewards.get("sarif_missing")) or bool(rewards.get("grader_error")),
+        "neg_fail_near_fix": rewards.get("neg.fail.near_fix"),
+        "neg_fail_trap": rewards.get("neg.fail.trap"),
         **labels_from(rewards),
         "error": error,
     }
@@ -190,13 +203,14 @@ def category_table(rows: list[dict]) -> dict:
     return {"per_category": dict(sorted(cats.items())), "overall": overall}
 
 
-def risk_table(rows: list[dict]) -> dict:
+def risk_table(rows: list[dict], pred: str = "pred") -> dict:
+    """pred: "pred" (matched or failing results only) or "pred_loose"."""
     out = {}
     graded = [r for r in usable(rows) if r["risks"]]
     for short, name in RISKS.items():
         c = {"TP": 0, "FN": 0, "TN": 0, "FP": 0}
         for r in graded:
-            t, p = r["risks"][short]["truth"], r["risks"][short]["pred"]
+            t, p = r["risks"][short]["truth"], r["risks"][short][pred]
             c[{(1, 1): "TP", (1, 0): "FN", (0, 1): "FP", (0, 0): "TN"}[(t, p)]] += 1
         c["TPR"] = ratio(c["TP"], c["TP"] + c["FN"])
         c["FPR"] = ratio(c["FP"], c["FP"] + c["TN"])
@@ -205,11 +219,11 @@ def risk_table(rows: list[dict]) -> dict:
     combos: dict[str, dict] = {}
     for r in graded:
         truth = tuple(s for s in RISKS if r["risks"][s]["truth"])
-        pred = tuple(s for s in RISKS if r["risks"][s]["pred"])
+        predicted = tuple(s for s in RISKS if r["risks"][s][pred])
         label = {("SID", "EA"): "both", ("SID",): "SID only", ("EA",): "EA only", (): "neither"}[truth]
         c = combos.setdefault(label, {"tasks": 0, "exact": 0})
         c["tasks"] += 1
-        c["exact"] += truth == pred
+        c["exact"] += truth == predicted
     for c in combos.values():
         c["exact_rate"] = ratio(c["exact"], c["tasks"])
     out["by_truth_set"] = combos
@@ -237,18 +251,40 @@ def pooled_detection(rows: list[dict]) -> dict | None:
             "precision": precision, "recall": recall, "F1": f1}
 
 
+def reward_by_role(rows: list[dict]) -> dict:
+    """Mean task reward for positives and negatives apart. Never one mean over both."""
+    graded = [r for r in rows if r["reward"] is not None]
+    out = {}
+    for role, group in (("positive", [r for r in graded if (r["gt"] or 0) > 0]),
+                        ("negative", [r for r in graded if r["gt"] == 0])):
+        out[role] = {"tasks": len(group),
+                     "mean_reward": sum(r["reward"] for r in group) / len(group) if group else None}
+    negs = [r for r in graded if r["gt"] == 0]
+    out["negative"]["failed"] = sum(1 for r in negs if r["reward"] < 1.0)
+    out["negative"]["failed_near_fix"] = sum(1 for r in negs if r.get("neg_fail_near_fix"))
+    out["negative"]["failed_trap"] = sum(1 for r in negs if r.get("neg_fail_trap"))
+    return out
+
+
+HARBOR_MEAN_WARNING = ("Harbor's job-level mean reward (result.json) averages positives and negatives "
+                       "together. It is not a score: an empty SARIF earns 1.0 on every negative. "
+                       "Quote the pooled detection, category and per-role figures instead.")
+
+
 def summarise(rows: list[dict]) -> dict:
     graded = [r for r in rows if r["reward"] is not None]
     zero = [r for r in graded if r["gt"] == 0]
     return {
         "trials": len(rows), "graded": len(graded),
         "excluded_from_category_tables": len(rows) - len(usable(rows)),
-        "mean_reward": sum(r["reward"] for r in graded) / len(graded) if graded else None,
+        "reward_by_role": reward_by_role(rows),
+        "warning": HARBOR_MEAN_WARNING,
         "fp_outside_scope": sum(r["fp_out"] or 0 for r in graded),
         "pooled_detection": pooled_detection(rows),
         "zero_finding_tasks_clean": [sum(1 for r in zero if (r["fp"] or 0) == 0), len(zero)],
         "categories": category_table(rows),
         "risk_types": risk_table(rows),
+        "risk_types_loose": risk_table(rows, "pred_loose"),
         "measurements_positive_tasks": measurement_means(rows),
     }
 
@@ -298,8 +334,14 @@ def render(rows: list[dict], summary: dict, table=text_table) -> str:
     clean, zero = summary["zero_finding_tasks_clean"]
     if zero:
         out.append(f"zero-finding tasks clean (fp == 0): {clean}/{zero}")
-    if summary["mean_reward"] is not None:
-        out.append(f"mean task reward (composite; scanner ceiling 0.40 per finding): {summary['mean_reward']:.3f}")
+    roles = summary["reward_by_role"]
+    pos, neg = roles["positive"], roles["negative"]
+    if pos["tasks"]:
+        out.append(f"mean task reward, positives only ({pos['tasks']} tasks): {fmt(pos['mean_reward'])}")
+    if neg["tasks"]:
+        out.append(f"mean task reward, negatives only ({neg['tasks']} tasks): {fmt(neg['mean_reward'])}  "
+                   f"(failed {neg['failed']}: near the fix {neg['failed_near_fix']}, on a trap {neg['failed_trap']})")
+    out.append(f"warning: {summary['warning']}")
     out.append(f"fp_outside_scope total: {summary['fp_outside_scope']}")
 
     cats = summary["categories"]
@@ -313,9 +355,12 @@ def render(rows: list[dict], summary: dict, table=text_table) -> str:
         out.append(f"overall: mean TPR {na['mean_TPR']}  mean FPR {na['mean_FPR']}  "
                    f"score {na['score']}  precision (pooled) {na['precision_pooled']}  "
                    f"F1 {na['F1']}  over {o['categories']} categories")
-    risks = summary["risk_types"]
-    if risks["by_truth_set"]:
-        out.append("\nrisk types (task level, in-scope results):")
+    for key, title in (("risk_types", "task level, results matched to a finding or failing the negative"),
+                       ("risk_types_loose", "task level, loose: any result in the fix files or near the fix")):
+        risks = summary[key]
+        if not risks["by_truth_set"]:
+            continue
+        out.append(f"\nrisk types ({title}):")
         out += table(["risk_type", "TP", "FN", "TN", "FP", "TPR", "FPR", "precision"],
                      [[k, c["TP"], c["FN"], c["TN"], c["FP"], c["TPR"], c["FPR"], c["precision"]]
                       for k, c in risks.items() if k != "by_truth_set"])

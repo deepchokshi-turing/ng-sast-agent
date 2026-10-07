@@ -1,0 +1,5 @@
+{
+  "model": "hosted-chat-model",
+  "enabled_tools": ["send_email"],
+  "outbox_path": "/tmp/support_copilot/outbox.jsonl"
+}
