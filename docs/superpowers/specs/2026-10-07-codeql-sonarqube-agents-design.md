@@ -235,6 +235,22 @@ are kept in the metadata. Each result records `sonarType`
 split them later. `residualRisk` (heuristic only) comes from the issue
 severity or the hotspot's vulnerability probability.
 
+Security Hotspots (added 2026-10-08): SonarQube Community Build 26.9.0.129388,
+the server used here, has zero Security Hotspot rules.
+`api/rules/search?types=SECURITY_HOTSPOT` returns `total` 0 for every
+language, and 35 of the 61 active Python VULNERABILITY rules carry the tag
+`former-hotspot`. A hotspot can therefore never appear on this server version,
+and every hotspot count from it is 0 by construction, not because the agent
+missed something. The hotspot paging and mapping stay, because older servers
+have hotspot rules. To make this visible in every run, `fetch.py collect`
+also calls `api/rules/search?types=SECURITY_HOTSPOT&ps=1` and
+`api/rules/search?types=SECURITY_HOTSPOT&languages=py&activation=true&qprofile=<python profile key>&ps=1`
+and records the totals as `hotspot_rules_total` and `hotspot_rules_active`
+in `sonarqube.json` and in the run metadata. A failure of these two calls is
+recorded and does not stop the run. The recordings in the tests predate the
+calls, so their tests use a stubbed answer, and the real values (0) will come
+from the next recording.
+
 Reproducibility: the server cannot be pinned the way a CLI can. The metadata
 records the server version, the edition and the quality profile name and key
 for every trial, and the report shows them.

@@ -269,6 +269,19 @@ def extract(archive, staging):
     return os.path.join(staging, "codeql")
 
 
+def image_manifest(tool, recompute):
+    """The tools image's MANIFEST.json entry for this tool (see sast_manifest.py,
+    uploaded next to this script). Never fails the install."""
+    try:
+        import sast_manifest
+    except ImportError:
+        return {"present": None, "verified": False, "status": "reader not uploaded"}
+    try:
+        return sast_manifest.check(tool, recompute=recompute)
+    except Exception as exc:  # a broken manifest must not stop the scan
+        return {"present": None, "verified": False, "status": "error", "reason": str(exc)}
+
+
 # ---------------------------------------------------------------- main
 
 _STARTED = time.monotonic()
@@ -297,6 +310,9 @@ def main():
     with open(pins_path) as f:
         pins = json.load(f)
     deadline = _STARTED + budget
+    # The bundle is about 1.3 GB in 35,000 files (60 s to hash with a cold
+    # cache), so its recorded digest is taken as it is, without recomputing.
+    manifest = image_manifest("codeql", recompute="bundle too large to hash in setup (about 1.3 GB)")
 
     install_dir = pins["install_dir"].rstrip("/")
     fallback = os.path.join(os.path.dirname(os.path.abspath(pins_path)), "codeql")
@@ -311,7 +327,7 @@ def main():
             continue
         log("codeql {} at {} matches the pins".format(info["codeql_version"], place))
         result = dict(info, pins=pins, install_dir=place, preinstalled=place == install_dir,
-                      downloaded=False, seconds=round(time.monotonic() - _STARTED, 1))
+                      downloaded=False, image_manifest=manifest, seconds=round(time.monotonic() - _STARTED, 1))
         print("INSTALL_RESULT " + json.dumps(result), flush=True)
         return
     log("no usable bundle: " + "; ".join(reasons))
@@ -368,6 +384,7 @@ def main():
                     os.remove(leftover)
 
     result = dict(info, pins=pins, install_dir=target, preinstalled=False, downloaded=True, arch=arch,
+                  image_manifest=manifest,
                   bundle_url=bundle["url"], bundle_sha256=sha, bundle_bytes=size,
                   download_seconds=download_seconds, seconds=round(time.monotonic() - _STARTED, 1))
     print("INSTALL_RESULT " + json.dumps(result), flush=True)

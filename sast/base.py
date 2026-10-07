@@ -56,6 +56,10 @@ TIMEOUT_MARGIN_SEC = 120
 MIN_SCAN_BUDGET_SEC = 60
 #: When the task sets no agent timeout, Harbor imposes none; cap the scan anyway.
 DEFAULT_SCAN_BUDGET_SEC = 3600
+#: The tools image manifest reader (sast/manifest.py). Uploaded next to every
+#: installer as sast_manifest.py, which imports it (audit L6).
+MANIFEST_READER = Path(__file__).with_name("manifest.py")
+MANIFEST_READER_NAME = "sast_manifest.py"
 #: Rows of the compact finding list kept in the run metadata.
 MAX_COMPACT_FINDINGS = 5000
 #: How much of a command's output goes into the logs the platform keeps.
@@ -111,7 +115,8 @@ class ScannerAgent(BaseAgent):
 
     async def setup(self, environment: BaseEnvironment) -> None:
         self._work_dir = await self._choose_work_dir(environment)
-        for name, data in self.install_files().items():
+        files = {MANIFEST_READER_NAME: MANIFEST_READER.read_bytes(), **self.install_files()}
+        for name, data in files.items():
             await self._upload_bytes(environment, data, f"{self._work_dir}/{name}")
 
         command = self.install_command(self._work_dir)
@@ -144,6 +149,9 @@ class ScannerAgent(BaseAgent):
             "cwe_map": cwe_map.VERSION,
             "heuristics": heuristics.VERSION,
             "install": getattr(self, "_install", None),
+            # MANIFEST.json of the tools image as the installer saw it: manifest
+            # and tree digests, and whether this tool's files were rehashed.
+            "image_manifest": (getattr(self, "_install", None) or {}).get("image_manifest"),
             "model_ignored": self.model_name,
             "options_ignored": sorted((getattr(self.options, "model_extra", None) or {}).keys()),
             "instruction_sha256": hashlib.sha256(instruction.encode("utf-8")).hexdigest(),

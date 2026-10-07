@@ -64,6 +64,19 @@ def run_version(executable):
     return output
 
 
+def image_manifest(tool, recompute):
+    """The tools image's MANIFEST.json entry for this tool (see sast_manifest.py,
+    uploaded next to this script). Never fails the install."""
+    try:
+        import sast_manifest
+    except ImportError:
+        return {"present": None, "verified": False, "status": "reader not uploaded"}
+    try:
+        return sast_manifest.check(tool, recompute=recompute)
+    except Exception as exc:  # a broken manifest must not stop the scan
+        return {"present": None, "verified": False, "status": "error", "reason": str(exc)}
+
+
 def main():
     started = time.time()
     pins_path = sys.argv[1] if len(sys.argv) > 1 else ROOT + "/pins.json"
@@ -88,6 +101,9 @@ def main():
     if version != pinned:
         fail("sonar-scanner is version {}, expected {}".format(version, pinned))
 
+    # Hashing the scanner and its JRE (under 300 MB) takes a few seconds at most.
+    manifest = image_manifest("sonar-scanner", recompute=True)
+    log("image manifest: " + manifest.get("status", "?"))
     os.makedirs(ROOT + "/home/.sonar", exist_ok=True)
     output = run_version(executable)
 
@@ -100,6 +116,7 @@ def main():
         "python": sys.executable,
         "python_version": platform.python_version(),
         "arch": platform.machine(),
+        "image_manifest": manifest,
         "seconds": round(time.time() - started, 1),
     }
     print("INSTALL_RESULT " + json.dumps(result), flush=True)

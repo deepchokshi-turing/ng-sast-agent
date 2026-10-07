@@ -175,8 +175,31 @@ def _paged(pages):
     return answer
 
 
+def hotspot_rule_search(total=0, active=0):
+    """api/rules/search?types=SECURITY_HOTSPOT in its documented shape (ps=1).
+    Stub only: the recordings predate this call. The real values (0 and 0 on
+    Community Build 26.9.0.129388) will come from the next recording."""
+    def answer(query):
+        n = active if query.get("activation") == "true" else total
+        return 200, {"total": n, "p": 1, "ps": 1, "paging": {"pageIndex": 1, "pageSize": 1, "total": n},
+                     "rules": [{"key": "python:S4507", "type": "SECURITY_HOTSPOT"}] if n else []}
+    return answer
+
+
+def rules_search(facets, hotspots=None):
+    """The recorded cwe facet for a rule_key query, else the hotspot rule count stub."""
+    hotspots = hotspots or hotspot_rule_search()
+
+    def answer(query):
+        if "rule_key" in query:
+            return 200, facets[query["rule_key"]]
+        return hotspots(query)
+    return answer
+
+
 def replay_routes(document, **overrides):
-    """A stub that answers with the responses of one real recorded run."""
+    """A stub that answers with the responses of one real recorded run
+    (the hotspot rule count excepted, see ``hotspot_rule_search``)."""
     rules, facets = document["rules"], document["rule_facets"]
     routes = {
         "api/ce/task": (200, {"task": document["ce_task"]}),
@@ -185,7 +208,7 @@ def replay_routes(document, **overrides):
         "api/issues/search": _paged(document["issues_pages"]),
         "api/hotspots/search": _paged(document["hotspots_pages"]),
         "api/rules/show": lambda q: (200, rules[q["key"]]) if q["key"] in rules else (404, {"errors": [{"msg": "x"}]}),
-        "api/rules/search": lambda q: (200, facets[q["rule_key"]]),
+        "api/rules/search": rules_search(facets),
         "api/qualityprofiles/search": (200, document["quality_profiles"]),
         "api/projects/delete": (204, ""),
     }
@@ -328,8 +351,9 @@ def test_collect_replays_a_recorded_run(stub, tmp_path, task):
     assert server.calls("api/hotspots/search")[0]["query"]["projectKey"] == project
     assert server.calls("api/measures/component")[0]["query"] == {
         "component": project, "metricKeys": "files,ncloc,ncloc_language_distribution"}
-    (search,) = server.calls("api/rules/search")
+    (search,) = [c for c in server.calls("api/rules/search") if "rule_key" in c["query"]]
     assert search["query"] == {"rule_key": next(iter(recording["rules"])), "facets": "cwe", "ps": "1"}
+    assert document["hotspot_rules_total"] == 0 and document["hotspot_rules_active"] == 0
     assert server.calls("api/qualityprofiles/search")[0]["query"] == {"project": project, "language": "py"}
     assert server.calls("api/ce/task")[0]["query"] == {"id": "task-1"}
     (delete,) = server.calls("api/projects/delete", "POST")
@@ -376,6 +400,38 @@ def test_a_page_without_total_is_an_error(stub, tmp_path, report):
     server = stub(collect_routes(**{"api/hotspots/search": (200, {"hotspots": []})}))
     proc = run_fetch(collect_args(report, tmp_path), server.url)
     assert proc.returncode == 6 and "no paging total" in proc.stdout
+
+
+def test_hotspot_rule_counts_are_recorded(stub, tmp_path, report):
+    """Server-wide and active-in-the-Python-profile Security Hotspot rule totals.
+
+    Stub only (``hotspot_rule_search``): the recordings predate this call. The
+    numbers here are made non-zero on purpose so the two queries cannot be
+    confused. On the user's SonarQube Community Build 26.9.0.129388 both are 0
+    (checked by hand with api/rules/search), and the real values (0) will come
+    from the next recording."""
+    server = stub(collect_routes(**{"api/rules/search": hotspot_rule_search(total=7, active=3)}))
+    proc = run_fetch(collect_args(report, tmp_path), server.url)
+    assert proc.returncode == 0, proc.stdout
+    document = json.loads((tmp_path / "sonarqube.json").read_text())
+    assert document["hotspot_rules_total"] == 7 and document["hotspot_rules_active"] == 3
+    assert document["hotspot_rules_qprofile"] == "py-1" and document["hotspot_rules_error"] is None
+    server_wide, active = [c["query"] for c in server.calls("api/rules/search")]
+    assert server_wide == {"types": "SECURITY_HOTSPOT", "ps": "1"}
+    assert active == {"types": "SECURITY_HOTSPOT", "languages": "py", "activation": "true", "qprofile": "py-1",
+                      "ps": "1"}
+    # The hotspot paging still runs: older servers have hotspot rules.
+    assert server.calls("api/hotspots/search")
+
+
+def test_a_failed_hotspot_rule_count_does_not_stop_the_collection(stub, tmp_path, report):
+    """Stub only: the count is informational, so an error is recorded and the run goes on."""
+    server = stub(collect_routes(**{"api/rules/search": (403, {"errors": [{"msg": "Insufficient privileges"}]})}))
+    proc = run_fetch(collect_args(report, tmp_path), server.url)
+    assert proc.returncode == 0, proc.stdout
+    document = json.loads((tmp_path / "sonarqube.json").read_text())
+    assert document["hotspot_rules_total"] is None and document["hotspot_rules_active"] is None
+    assert "api/rules/search" in document["hotspot_rules_error"] and document["deleted"] is True
 
 
 def test_default_profile_when_the_project_has_none(stub, tmp_path, report):

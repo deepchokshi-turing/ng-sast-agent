@@ -436,6 +436,11 @@ class SonarQubeAgent(ScannerAgent):
                 profiles = (document.get("quality_profiles") or {}).get("profiles") or []
                 sonar["quality_profile"] = [{k: p.get(k) for k in ("name", "key", "language", "isDefault",
                                                                    "activeRuleCount")} for p in profiles]
+                # Security Hotspot rules on the server and active in that profile.
+                # Both are 0 on Community Build 26.9, so no hotspot can appear there.
+                for key in ("hotspot_rules_total", "hotspot_rules_active", "hotspot_rules_qprofile",
+                            "hotspot_rules_error"):
+                    sonar[key] = document.get(key)
             if result.return_code != 0:
                 raise ScannerError("collecting the SonarQube results failed (exit {}): {}".format(
                     result.return_code, _last_error(result.stdout or result.stderr or "", "no output")))

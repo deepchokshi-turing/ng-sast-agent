@@ -49,6 +49,29 @@ what decides a match, and the subtype a tool picks is scored under
 `classification`. This keeps subtype naming, which tools do not agree on, from
 turning a correct detection into a miss.
 
+## Matching results to findings
+
+A result can match a finding when it has the finding's risk family, lands
+within `line_tolerance` of the finding's primary location or one of its
+alternative locations, and (under `require_cwe`) shares a CWE with it. Each
+result matches at most one finding and each finding at most one result.
+
+Among all such one-to-one matchings the grader picks the one with the highest
+reward. As long as every matched result sits inside `fix_changed_files` (or
+the task names no fix files), each matched pair adds the same detection credit
+and its own weighted measurement scores, so the reward is a sum over the pairs
+and the grader finds the best matching exactly with the Hungarian algorithm,
+using exact fractions. A result that matches through a location outside the
+fix files gets the same detection credit in that sum, which is a close
+approximation. No current task has such a location. When two matchings give
+the same reward, the grader reads the results in file order and gives each one
+the earliest finding it can, and prefers matching a result to leaving it
+unmatched. That is what the earlier greedy pass did, so a SARIF that greedy
+already matched optimally gets exactly the same grade, and a partial-credit
+result no longer takes a finding away from an exact one (audit 040, L3). The
+code is in `assign` and `max_weight_matching` in `grade.py`, and it needs only
+the Python standard library.
+
 ## v3 fields
 
 ### `matching.require_cwe`
@@ -171,8 +194,9 @@ Run it on every task at build time. It reports
   `require_cwe` is true, since it could never match,
 - accepted locations (primary or alternative) of two different findings in the
   same file whose `line_tolerance` windows overlap, when one result could match
-  both (same risk type and, under `require_cwe`, a shared CWE). The grader
-  would always credit such a result to the first finding. `task_781350`'s F1
+  both (same risk type and, under `require_cwe`, a shared CWE). Such a result
+  could be credited to either finding, so which finding it detected is not
+  well defined. `task_781350`'s F1
   and F2 alternative at `_instrumentation.py:115` and `:107` are an example.
 
 `check_truth(truth)` in `grade.py` returns the same problems as a list.
@@ -227,6 +251,12 @@ cannot, for example, see a fix-only name that both twins share). It
 
 It exits non-zero on any problem. `--write-qc` records "pass" or "fail" in
 `validation/provenance.json` under `qc.label_leak_scan`.
+
+`--image` (with Docker) also builds each task's `environment/` and checks the
+image as the scanner will see it: no tests, solution or validation files or
+copies of them under `/app`, no evaluator file names, and the same six-word
+ground-truth check against the files inside the image. Limit it with
+`--task <name>` (repeatable), since every build takes a while.
 
 ## Examples
 

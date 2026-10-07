@@ -29,7 +29,9 @@ Subcommands:
     rule's CWE set (26.9 has no securityStandards in rules/show). Any error in
     a rule lookup stops the collection, and so does a search that does not
     find exactly that one rule. Then it reads the project's Python quality
-    profile (the default one when the project has none) and deletes the
+    profile (the default one when the project has none), counts the Security
+    Hotspot rules (``api/rules/search?types=SECURITY_HOTSPOT``, server-wide and
+    active in that profile, see ``hotspot_rule_counts``) and deletes the
     project unless ``--keep``. ``--deadline`` bounds every one of these calls
     together. The delete still gets a short fixed slice after it. Writes every
     raw response to ``--out`` with a ``deleted`` flag, also after a failure.
@@ -312,6 +314,54 @@ def lookup_rule(sonar, key, document):
                       "unknown".format(key), EXIT_INCOMPLETE)
 
 
+def python_profile_key(document):
+    """Key of the project's Python quality profile, else of the default one."""
+    for name in ("quality_profiles", "default_quality_profiles"):
+        for profile in (document.get(name) or {}).get("profiles") or []:
+            if isinstance(profile, dict) and profile.get("language", "py") == "py" and profile.get("key"):
+                return profile["key"]
+    return None
+
+
+def search_total(answer):
+    """The ``total`` of an api/rules/search answer (top level, or under paging)."""
+    answer = answer or {}
+    total = answer.get("total")
+    if total is None:
+        total = (answer.get("paging") or {}).get("total")
+    if total is None:
+        raise Failure("api/rules/search returned no total", EXIT_INCOMPLETE)
+    return int(total)
+
+
+def hotspot_rule_counts(sonar, document):
+    """How many Security Hotspot rules the server has, and how many are active
+    in the Python profile used.
+
+    SonarQube Community Build 26.9.0.129388 has none at all (the server-wide
+    total is 0 for every language, and 35 of its 61 active Python
+    VULNERABILITY rules carry the tag former-hotspot), so a scan on it can
+    never raise a hotspot. Older servers do, which is why the hotspot paging
+    stays. Recorded as ``hotspot_rules_total`` and ``hotspot_rules_active``.
+    Informational: an error here is recorded in ``hotspot_rules_error`` and
+    does not stop the collection.
+    """
+    try:
+        document["hotspot_rules_total"] = search_total(
+            sonar.get("api/rules/search", types="SECURITY_HOTSPOT", ps=1))
+        key = python_profile_key(document)
+        document["hotspot_rules_qprofile"] = key
+        if key is None:
+            document["hotspot_rules_error"] = "no Python quality profile to count active hotspot rules in"
+            return
+        document["hotspot_rules_active"] = search_total(
+            sonar.get("api/rules/search", types="SECURITY_HOTSPOT", languages="py", activation="true",
+                      qprofile=key, ps=1))
+    except (Failure, ValueError, TypeError, AttributeError) as exc:
+        document["hotspot_rules_error"] = str(exc)
+        say(sonar, "[fetch] hotspot rule count not available: {}".format(exc))
+
+
 def delete_project(sonar, project):
     """(deleted, error). Gets its own short time slice, also after the deadline."""
     sonar.deadline = time.time() + DELETE_SLICE_SEC
@@ -344,6 +394,10 @@ def collect(sonar, args):
         "measures": None,
         "quality_profiles": None,
         "default_quality_profiles": None,
+        "hotspot_rules_total": None,
+        "hotspot_rules_active": None,
+        "hotspot_rules_qprofile": None,
+        "hotspot_rules_error": None,
         "deleted": False,
         "delete_error": None,
         "kept": bool(args.keep),
@@ -383,6 +437,7 @@ def collect(sonar, args):
         if not (document["quality_profiles"] or {}).get("profiles"):
             document["default_quality_profiles"] = sonar.get("api/qualityprofiles/search", language="py",
                                                              defaults="true")
+        hotspot_rule_counts(sonar, document)
     except Failure as exc:
         failure = exc
         document["error"] = str(exc)

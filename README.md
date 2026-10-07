@@ -112,6 +112,39 @@ agent version, read from `pyproject.toml` (the script stops if it differs from
 Dockerfiles pin `sast-tools:0.4.0`, and a unit test checks that they match the
 agent version.
 
+The image holds `/opt/sast/MANIFEST.json`, written by the last build stage
+with [sast/manifest.py](sast/manifest.py). It lists the tool versions from
+the pins, a sha256 and mode for every file, one tree digest over all files,
+and one tree digest per tool. The CodeQL bundle, sonar-scanner, uv and the
+Semgrep rules are checked against pinned hashes during the build. The Semgrep
+wheel, its dependencies and uv's CPython are only resolved with
+`--exclude-newer`, so the manifest is the record of what was actually
+installed. At setup each agent records the manifest's own sha256, the image
+tree digest and its tool's tree digest in the run metadata
+(`image_manifest`). Semgrep and sonar-scanner hash their own files again and
+say whether they match (`status` `verified` or `mismatch`). Measured with a
+cold cache, that takes about 1.5 s for Semgrep's venv and CPython (400 MB,
+7,400 files) and under 7 s for a full 286 MB JDK, which is more than the
+scanner's bundled JRE. CodeQL's bundle (1.3 GB, 35,000 files) took 60 s, so
+the CodeQL agent records the digest without hashing again
+(`not_recomputed`). A mismatch is recorded, not fatal: the version and pin
+checks still decide whether a tool is used.
+
+### Leak check of the built image
+
+`tools/leak_scan.py <harbor-tasks dir>` checks the task sources. With
+`--image` it builds each task image and checks what is under `/app` in it:
+
+```bash
+python tools/leak_scan.py ../harbor-tasks --image --task task_04d646_positive --task task_04d646_negative
+```
+
+It needs only Python and the docker CLI, so the same line works in Windows
+PowerShell with Docker Desktop. The tools image named by the Dockerfile's
+`ARG SAST_TOOLS_IMAGE=` default (or `--tools-image <image>`) must be present
+locally. It removes the images it builds. See the script's docstring for the
+checks.
+
 ## What a run does
 
 1. **setup** (inside the sandbox, ≤ 300 s; Harbor allows 360 s): uploads
@@ -477,7 +510,10 @@ SonarQube is a server, not a CLI, so this agent needs one you run yourself.
 The agent runs `sonar-scanner` inside the task sandbox against that server,
 reads the results back through the web API (also from inside the sandbox), and
 writes the same SARIF as the Semgrep agent. It keeps both issues of type
-VULNERABILITY and Security Hotspots. The design is in
+VULNERABILITY and Security Hotspots, but on the server version used here
+(Community Build 26.9.0.129388) a hotspot can never appear, because that
+server has no hotspot rules at all (see "No Security Hotspots on Community
+Build 26.9" below). The design is in
 [docs/superpowers/specs/2026-10-07-codeql-sonarqube-agents-design.md](docs/superpowers/specs/2026-10-07-codeql-sonarqube-agents-design.md).
 
 ### 1. Start the server
@@ -552,7 +588,10 @@ To record a run that has results, use the sample task
 `tests/fixtures/tasks/smoke_sonar` (`-p tests/fixtures/tasks -i smoke_sonar`).
 Its tiny notes helper has clear-text HTTP, which the Community Build reports as
 a VULNERABILITY (`python:S5332`), and a shell command, a formatted SQL query
-and a world-writable folder, which it should report as Security Hotspots.
+and a world-writable folder. Older servers report those three as Security
+Hotspots. Community Build 26.9 has no hotspot rules, so there they can only
+come back as VULNERABILITY issues from the former-hotspot rules, or not at
+all.
 
 ### What a run does
 
@@ -640,6 +679,27 @@ it fires in shared code, so it is a false positive there and lowers
 precision. The rule is kept because it is the principled one, not because of
 that outcome.
 
+#### No Security Hotspots on Community Build 26.9
+
+SonarQube Community Build 26.9.0.129388, the server this agent was checked
+against, has no Security Hotspot rules. `api/rules/search?types=SECURITY_HOTSPOT`
+returns `total` 0 for every language, and 35 of the 61 active Python
+VULNERABILITY rules carry the tag `former-hotspot`, so the old hotspot checks
+were turned into vulnerability rules. A scan on this server therefore never
+yields a hotspot, and the `SECURITY_HOTSPOT` count in the metadata is always 0
+there. That is a property of the server, not a fault of the agent. The agent
+still pages `api/hotspots/search` and maps hotspots, because older servers do
+have hotspot rules.
+
+So that every run shows this, `fetch.py collect` also asks
+`api/rules/search?types=SECURITY_HOTSPOT&ps=1` (server-wide) and
+`api/rules/search?types=SECURITY_HOTSPOT&languages=py&activation=true&qprofile=<key>&ps=1`
+(the Python profile used) and records the two totals as
+`hotspot_rules_total` and `hotspot_rules_active`, with the profile key in
+`hotspot_rules_qprofile`. Both are expected to be 0 on 26.9. The counts are
+informational: if the call fails, the error is kept in `hotspot_rules_error`
+and the run goes on.
+
 #### No traces
 
 SonarQube results never carry a trace (no `codeFlows`). The Community Build
@@ -656,7 +716,10 @@ The metadata records, under `sonarqube`: the host URL, server version, edition,
 quality profile (with `activeRuleCount`), project key, whether it was deleted
 (also after a timeout), the background task with its `warnings`, what was
 analysed (`analysis`: files, ncloc, ncloc per language, Python files in
-scope, active Python rules), `files_not_parsed`, the token file's path and
+scope, active Python rules), the Security Hotspot rule counts
+(`hotspot_rules_total` on the server, `hotspot_rules_active` in the Python
+profile, and `hotspot_rules_qprofile`, `hotspot_rules_error`),
+`files_not_parsed`, the token file's path and
 whether it was removed, and the kept findings per `sonarType`. At the top
 level it records the counts above (`rule_cwe_source`, `rules_without_cwe`,
 `results_by_cwe_decision`, `results_cwe_ambiguous`,
@@ -672,7 +735,9 @@ is written in its documented shape, because the recordings predate that
 call, and tests of error paths no recording shows (401, 404, a FAILED task, a
 timeout) say so. The older `sonarqube_26.9_<task>.json` (format 1, no CWE) are
 kept to check that the normaliser refuses them. No recording holds a Security
-Hotspot yet. `smoke_sonar` above is meant to produce one.
+Hotspot, and none can on 26.9 (see above). The recordings also predate the
+hotspot rule count, so its tests use a stubbed answer. The real values (0 and
+0) will come from the next recording.
 
 ## Development
 

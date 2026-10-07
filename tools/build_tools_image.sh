@@ -29,6 +29,9 @@ trap 'rm -rf "$CONTEXT"' EXIT
 cp "$ROOT/images/sast-tools/Dockerfile" "$ROOT/images/sast-tools/fetch_archive.py" \
    "$ROOT/sast/semgrep/install.py" "$ROOT/sast/semgrep/merge_rules.py" "$CONTEXT/"
 PYTHONPATH="$ROOT" python3 -c "import json, sast.semgrep.pins as p; print(json.dumps(p.as_dict()))" > "$CONTEXT/pins.json"
+# The manifest writer and every tool's pins, for /opt/sast/MANIFEST.json.
+cp "$ROOT/sast/manifest.py" "$CONTEXT/sast_manifest.py"
+PYTHONPATH="$ROOT" python3 -c "import json, sast.semgrep.pins as s, sast.codeql.pins as c, sast.sonarqube.pins as q; print(json.dumps({'semgrep': s.as_dict(), 'codeql': c.as_dict(), 'sonar-scanner': q.as_dict()}))" > "$CONTEXT/manifest_pins.json"
 
 # CodeQL and sonar-scanner pins, passed as build arguments. A missing sha256 stops here.
 PYTHONPATH="$ROOT" python3 - > "$CONTEXT/build-args.txt" <<'PY'

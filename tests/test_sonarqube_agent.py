@@ -735,3 +735,22 @@ def test_agent_imports_only_stdlib_and_harbor():
         if not dists & allowed:
             offenders.append((module, sorted(dists)))
     assert offenders == []
+
+
+def test_hotspot_rule_counts_reach_the_metadata(tmp_path, server_env):
+    """The counts fetch.py collect records. Stubbed into the recorded document,
+    which predates the call. On Community Build 26.9.0.129388 both are 0 (no
+    Security Hotspot rule exists there), and the real values will come from
+    the next recording."""
+    def counts(document):
+        key = document["quality_profiles"]["profiles"][0]["key"]
+        document.update(hotspot_rules_total=0, hotspot_rules_active=0, hotspot_rules_qprofile=key,
+                        hotspot_rules_error=None)
+
+    sandbox = FakeSandbox(edit_document=counts)
+    _, context, go = run_agent(tmp_path, sandbox)
+    asyncio.run(go())
+    sonar = context.metadata["sonarqube"]
+    assert sonar["hotspot_rules_total"] == 0 and sonar["hotspot_rules_active"] == 0
+    assert sonar["hotspot_rules_qprofile"] == sandbox.document["quality_profiles"]["profiles"][0]["key"]
+    assert sonar["hotspot_rules_error"] is None

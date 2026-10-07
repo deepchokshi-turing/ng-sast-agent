@@ -16,7 +16,18 @@
 # The CodeQL bundle, sonar-scanner, uv and the Semgrep rules are checked against
 # the sha256 pinned in sast/<tool>/pins.py. The Semgrep wheel, its dependencies
 # and uv's CPython are resolved with --exclude-newer at the pinned date but are
-# not hash-checked.
+# not hash-checked, so a rebuild could in principle get different bytes. The
+# manifest now records what was actually installed, so two builds can be
+# compared and a run can say which build it used.
+#
+# /opt/sast/MANIFEST.json is written by the manifest stage below with
+# sast/manifest.py (staged as sast_manifest.py): the tool versions from the
+# pins, a sha256 and mode for every file and symlink, one tree digest over the
+# sorted (path, sha256, mode) entries, and one tree digest per tool part. Each
+# agent's install step records the manifest digest and its tool's tree digest
+# in the run metadata. Semgrep and sonar-scanner rehash their own part to check
+# it (a few seconds at most). CodeQL records its digest without rehashing,
+# since the bundle is about 1.3 GB.
 # tools/build_tools_image.sh stages this Dockerfile, the Semgrep installer files
 # and fetch_archive.py, and passes the pins as build arguments.
 #
@@ -63,7 +74,13 @@ RUN set -e; \
       "$sha" /opt/sast/sonar-scanner --strip-top; \
     /opt/sast/sonar-scanner/bin/sonar-scanner -v
 
-FROM scratch
+# The three parts together, plus MANIFEST.json over all of them.
+FROM python:3.11-slim@sha256:0dd364ba7e10242f07755449e3a3d0e35f9efd987952737b90def6709ab0c5ce AS manifest
 COPY --from=semgrep /opt/sast /opt/sast
 COPY --from=codeql /opt/sast /opt/sast
 COPY --from=sonar /opt/sast /opt/sast
+COPY sast_manifest.py manifest_pins.json /tmp/
+RUN python3 /tmp/sast_manifest.py write /opt/sast /tmp/manifest_pins.json
+
+FROM scratch
+COPY --from=manifest /opt/sast /opt/sast

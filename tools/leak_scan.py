@@ -30,15 +30,45 @@ Prints one line per task and exits 1 when any task has a problem.
 ``--write-qc`` sets ``qc.label_leak_scan`` to "pass" or "fail" in each task's
 validation/provenance.json.
 
+Image mode looks at what the built task image holds instead of the source tree::
+
+    python tools/leak_scan.py <harbor-tasks dir> --image [--task NAME ...] [--tools-image IMG]
+
+For every task it runs ``docker build -q`` on environment/ (with
+``--build-arg SAST_TOOLS_IMAGE=<value>``, where the value is ``--tools-image``
+or else the ``ARG SAST_TOOLS_IMAGE=`` default in the task's Dockerfile), lists
+every file under /app with ``docker run --rm --entrypoint sh <image> -c 'find
+/app -type f -print0'``, and reads them out of a created (never started)
+container with ``docker cp <container>:/app -``, which streams a tar archive.
+Then it checks that:
+
+a. no folder named tests, solution or validation sits directly under /app,
+b. no file in the image has the same bytes as a file in the task's tests/,
+   solution/ or validation/ (ground_truth.json included),
+c. no file has an evaluator file name (ground truth, repro tests, provenance,
+   grade.py, test.sh, solve.sh, findings.sarif),
+d. the six-word ground-truth shingle check of point 3 passes on the files as
+   they exist in the image (files written by the build, such as generated
+   sources, are covered too).
+
+It removes the container and every image it built, also when a check fails.
+It needs the docker CLI on PATH and nothing else: subprocess calls take list
+arguments and use no shell on the host, so it runs the same way from Windows
+PowerShell with Docker Desktop. ``--write-qc`` is not available in this mode.
+
 Uses only the standard library.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
+import io
 import json
 import re
+import subprocess
 import sys
+import tarfile
 from pathlib import Path
 
 BANNED = ["cve-", "ghsa-", "vulnerab", "exploit", "patch", "fixed", "insecure", "bypass", "traversal", "ssrf",
@@ -101,8 +131,11 @@ def truth_strings(node, path: str = "") -> list[tuple[str, str]]:
     return []
 
 
-def overlap_problems(task: Path, files: dict[str, bytes]) -> list[str]:
-    """Six-word shingles of ground-truth strings that also occur in environment/ files."""
+def overlap_problems(task: Path, files: dict[str, bytes], prefix: str = "environment/") -> list[str]:
+    """Six-word shingles of ground-truth strings that also occur in the given files.
+
+    ``prefix`` goes before the file names in the messages (environment/ for
+    the source tree, /app/ for a built image)."""
     gt_file = task / "tests" / "ground_truth.json"
     if not gt_file.is_file():
         return []
@@ -128,7 +161,7 @@ def overlap_problems(task: Path, files: dict[str, bytes]) -> list[str]:
             if key in reported:
                 continue
             reported.add(key)
-            problems.append(f"ground-truth text from {wanted[sh]} appears in environment/{rel}: '{' '.join(sh)}'")
+            problems.append(f"ground-truth text from {wanted[sh]} appears in {prefix}{rel}: '{' '.join(sh)}'")
     return sorted(problems)
 
 
@@ -219,11 +252,195 @@ def scan(root: Path) -> dict[str, list[str]]:
     return problems
 
 
+# ---------------------------------------------------------------- image mode
+
+IMAGE_ROOT = "/app"
+EVALUATOR_DIRS = ("tests", "solution", "validation")
+EVALUATOR_NAMES = EVALUATOR_ONLY + [re.compile(p) for p in (r"^grade\.py$", r"^test\.sh$", r"^solve\.sh$",
+                                                            r"^findings\.sarif$")]
+#: Files this small (an empty __init__.py, a bare "{}") match by chance.
+MIN_CONTENT_MATCH_BYTES = 32
+BUILD_TIMEOUT_SEC = 1800
+DOCKER_TIMEOUT_SEC = 600
+TOOLS_ARG_RE = re.compile(r"^\s*ARG\s+SAST_TOOLS_IMAGE\s*=\s*(\S+)\s*$", re.IGNORECASE | re.MULTILINE)
+
+
+class DockerError(Exception):
+    """A docker command failed."""
+
+
+def docker(args: list[str], timeout: int = DOCKER_TIMEOUT_SEC) -> bytes:
+    """Run ``docker <args>`` (list arguments, no shell) and return its stdout."""
+    try:
+        proc = subprocess.run(["docker", *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+    except FileNotFoundError as exc:
+        raise DockerError("the docker CLI is not on PATH") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise DockerError(f"docker {args[0]} did not finish within {timeout} s") from exc
+    if proc.returncode != 0:
+        err = proc.stderr.decode("utf-8", errors="replace").strip()[-600:]
+        raise DockerError(f"docker {args[0]} exited {proc.returncode}: {err}")
+    return proc.stdout
+
+
+def tools_image_default(task: Path) -> str | None:
+    """The default of ``ARG SAST_TOOLS_IMAGE=`` in the task's Dockerfile."""
+    df = task / "environment" / "Dockerfile"
+    if not df.is_file():
+        return None
+    m = TOOLS_ARG_RE.search(df.read_text(errors="replace"))
+    return m.group(1).strip("\"'") if m else None
+
+
+def build_image(task: Path, tools_image: str | None) -> str:
+    """``docker build -q`` of environment/; returns the image id."""
+    args = ["build", "-q"]
+    value = tools_image or tools_image_default(task)
+    if value:
+        args += ["--build-arg", f"SAST_TOOLS_IMAGE={value}"]
+    out = docker(args + [str(task / "environment")], timeout=BUILD_TIMEOUT_SEC).decode("utf-8", errors="replace")
+    lines = [line.strip() for line in out.splitlines() if line.strip()]
+    if not lines:
+        raise DockerError("docker build -q printed no image id")
+    return lines[-1]
+
+
+def list_image_files(image: str) -> list[str]:
+    """Every regular file under /app in the image, as paths relative to /app."""
+    out = docker(["run", "--rm", "--entrypoint", "sh", image, "-c", f"find {IMAGE_ROOT} -type f -print0"])
+    names = []
+    for raw in out.split(b"\0"):
+        path = raw.decode("utf-8", errors="replace").strip("\r\n")
+        if path.startswith(IMAGE_ROOT + "/"):
+            names.append(path[len(IMAGE_ROOT) + 1:])
+    return sorted(names)
+
+
+def read_image_files(image: str) -> dict[str, bytes]:
+    """The regular files under /app, read from a created container with ``docker cp ... -``."""
+    container = docker(["create", "--entrypoint", "sh", image, "-c", "true"]).decode().strip().splitlines()[-1]
+    try:
+        archive = docker(["cp", f"{container}:{IMAGE_ROOT}", "-"])
+    finally:
+        try:
+            docker(["rm", "-f", container])
+        except DockerError:
+            pass
+    files = {}
+    top = IMAGE_ROOT.strip("/")
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:*") as tar:
+        for member in tar.getmembers():
+            if not member.isfile():
+                continue
+            name = member.name.lstrip("./")
+            if name != top and not name.startswith(top + "/"):
+                continue
+            rel = name[len(top) + 1:]
+            if rel:
+                files[rel] = tar.extractfile(member).read()
+    return files
+
+
+def evaluator_hashes(task: Path) -> dict[str, str]:
+    """sha256 -> task-relative path for every file in tests/, solution/ and validation/."""
+    found = {}
+    for d in EVALUATOR_DIRS:
+        folder = task / d
+        if not folder.is_dir():
+            continue
+        for p in sorted(folder.rglob("*")):
+            if p.is_file() and p.stat().st_size >= MIN_CONTENT_MATCH_BYTES:
+                found.setdefault(hashlib.sha256(p.read_bytes()).hexdigest(), p.relative_to(task).as_posix())
+    return found
+
+
+def image_file_problems(task: Path, listed: list[str], files: dict[str, bytes]) -> list[str]:
+    """Checks a to d of image mode on the files read out of the image."""
+    where = f"{IMAGE_ROOT}/"
+    problems = []
+    missing = sorted(set(listed) - set(files))
+    if missing:
+        problems.append(f"{len(missing)} files listed by find were not in the docker cp archive, "
+                        f"for example {where}{missing[0]}")
+    for rel in sorted(set(listed) | set(files)):
+        parts = rel.split("/")
+        if parts[0] in EVALUATOR_DIRS:
+            problems.append(f"evaluator folder in the image: {where}{rel}")
+        if any(p.match(parts[-1]) for p in EVALUATOR_NAMES):
+            problems.append(f"evaluator file name in the image: {where}{rel}")
+    hashes = evaluator_hashes(task)
+    for rel, data in sorted(files.items()):
+        if len(data) < MIN_CONTENT_MATCH_BYTES:
+            continue
+        source = hashes.get(hashlib.sha256(data).hexdigest())
+        if source:
+            problems.append(f"{where}{rel} has the same bytes as {source}")
+    problems += overlap_problems(task, files, prefix=where)
+    return problems
+
+
+def scan_image(task: Path, tools_image: str | None = None) -> tuple[list[str], int]:
+    """Build the task image, run checks a to d, remove the image.
+
+    Returns (problems, number of files under /app)."""
+    image = None
+    try:
+        image = build_image(task, tools_image)
+        listed = list_image_files(image)
+        files = read_image_files(image)
+        if not listed and not files:
+            return [f"no files under {IMAGE_ROOT} in the image"], 0
+        return image_file_problems(task, listed, files), len(set(listed) | set(files))
+    except DockerError as exc:
+        return [f"image check could not run: {exc}"], 0
+    finally:
+        if image:
+            try:
+                docker(["rmi", "-f", image])
+            except DockerError as exc:
+                print(f"warning: could not remove image {image}: {exc}", file=sys.stderr)
+
+
+def main_image(root: Path, only: list[str], tools_image: str | None) -> int:
+    tasks = sorted(d for d in root.iterdir() if is_task(d))
+    if only:
+        unknown = sorted(set(only) - {t.name for t in tasks})
+        if unknown:
+            print(f"no such task under {root}: {', '.join(unknown)}")
+            return 2
+        tasks = [t for t in tasks if t.name in only]
+    if not tasks:
+        print(f"no task folders under {root}")
+        return 1
+    failed = 0
+    for t in tasks:
+        items, count = scan_image(t, tools_image)
+        failed += bool(items)
+        print(f"{t.name}  {'FAIL' if items else 'pass'}  ({count} files under {IMAGE_ROOT})"
+              + (f"  ({len(items)} problems)" if items else ""), flush=True)
+        for item in items:
+            print(f"    {item}")
+    print(f"\nimage leak check: {len(tasks) - failed}/{len(tasks)} task images pass "
+          f"(a pass is not proof that no label leaks)")
+    return 1 if failed else 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("tasks", type=Path, help="the harbor-tasks directory")
     ap.add_argument("--write-qc", action="store_true", help="record pass or fail in validation/provenance.json")
+    ap.add_argument("--image", action="store_true", help="build each task image and check what is under /app")
+    ap.add_argument("--task", action="append", default=[], metavar="NAME",
+                    help="image mode: only this task folder (repeat for more)")
+    ap.add_argument("--tools-image", help="image mode: SAST_TOOLS_IMAGE build argument "
+                                          "(default: the ARG default in each task's Dockerfile)")
     args = ap.parse_args()
+    if args.image:
+        if args.write_qc:
+            ap.error("--write-qc records the source-tree check and cannot be used with --image")
+        return main_image(args.tasks, args.task, args.tools_image)
+    if args.task or args.tools_image:
+        ap.error("--task and --tools-image need --image")
     problems = scan(args.tasks)
     if not problems:
         print(f"no task folders under {args.tasks}")

@@ -231,16 +231,34 @@ def installed(pins):
     return previous
 
 
+def image_manifest(tool, recompute):
+    """The tools image's MANIFEST.json entry for this tool (see sast_manifest.py,
+    uploaded next to this script). Never fails the install."""
+    try:
+        import sast_manifest
+    except ImportError:
+        return {"present": None, "verified": False, "status": "reader not uploaded"}
+    try:
+        return sast_manifest.check(tool, recompute=recompute)
+    except Exception as exc:  # a broken manifest must not stop the scan
+        return {"present": None, "verified": False, "status": "error", "reason": str(exc)}
+
+
 def main():
     started = time.time()
     pins_path = sys.argv[1] if len(sys.argv) > 1 else ROOT + "/pins.json"
     with open(pins_path) as f:
         pins = json.load(f)
 
+    # Before anything runs Semgrep, which could write bytecode into the venv.
+    # About 400 MB and 7,400 files: 1.5 s to hash with a cold cache.
+    manifest = image_manifest("semgrep", recompute=True)
+    log("image manifest: " + manifest.get("status", "?"))
     previous = installed(pins)
     if previous is not None:
         log("already installed with these pins (pre-baked image or earlier run)")
         previous["preinstalled"] = True
+        previous["image_manifest"] = manifest
         print("INSTALL_RESULT " + json.dumps(previous), flush=True)
         return
 
@@ -281,6 +299,8 @@ def main():
     }
     with open(RESULT_FILE, "w") as f:
         json.dump(result, f)
+    # Not in install.json: that file is part of the image the manifest covers.
+    result["image_manifest"] = manifest
     # The venv is self-contained (UV_LINK_MODE=copy); the cache is hundreds of MB.
     shutil.rmtree(DOWNLOADS, ignore_errors=True)
     shutil.rmtree(ROOT + "/cache", ignore_errors=True)

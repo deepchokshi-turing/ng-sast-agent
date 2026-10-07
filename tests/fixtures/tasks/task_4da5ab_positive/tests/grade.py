@@ -34,6 +34,12 @@ v3 fields:
 - ``linked_finding_ids`` / ``link_relation`` per finding are echoed in the
   per-finding detail.
 
+Matching (revised after audit 040, L3): results are matched to findings one to
+one by an optimal assignment that maximises the reward (see ``assign``), not
+greedily in file order. A partial-credit result therefore no longer takes a
+finding from an exact one. Where the greedy matching was already optimal the
+grade is unchanged.
+
 Task-level outcomes (client measurement 1, "both risks or neither") and the
 OWASP Benchmark style category outcomes are computed for every task. A risk
 type or category counts as predicted only from results that matched a finding
@@ -246,6 +252,110 @@ def truth_risk_types(truth: dict) -> set:
     return set(present)
 
 
+# ---- matching ----------------------------------------------------------------------
+
+def score_match(res: dict, f: dict, ptol: int) -> dict:
+    """The four measurement scores a result earns when it is matched to a finding."""
+    props = res.get("properties") or {}
+    rule = res.get("ruleId", "")
+    cls = 1.0 if rule in f["acceptable_rule_ids"] else (0.5 if rule in f.get("partial_credit_rule_ids", []) else 0.0)
+    cwe_ok = bool(cwe_set(props.get("cwe")) & finding_cwes(f))
+    cls = 0.8 * cls + 0.2 * cwe_ok
+    path_score, path_cov = score_path(res, f, ptol)
+    ctrl = 0.75 * (props.get("controlStatus") == f["control_status"]) + 0.25 * (props.get("residualRisk") == f["residual_risk"])
+    rec_score, inapplicable = score_recs(res, f)
+    return {"classification": cls, "path": path_score, "controls": ctrl, "recommendations": rec_score,
+            "cwe_ok": cwe_ok, "path_steps": path_cov, "inapplicable": inapplicable}
+
+
+def assign(scores: dict, n_results: int, n_findings: int, w: dict, in_scope: int) -> dict:
+    """Optimal one-to-one matching of results to findings: {result index: finding index}.
+
+    ``scores`` holds every (result, finding) pair that may match. The matching
+    maximises the reward. A matched pair adds ``2 * w.detection / (in_scope +
+    n_findings)`` to the detection F1 (one more true positive and one fewer
+    false positive, since fp + tp is fixed at the number of in-scope results)
+    plus the weighted measurement scores divided by ``n_findings``, so the
+    reward is a sum over the matched pairs and an assignment that maximises
+    that sum maximises the reward. The one case where this is not exact is a
+    result that matches through a location outside ``fix_changed_files``, as no
+    task has one (check_truth flags none either). The sums are exact
+    fractions. Ties go to the matching that, reading the results in order,
+    gives each result the earliest finding it can, and match rather than leave
+    a result unmatched. This is the matching the old greedy pass made, so a
+    ground truth where greedy was optimal is graded exactly as before.
+    """
+    if not scores:
+        return {}
+    from fractions import Fraction
+    from math import lcm
+
+    rows = sorted({i for i, _ in scores})  # results that can match something
+    det = 2 * Fraction(w["detection"]) / (in_scope + n_findings)
+    value = {}
+    for (i, j), m in scores.items():
+        value[(i, j)] = det + sum(Fraction(w[k]) * Fraction(m[k]) for k in MEASUREMENTS) / n_findings
+    scale = lcm(*(v.denominator for v in value.values()))
+    base = n_findings + 1
+    tie_span = base ** len(rows)  # every tie-break sum is below this
+    weight = [[0] * n_findings for _ in rows]
+    for r, i in enumerate(rows):
+        for j in range(n_findings):
+            if (i, j) in value:
+                tie = (n_findings - j) * base ** (len(rows) - 1 - r)
+                weight[r][j] = int(value[(i, j)] * scale) * tie_span + tie
+    return {rows[r]: j for r, j in max_weight_matching(weight).items()}
+
+
+def max_weight_matching(weight: list) -> dict:
+    """Maximum weight matching on a rectangular matrix of integers >= 0 (Hungarian algorithm).
+
+    A weight of 0 means the pair cannot match. Returns {row: column} for the
+    matched pairs with a positive weight.
+    """
+    n_rows, n_cols = len(weight), len(weight[0]) if weight else 0
+    size = max(n_rows, n_cols)
+    top = max((x for row in weight for x in row), default=0)
+    # Square cost matrix (1-indexed) for a minimum cost assignment.
+    cost = [[0] * (size + 1)] + [
+        [0] + [top - (weight[r][c] if r < n_rows and c < n_cols else 0) for c in range(size)]
+        for r in range(size)]
+    inf = float("inf")
+    u, v, p, way = [0] * (size + 1), [0] * (size + 1), [0] * (size + 1), [0] * (size + 1)
+    for i in range(1, size + 1):
+        p[0], j0 = i, 0
+        minv, used = [inf] * (size + 1), [False] * (size + 1)
+        while True:
+            used[j0] = True
+            i0, delta, j1 = p[j0], inf, 0
+            for j in range(1, size + 1):
+                if not used[j]:
+                    cur = cost[i0][j] - u[i0] - v[j]
+                    if cur < minv[j]:
+                        minv[j], way[j] = cur, j0
+                    if minv[j] < delta:
+                        delta, j1 = minv[j], j
+            for j in range(size + 1):
+                if used[j]:
+                    u[p[j]] += delta
+                    v[j] -= delta
+                else:
+                    minv[j] -= delta
+            j0 = j1
+            if p[j0] == 0:
+                break
+        while j0:
+            j1 = way[j0]
+            p[j0] = p[j1]
+            j0 = j1
+    pairs = {}
+    for c in range(1, size + 1):
+        r = p[c] - 1
+        if r < n_rows and c - 1 < n_cols and weight[r][c - 1] > 0:
+            pairs[r] = c - 1
+    return pairs
+
+
 # ---- grading -----------------------------------------------------------------------
 
 def grade(sarif_path: Path, truth: dict) -> tuple[dict, dict]:
@@ -279,26 +389,29 @@ def grade(sarif_path: Path, truth: dict) -> tuple[dict, dict]:
     if not findings and truth.get("fixed_locations"):
         return grade_twin(results, truth, w, tol)
     scope_files = set(truth.get("fix_changed_files") or [])
-    matched = {}
     unmatched, trap_hits, outside = [], [], []
 
+    scores = {}  # (result index, finding index) -> score_match() of every pair that may match
     for idx, res in enumerate(results):
-        rule = res.get("ruleId", "")
-        risk = risk_of(rule)
+        risk = risk_of(res.get("ruleId", ""))
         primary = primary_of(res)
         res_cwes = cwe_set((res.get("properties") or {}).get("cwe"))
-        hit = None
-        for f in findings:
-            if f["id"] in matched or risk != f["risk_type"]:
+        for j, f in enumerate(findings):
+            if risk != f["risk_type"]:
                 continue
             if require_cwe and not (res_cwes & finding_cwes(f)):
                 continue
             targets = [f["primary_location"]] + f.get("alternative_primary_locations", [])
             if any(near(*primary, t, tol) for t in targets):
-                hit = f
-                break
-        if hit:
-            matched[hit["id"]] = (idx, res)
+                scores[(idx, j)] = score_match(res, f, ptol)
+    in_scope = sum(1 for res in results if not scope_files or primary_of(res)[0] in scope_files)
+    pairs = assign(scores, len(results), len(findings), w, in_scope)
+    matched = {findings[j]["id"]: (idx, results[idx]) for idx, j in pairs.items()}
+
+    for idx, res in enumerate(results):
+        rule = res.get("ruleId", "")
+        primary = primary_of(res)
+        if idx in pairs:
             continue
         if scope_files and primary[0] not in scope_files:
             outside.append({"index": idx, "ruleId": rule, "location": primary})
@@ -313,29 +426,22 @@ def grade(sarif_path: Path, truth: dict) -> tuple[dict, dict]:
     on_detected = {k: [] for k in MEASUREMENTS}
     per_finding = []
 
-    for f in findings:
+    for j, f in enumerate(findings):
         links = {k: f[k] for k in ("linked_finding_ids", "link_relation") if k in f}
         if f["id"] not in matched:
             per_finding.append({"finding": f["id"], "matched": False, **links})
             continue
         idx, res = matched[f["id"]]
         props = res.get("properties") or {}
-        rule = res.get("ruleId", "")
-        cls = 1.0 if rule in f["acceptable_rule_ids"] else (0.5 if rule in f.get("partial_credit_rule_ids", []) else 0.0)
-        cwe_ok = bool(cwe_set(props.get("cwe")) & finding_cwes(f))
-        cls = 0.8 * cls + 0.2 * cwe_ok
-        path_score, path_cov = score_path(res, f, ptol)
-        ctrl = 0.75 * (props.get("controlStatus") == f["control_status"]) + 0.25 * (props.get("residualRisk") == f["residual_risk"])
-        rec_score, inapplicable = score_recs(res, f)
-        for k, v in (("classification", cls), ("path", path_score), ("controls", ctrl), ("recommendations", rec_score)):
-            sub[k] += v / len(findings)
-            on_detected[k].append(v)
+        m = scores[(idx, j)]
+        for k in MEASUREMENTS:
+            sub[k] += m[k] / len(findings)
+            on_detected[k].append(m[k])
         per_finding.append({
-            "finding": f["id"], "matched": True, "result_index": idx, "ruleId": rule,
-            "cwe_ok": cwe_ok, "path_steps": path_cov, "controlStatus": props.get("controlStatus"),
-            "residualRisk": props.get("residualRisk"), "inapplicable_recommendations": inapplicable,
-            "scores": {"classification": round(cls, 4), "path": round(path_score, 4),
-                       "controls": round(ctrl, 4), "recommendations": round(rec_score, 4)},
+            "finding": f["id"], "matched": True, "result_index": idx, "ruleId": res.get("ruleId", ""),
+            "cwe_ok": m["cwe_ok"], "path_steps": m["path_steps"], "controlStatus": props.get("controlStatus"),
+            "residualRisk": props.get("residualRisk"), "inapplicable_recommendations": m["inapplicable"],
+            "scores": {k: round(m[k], 4) for k in MEASUREMENTS},
             **links,
         })
 
@@ -499,8 +605,8 @@ def check_truth(truth: dict) -> list[str]:
     no two different findings have accepted locations (primary or alternative)
     whose ``line_tolerance`` windows overlap (at most twice the tolerance
     apart in one file), when one result could match both (same risk type and,
-    under require_cwe, a shared CWE). Such a result is always credited to
-    whichever finding comes first.
+    under require_cwe, a shared CWE). Such a result can be credited to
+    either finding, so which one detected the issue is not well defined.
     """
     if not isinstance(truth, dict):
         return ["ground truth is not a JSON object"]
@@ -600,7 +706,7 @@ def check_truth(truth: dict) -> list[str]:
                             f"findings {fa['id']} and {fb['id']} have overlapping accepted locations "
                             f"(line_tolerance {tol}): {x['file']}:{x['start_line']} and "
                             f"{y['file']}:{y['start_line']}, "
-                            f"a result there is always credited to {fa['id']}")
+                            f"a result there can match either finding")
     return problems
 
 
