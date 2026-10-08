@@ -140,7 +140,7 @@ def overlap_problems(task: Path, files: dict[str, bytes], prefix: str = "environ
     if not gt_file.is_file():
         return []
     try:
-        truth = json.loads(gt_file.read_text())
+        truth = json.loads(gt_file.read_text(encoding="utf-8"))
     except ValueError as exc:
         return [f"cannot read tests/ground_truth.json: {exc}"]
     wanted: dict[tuple[str, ...], str] = {}
@@ -197,7 +197,7 @@ def dockerfile_problems(task: Path) -> list[str]:
 def twin_problems(pos: Path, neg: Path) -> list[str]:
     a, b = env_files(pos), env_files(neg)
     try:
-        gt = json.loads((pos / "tests" / "ground_truth.json").read_text())
+        gt = json.loads((pos / "tests" / "ground_truth.json").read_text(encoding="utf-8"))
         allowed = {f"repo/{f}" for f in gt.get("fix_changed_files") or []}
     except (OSError, ValueError) as exc:
         return [f"cannot read positive ground truth: {exc}"]
@@ -219,7 +219,7 @@ def write_qc(task: Path, ok: bool) -> None:
     prov = task / "validation" / "provenance.json"
     if not prov.is_file():
         return
-    data = json.loads(prov.read_text())
+    data = json.loads(prov.read_text(encoding="utf-8"))
     data.setdefault("qc", {})["label_leak_scan"] = "pass" if ok else "fail"
     prov.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
 

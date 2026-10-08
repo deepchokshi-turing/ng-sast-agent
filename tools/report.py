@@ -72,7 +72,7 @@ def ground_truth(trial: dict, tasks_dir: Path | None) -> dict | None:
     for task in candidates:
         gt = task / "tests" / "ground_truth.json"
         if gt.is_file():
-            return json.loads(gt.read_text())
+            return json.loads(gt.read_text(encoding="utf-8"))
     return None
 
 
@@ -100,7 +100,7 @@ def trial_results(job: Path) -> list[tuple[Path, dict]]:
     """Trial result.json files (they carry a trial_name, the job's own does not)."""
     found = []
     for result_file in sorted(job.glob("*/result.json")):
-        data = json.loads(result_file.read_text())
+        data = json.loads(result_file.read_text(encoding="utf-8"))
         if "trial_name" in data:
             found.append((result_file, data))
     return found
@@ -175,7 +175,7 @@ def _trial_metadata(reward_file: Path) -> dict:
                             (trial / "metadata.json", lambda d: d)):
         if candidate.is_file():
             try:
-                meta = pick(json.loads(candidate.read_text()))
+                meta = pick(json.loads(candidate.read_text(encoding="utf-8")))
             except (ValueError, AttributeError):
                 continue
             if isinstance(meta, dict):
@@ -187,7 +187,7 @@ def rows_from_reward_files(files: list[Path]) -> list[dict]:
     rows = []
     for f in files:
         task = f.parent.parent.name if f.parent.name == "verifier" else f.parent.name
-        row = base_row(task, json.loads(f.read_text()))
+        row = base_row(task, json.loads(f.read_text(encoding="utf-8")))
         meta = _trial_metadata(f)
         if meta:
             row["tool"] = meta.get("tool") or meta.get("agent")
@@ -477,8 +477,8 @@ def main() -> None:
 
     if args.write:
         args.write.mkdir(parents=True, exist_ok=True)
-        (args.write / "report.json").write_text(json.dumps({"summary": summary, "trials": rows}, indent=2))
-        (args.write / "report.md").write_text("# SAST benchmark report\n\n" + render(rows, summary, md_table) + "\n")
+        (args.write / "report.json").write_text(json.dumps({"summary": summary, "trials": rows}, indent=2), encoding="utf-8")
+        (args.write / "report.md").write_text("# SAST benchmark report\n\n" + render(rows, summary, md_table) + "\n", encoding="utf-8")
     if args.json:
         json.dump(rows, sys.stdout, indent=2)
         print()
