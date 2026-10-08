@@ -10,6 +10,9 @@ the agent's own fetch.py during real Harbor runs, unedited.
 - tests/fixtures/sonarqube_26.9_<task>.json (2026-10-07, ``fetch_format`` 1):
   written before fetch.py asked for the facet, so they hold no CWE. The
   normaliser refuses them unless ``allow_old_format=True`` (tests only).
+- tests/fixtures/sonarqube_26.9-f3_smoke_sonar.json (2026-10-08, ``fetch_format``
+  2): a later run of the smoke_sonar task, with the ``api/measures/component``
+  answer and the hotspot rule counts the f2 recordings predate.
 
 Tests of guard paths that no recording shows (a failed rule lookup, an issue
 type other than VULNERABILITY, flows) change a copy of a recording and say so.
@@ -225,3 +228,26 @@ def test_smoke_sonar_recording_maps_two_vulnerabilities():
         assert "codeFlows" not in r
         assert r["properties"]["toolProperties"]["sonarType"] == "VULNERABILITY"
         assert not {"controlStatus", "residualRisk", "recommendations"} & set(r["properties"])
+
+
+def test_smoke_sonar_f3_recording_has_measures_and_no_hotspot_rules():
+    """Real run 2026-10-08 (harbor-jobs/sonarqube-smoke-040f): same two results as f2.
+
+    SonarQube 26.9 Community Build has no Security Hotspot rules for Python left
+    (all were turned into vulnerability rules), so a hotspots-only result can't
+    happen on this server. The recording says so from the server itself.
+    """
+    document = json.loads((FIXTURES / "sonarqube_26.9-f3_smoke_sonar.json").read_text())
+    assert document["fetch_format"] == 2 and document["deleted"] is True
+    assert document["error"] is None and document["rule_errors"] == {}
+    assert document["hotspot_rules_total"] == 0 and document["hotspot_rules_active"] == 0
+    assert document["hotspot_rules_error"] is None
+    measures = {m["metric"]: m["value"] for m in document["measures"]["component"]["measures"]}
+    assert measures == {"files": "3", "ncloc": "34", "ncloc_language_distribution": "py=34"}
+    assert [h for page in document["hotspots_pages"] for h in page["hotspots"]] == []
+    findings, counts = normalise(document)
+    assert counts["results_by_cwe_decision"]["mapped"] == 2
+    built, _ = sarif.build(findings, tool_name="sonarqube", tool_version="8.1.0.6389")
+    results = sorted((r["ruleId"], r["locations"][0]["physicalLocation"]["region"]["startLine"])
+                     for r in built["runs"][0]["results"])
+    assert results == [("LLM02.SID.HIGH", 11), ("LLM03.EA.PERMISSIONS", 29)]

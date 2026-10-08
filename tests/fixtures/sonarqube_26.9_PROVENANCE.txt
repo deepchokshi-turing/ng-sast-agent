@@ -29,3 +29,11 @@ recording with mapped results: python:S5332 (CWE-200, CWE-319, reported as
 LLM02.SID.HIGH under cwe-map-4) and python:S2612 (CWE-266, CWE-732, reported as
 LLM03.EA.PERMISSIONS). The server returned no Security Hotspots for this code.
 Unedited.
+
+sonarqube_26.9-f3_smoke_sonar.json: recorded 2026-10-08 from a second real
+Harbor run of smoke_sonar (harbor-jobs/sonarqube-smoke-040f, status ok, reward
+0.2583, token file removed, token found in no artifact). Same two results as
+the f2 recording. It adds the api/measures/component answer (3 files, 34
+Python lines) and the hotspot rule counts: hotspot_rules_total 0 and
+hotspot_rules_active 0, so this server has no Security Hotspot rules for
+Python. Unedited.
