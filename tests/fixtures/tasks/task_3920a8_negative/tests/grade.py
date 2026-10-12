@@ -34,6 +34,30 @@ v3 fields:
 - ``linked_finding_ids`` / ``link_relation`` per finding are echoed in the
   per-finding detail.
 
+v3.1 (2026-10-12):
+
+- Complete controls on a negative. A negative may list ``controls`` with
+  ``status: "complete"`` and an ``at`` location (one of its
+  ``fixed_locations``). A result whose OWASP prefix is a contrast prefix, whose
+  ``properties.controlStatus`` is ``"complete"`` and that lands within
+  ``line_tolerance`` of such a control's ``at`` names that control instead of
+  claiming a weakness. It is not a failure, whichever bucket it would
+  otherwise fall in, and is recorded as ``complete_control_recognised``. Each
+  complete control scores 0.75 for being recognised plus 0.25 when the same
+  result's ``residualRisk`` equals the negative's ``residual_risk``, and the
+  mean over the controls is reported as ``neg.controls`` in reward.json (and
+  ``complete_controls`` in grading_detail.json). It does not enter the reward:
+  a silent negative still scores 1.0, and every other result is judged by
+  the v3 rule above.
+- Ground truth schema gt-0.2 (checked by ``--check-truth``): every location
+  carries ``snippet_id`` and ``snippet_sha256`` (the hash of its lines, see
+  ``snippet_sha256``), which are recomputed against the repo when one is
+  given; findings carry ``affected_asset``, ``violates``, ``egress`` on every
+  sink and action path step, ``consequence`` on excessive-agency findings, and
+  a required first ``source`` or ``model_decision`` step; negatives carry
+  their complete ``controls`` and ``residual_risk``. None of these fields
+  changes how a positive is graded.
+
 Matching (revised after audit 040, L3): results are matched to findings one to
 one by an optimal assignment that maximises the reward (see ``assign``), not
 greedily in file order. A partial-credit result therefore no longer takes a
@@ -57,8 +81,12 @@ Robustness: ``"results": null`` is read as no results, and a
 ``--check-truth`` validates the ground truth instead of grading (missing
 fields, bad line ranges, findings with no CWE under ``require_cwe``, and
 accepted locations of different findings whose tolerance windows overlap, so
-that one result could match either). Run it
-at task build time. It exits 1 when there is a problem.
+that one result could match either, plus the gt-0.2 fields above). With
+``--repo`` (by default ``../environment/repo`` next to the truth's folder,
+when it exists) it also recomputes every ``snippet_sha256`` from the code and
+resolves trust boundaries, fixtures and ``violates`` paths in the repo's
+``security_manifest.json``. Run it at task build time. It exits 1 when there
+is a problem.
 
 Writes:
   <out>/reward.txt          single float in [0, 1]
@@ -70,6 +98,7 @@ run is scored 0 rather than left unscored.
 """
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -163,7 +192,7 @@ def category_of(rule_id: str) -> str:
 
 
 def load_results(sarif_path: Path):
-    sarif = json.loads(sarif_path.read_text())
+    sarif = json.loads(sarif_path.read_text(encoding="utf-8"))
     if sarif.get("version") != "2.1.0":
         raise ValueError("SARIF version must be 2.1.0")
     results = []
@@ -382,6 +411,8 @@ def grade(sarif_path: Path, truth: dict) -> tuple[dict, dict]:
         summary.update(flat_task_level(tl), sarif_missing=1)
         if negative:
             summary.update({"neg.fail.near_fix": 0, "neg.fail.trap": 0})
+            if complete_controls(truth):
+                summary.update({"neg.controls": 0.0, "neg.complete_control_recognised": 0})
         return summary, detail
 
     results = load_results(sarif_path)
@@ -494,17 +525,34 @@ def grade_negative(results: list, truth: dict, w: dict, tol: int) -> tuple[dict,
     A result in both buckets is counted once, under ``near_fix``. Every other
     result is ``fp_outside_scope``, including one elsewhere in
     ``fix_changed_files``. No CWE agreement is needed to fail.
+
+    A result that names one of the negative's complete ``controls`` (contrast
+    prefix, ``controlStatus`` "complete", within tolerance of the control's
+    ``at``) is neither: it is ``complete_control_recognised`` and feeds the
+    ``neg.controls`` sub-score, which is reported but not part of the reward.
     """
     contrast = truth.get("contrast_rule_ids") or []
     prefixes = {rule_prefix(r) for r in contrast}
     fixed = truth.get("fixed_locations") or []
     traps = [t for t in truth.get("negative_analyses") or [] if is_trap(t)]
     scope_files = set(truth.get("fix_changed_files") or [])
-    near_fix, trap_hits, outside, loose = [], [], [], set()
+    controls = complete_controls(truth)
+    ctrl_best = [0.0] * len(controls)
+    ctrl_by = [None] * len(controls)
+    near_fix, trap_hits, outside, loose, recognised = [], [], [], set(), []
     for idx, res in enumerate(results):
         rule = res.get("ruleId", "")
         primary = primary_of(res)
         entry = {"index": idx, "ruleId": rule, "location": primary}
+        props = res.get("properties") or {}
+        named = [c for c, ctrl in enumerate(controls) if near(*primary, ctrl["at"], tol)]
+        if named and rule_prefix(rule) in prefixes and props.get("controlStatus") == "complete":
+            score = 0.75 + 0.25 * (props.get("residualRisk") == truth.get("residual_risk"))
+            for c in named:
+                if score > ctrl_best[c]:
+                    ctrl_best[c], ctrl_by[c] = score, idx
+            recognised.append({**entry, "controls": [controls[c].get("name") for c in named]})
+            continue
         is_near = any(near(*primary, loc, tol) for loc in fixed)
         if risk_of(rule) and (is_near or primary[0] in scope_files):
             loose.add(risk_of(rule))
@@ -530,7 +578,26 @@ def grade_negative(results: list, truth: dict, w: dict, tol: int) -> tuple[dict,
     detail = {"negative": True, "contrast_rule_ids": contrast, "failure_bucket": bucket or None,
               "results_near_fixed_code": near_fix, "trap_hits": trap_hits,
               "outside_scope_results": outside, "task_level": tl}
+    if controls:
+        summary["neg.controls"] = round(sum(ctrl_best) / len(controls), 4)
+        summary["neg.complete_control_recognised"] = len(recognised)
+        detail["complete_control_recognised"] = recognised
+        detail["complete_controls"] = [
+            {"name": ctrl.get("name"), "at": ctrl["at"], "recognised": ctrl_by[c] is not None,
+             "result_index": ctrl_by[c], "score": ctrl_best[c]} for c, ctrl in enumerate(controls)]
     return summary, detail
+
+
+def complete_controls(truth: dict) -> list:
+    """The negative's ``controls`` with status "complete" and a usable ``at`` location."""
+    out = []
+    for ctrl in truth.get("controls") or []:
+        if not isinstance(ctrl, dict):
+            continue
+        at = ctrl.get("at")
+        if ctrl.get("status") == "complete" and isinstance(at, dict) and at.get("file") and _is_line(at.get("start_line")):
+            out.append(ctrl)
+    return out
 
 
 def grade_twin(results: list, truth: dict, w: dict, tol: int) -> tuple[dict, dict]:
@@ -598,7 +665,229 @@ def _gap(a: dict, b: dict) -> int:
     return max(0, a["start_line"] - b_end, b["start_line"] - a_end)
 
 
-def check_truth(truth: dict) -> list[str]:
+# ---- snippet ids and the gt-0.2 annotation fields ----------------------------------------
+
+SINK_ROLES = ("sink", "action")
+EGRESS_KINDS = ("external", "internal")
+PATH_START_ROLES = ("source", "model_decision")
+MANIFEST_PATH_RE = re.compile(r"[A-Za-z_]\w*(\[\d+\])*(\.[A-Za-z_]\w*(\[\d+\])*)*")
+
+
+def snippet_id(task_id: str, file: str, start: int, end: int) -> str:
+    """The stable primary key of a labelled code snippet: ``<task_id>:<file>:<start>-<end>``."""
+    return f"{task_id}:{file}:{start}-{end}"
+
+
+def snippet_text(repo, file: str, start: int, end: int) -> str:
+    """Lines ``start`` to ``end`` (1-based, inclusive) of ``repo/file``, CRLF read as LF, joined with LF."""
+    if Path(file).is_absolute() or ".." in Path(file).parts:
+        raise ValueError(f"{file}: not a repo-relative path")
+    text = (Path(repo) / file).read_bytes().decode("utf-8").replace("\r\n", "\n")
+    lines = text.split("\n")
+    if text.endswith("\n"):
+        lines.pop()
+    if not (_is_line(start) and _is_line(end) and start <= end <= len(lines)):
+        raise ValueError(f"{file}: lines {start}-{end} are outside the file ({len(lines)} lines)")
+    return "\n".join(lines[start - 1:end])
+
+
+def snippet_sha256(repo, file: str, start: int, end: int) -> str:
+    """SHA-256 (hex) of ``snippet_text``, the value ``snippet_sha256`` holds in the ground truth."""
+    return hashlib.sha256(snippet_text(repo, file, start, end).encode("utf-8")).hexdigest()
+
+
+def _locations(node, where: str = ""):
+    """(json path, object) for every location (an object with ``file`` and ``start_line``)."""
+    if isinstance(node, dict):
+        if isinstance(node.get("file"), str) and "start_line" in node:
+            yield where, node
+        for k, v in node.items():
+            yield from _locations(v, f"{where}.{k}" if where else k)
+    elif isinstance(node, list):
+        for i, v in enumerate(node):
+            yield from _locations(v, f"{where}[{i}]")
+
+
+def _schema_at_least(truth: dict, major: int, minor: int) -> bool:
+    m = re.fullmatch(r"gt-(\d+)\.(\d+)", str(truth.get("schema_version", "")))
+    return bool(m) and (int(m.group(1)), int(m.group(2))) >= (major, minor)
+
+
+def resolve_manifest_path(manifest, path: str):
+    """The value at ``path`` (``authorized_recipients[1].data_scope``) in the manifest. KeyError if absent."""
+    if not isinstance(path, str) or not MANIFEST_PATH_RE.fullmatch(path):
+        raise KeyError(path)
+    node = manifest
+    for name, indexes in re.findall(r"([A-Za-z_]\w*)((?:\[\d+\])*)", path):
+        if not isinstance(node, dict) or name not in node:
+            raise KeyError(path)
+        node = node[name]
+        for i in re.findall(r"\[(\d+)\]", indexes):
+            if not isinstance(node, list) or int(i) >= len(node):
+                raise KeyError(path)
+            node = node[int(i)]
+    return node
+
+
+def _norm_text(text: str) -> str:
+    return " ".join(str(text).split()).lower().rstrip(".")
+
+
+def _asset_problems(name: str, f: dict, manifest, fixtures) -> list[str]:
+    asset = f["affected_asset"]
+    if not isinstance(asset, dict) or not isinstance(asset.get("fixture_ids"), list):
+        return [f"{name}: affected_asset must be an object with a fixture_ids list"]
+    problems = []
+    ids = asset["fixture_ids"]
+    if not ids and not isinstance(asset.get("resource"), str):
+        problems.append(f"{name}: affected_asset with no fixture_ids must name a resource")
+    if fixtures is not None:
+        problems += [f"{name}: affected_asset fixture {i!r} is not in the manifest" for i in ids if i not in fixtures]
+        canary = (f.get("evidence") or {}).get("canary_id")
+        if canary:
+            want = sorted(k for k, x in fixtures.items() if x.get("canary_id") == canary)
+            if not want:
+                problems.append(f"{name}: evidence.canary_id {canary!r} is on no manifest fixture")
+            elif not set(want) <= set(ids):
+                problems.append(f"{name}: affected_asset.fixture_ids {ids} miss {want} (the fixtures carrying "
+                                f"canary {canary})")
+        classes = {x.get("asset_class") for i, x in fixtures.items() if i in ids}
+        if ids and "data_class" in asset and asset["data_class"] not in classes:
+            problems.append(f"{name}: affected_asset.data_class {asset['data_class']!r} is not the asset_class "
+                            f"of its fixtures {sorted(map(str, classes))}")
+    if "manifest_path" in asset and isinstance(manifest, dict):
+        try:
+            resolve_manifest_path(manifest, asset["manifest_path"])
+        except KeyError:
+            problems.append(f"{name}: affected_asset.manifest_path {asset['manifest_path']!r} is not in the manifest")
+    return problems
+
+
+def _finding_annotation_problems(name: str, f: dict, strict: bool, manifest, boundaries, fixtures) -> list[str]:
+    problems = []
+    if "affected_asset" in f:
+        problems += _asset_problems(name, f, manifest, fixtures)
+    elif strict:
+        problems.append(f"{name}: missing affected_asset")
+    for i, step in enumerate(f.get("path") or []):
+        if not isinstance(step, dict):
+            continue
+        eg = step.get("egress")
+        if eg is None:
+            if strict and step.get("role") in SINK_ROLES:
+                problems.append(f"{name} path[{i}] ({step.get('role')}): missing egress")
+        elif not isinstance(eg, dict) or eg.get("kind") not in EGRESS_KINDS or not isinstance(eg.get("boundary"), str):
+            problems.append(f"{name} path[{i}]: egress must be {{kind: external|internal, boundary: <id>}}")
+        elif boundaries is not None and eg["boundary"] not in boundaries:
+            problems.append(f"{name} path[{i}]: egress boundary {eg['boundary']!r} is not a manifest "
+                            f"trust_boundaries id")
+    cons = f.get("consequence")
+    if cons is None:
+        if strict and f.get("risk_type") == "excessive_agency":
+            problems.append(f"{name}: missing consequence (excessive_agency)")
+    elif not isinstance(cons, str) or not cons.strip():
+        problems.append(f"{name}: consequence must be a sentence")
+    elif isinstance(f.get("rationale"), str) and _norm_text(cons) not in _norm_text(f["rationale"]):
+        problems.append(f"{name}: consequence is not taken from the rationale")
+    vio = f.get("violates")
+    if vio is None:
+        if strict:
+            problems.append(f"{name}: missing violates")
+    elif not isinstance(vio, list) or not vio:
+        problems.append(f"{name}: violates must be a non-empty list")
+    else:
+        for j, v in enumerate(vio):
+            if not isinstance(v, dict) or not isinstance(v.get("manifest_path"), str) \
+                    or not isinstance(v.get("summary"), str):
+                problems.append(f"{name}: violates[{j}] needs manifest_path and summary")
+                continue
+            if isinstance(manifest, dict):
+                try:
+                    resolve_manifest_path(manifest, v["manifest_path"])
+                except KeyError:
+                    problems.append(f"{name}: violates[{j}].manifest_path {v['manifest_path']!r} is not in "
+                                    f"the manifest")
+    if strict:
+        starts = [s for s in f.get("path") or [] if isinstance(s, dict) and s.get("role") in PATH_START_ROLES]
+        if not starts:
+            problems.append(f"{name}: path has no source or model_decision step")
+        elif starts[0].get("required") is not True:
+            problems.append(f"{name}: the first source or model_decision step (step {starts[0].get('step')}) "
+                            f"must be required")
+    for j, ctrl in enumerate(f.get("controls") or []):
+        if isinstance(ctrl, dict):
+            for key in ("expected_at", "at"):
+                if key in ctrl:
+                    problems += _location_problems(ctrl[key], f"{name} controls[{j}].{key}")
+    return problems
+
+
+def _negative_control_problems(truth: dict, strict: bool) -> list[str]:
+    problems = []
+    fixed = {(x.get("file"), x.get("start_line"), x.get("end_line", x.get("start_line")))
+             for x in truth.get("fixed_locations") or [] if isinstance(x, dict)}
+    ctrls = truth.get("controls")
+    if ctrls is None:
+        if strict:
+            problems.append("negative: missing controls (the complete controls the fix adds)")
+        ctrls = []
+    elif not isinstance(ctrls, list) or (strict and not ctrls):
+        problems.append("negative: controls must be a non-empty list")
+        ctrls = []
+    for j, ctrl in enumerate(ctrls):
+        where = f"controls[{j}]"
+        if not isinstance(ctrl, dict):
+            problems.append(f"{where}: not an object")
+            continue
+        if ctrl.get("status") != "complete":
+            problems.append(f"{where}: a negative's control must have status 'complete'")
+        at = ctrl.get("at")
+        p = _location_problems(at, f"{where}.at")
+        problems += p
+        if not p and (at["file"], at["start_line"], at.get("end_line", at["start_line"])) not in fixed:
+            problems.append(f"{where}.at is not one of fixed_locations")
+    if strict and not isinstance(truth.get("residual_risk"), str):
+        problems.append("negative: missing residual_risk")
+    return problems
+
+
+def _annotation_problems(truth: dict, repo, manifest) -> list[str]:
+    """The gt-0.2 checks. Shapes are checked whenever a field is present, presence from gt-0.2 on."""
+    problems = []
+    strict = _schema_at_least(truth, 0, 2)
+    task_id = truth.get("task_id")
+    for where, loc in _locations({k: v for k, v in truth.items() if k != "evidence"}):
+        if strict and not ("snippet_id" in loc and "snippet_sha256" in loc):
+            problems.append(f"{where}: missing snippet_id or snippet_sha256")
+        start, end = loc.get("start_line"), loc.get("end_line", loc.get("start_line"))
+        if not (_is_line(start) and _is_line(end)):
+            continue
+        if "snippet_id" in loc and task_id and loc["snippet_id"] != snippet_id(task_id, loc["file"], start, end):
+            problems.append(f"{where}: snippet_id {loc['snippet_id']!r} does not name {loc['file']}:{start}-{end}")
+        if "snippet_sha256" in loc and repo is not None:
+            try:
+                digest = snippet_sha256(repo, loc["file"], start, end)
+            except (OSError, ValueError) as exc:
+                problems.append(f"{where}: cannot hash snippet: {exc}")
+                continue
+            if digest != loc["snippet_sha256"]:
+                problems.append(f"{where}: snippet_sha256 does not match the code at {loc['file']}:{start}-{end} "
+                                f"(check the label still points at the right lines, then rerun "
+                                f"tools/snippet_ids.py)")
+    boundaries = fixtures = None
+    if isinstance(manifest, dict):
+        boundaries = {b.get("id") for b in manifest.get("trust_boundaries") or [] if isinstance(b, dict)}
+        fixtures = {x.get("fixture_id"): x for x in manifest.get("fixtures") or [] if isinstance(x, dict)}
+    for n, f in enumerate(truth.get("findings") or []):
+        if isinstance(f, dict):
+            problems += _finding_annotation_problems(f"finding {f.get('id', n)}", f, strict, manifest,
+                                                     boundaries, fixtures)
+    if truth.get("variant_role") == "negative" and "contrast_rule_ids" in truth:
+        problems += _negative_control_problems(truth, strict)
+    return problems
+
+
+def check_truth(truth: dict, repo=None, manifest=None) -> list[str]:
     """Problems in a ground truth that would make grading silently wrong. Empty when fine.
 
     Checks required fields, line ranges, that every finding has a CWE when
@@ -708,6 +997,14 @@ def check_truth(truth: dict) -> list[str]:
                             f"(line_tolerance {tol}): {x['file']}:{x['start_line']} and "
                             f"{y['file']}:{y['start_line']}, "
                             f"a result there can match either finding")
+    if manifest is None and repo is not None:
+        mf = Path(repo) / "security_manifest.json"
+        if mf.is_file():
+            try:
+                manifest = json.loads(mf.read_text(encoding="utf-8"))
+            except ValueError as exc:
+                problems.append(f"cannot read {mf}: {exc}")
+    problems += _annotation_problems(truth, repo, manifest)
     return problems
 
 
@@ -718,10 +1015,17 @@ def main():
     ap.add_argument("--out", default="/logs/verifier")
     ap.add_argument("--check-truth", action="store_true",
                     help="validate the ground truth and exit (1 on any problem), without grading")
+    ap.add_argument("--repo", default=None,
+                    help="with --check-truth: the task repo to hash snippets against (default: "
+                         "../environment/repo next to the truth's folder, when it exists)")
     args = ap.parse_args()
     if args.check_truth:
+        repo = args.repo
+        if repo is None:
+            guess = Path(args.truth).resolve().parent.parent / "environment" / "repo"
+            repo = guess if guess.is_dir() else None
         try:
-            problems = check_truth(json.loads(Path(args.truth).read_text()))
+            problems = check_truth(json.loads(Path(args.truth).read_text(encoding="utf-8")), repo)
         except (OSError, ValueError) as exc:
             problems = [f"cannot read {args.truth}: {exc}"]
         for p in problems:
@@ -732,7 +1036,7 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
 
     try:
-        truth = json.loads(Path(args.truth).read_text())
+        truth = json.loads(Path(args.truth).read_text(encoding="utf-8"))
         summary, detail = grade(Path(args.sarif), truth)
     except BaseException as exc:  # never leave a run unscored
         summary = {"reward": 0.0, "detection": 0.0, "classification": 0.0, "path": 0.0,

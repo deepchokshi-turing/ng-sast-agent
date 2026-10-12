@@ -1,12 +1,9 @@
-# Task format: grader v3
+# Task format: grader v3.1
 
-`grade.py` here is the task grader. Every field added since v1 is optional. A
-ground truth without the v3 fields is graded exactly as by v2, and one without
-the v2 fields exactly as by the original grader (`tests/test_grader_v2.py`
-checks this). Tasks can move over one at a time.
+`grade.py` here is the task grader, and the only one: every task in harbor-tasks and every sample task under `tests/fixtures/tasks` carries a byte-identical copy. Every field added since v1 is optional, so older ground truths still grade; the earlier graders and their comparison test were removed on 2026-10-12.
 
 To use it, copy `grade.py` into each task's `tests/grade.py`. `test.sh` doesn't
-change. The same file is kept as `v3/common/grade_v3.py`.
+change.
 
 ## What the grader measures
 
@@ -133,6 +130,41 @@ excessive-agency finding that exposes a disclosure, `ea_exposes_sid`) are
 copied into that finding's entry in `grading_detail.json`. Each linked finding is
 still matched and scored on its own.
 
+## v3.1: complete controls on negatives
+
+A negative may list the complete controls its fix adds, next to `fixed_locations`:
+
+```json
+"controls": [{"name": "path_confinement", "status": "complete",
+              "at": {"file": "src/mini/tools/file_tool.py", "start_line": 20, "end_line": 24},
+              "contrast_of": "F1", "note": "..."}],
+"control_status": "complete",
+"residual_risk": "low"
+```
+
+`at` is one of the negative's `fixed_locations`. Every negative in harbor-tasks uses `residual_risk: "low"`: the client spec asks to "assess residual risk" but never calls it none, and the negatives keep traps and residual review notes.
+
+A result names a complete control when its rule id has a contrast prefix, its `properties.controlStatus` is `"complete"`, and it lands within `line_tolerance` of the control's `at`. Such a result is not a failure (whichever bucket it would otherwise fall in) and is listed under `complete_control_recognised` in `grading_detail.json`. Each control scores 0.75 when a result names it, plus 0.25 when that result's `residualRisk` equals the negative's `residual_risk`, and the mean over the controls is the negative-side controls sub-score `neg.controls` in `reward.json` (with `neg.complete_control_recognised`, the number of such results). `complete_controls` in `grading_detail.json` shows each control, whether it was recognised and by which result.
+
+`neg.controls` is reported but does not enter the reward. A silent negative still scores 1.0, any other result is judged by the near-fix and trap rules above, and a negative without `controls` is graded exactly as before (no `neg.controls` key). A SARIF that recognises a control and also has a failing result still fails. The oracle SARIF of every negative names each of its complete controls, so it scores 1.0 with `neg.controls` 1.0.
+
+## Ground truth gt-0.2
+
+`schema_version: "gt-0.2"` adds evaluator-only annotation fields. None of them changes how a positive is graded, and `--check-truth` requires them only from gt-0.2 on (and checks their shape whenever they are present).
+
+- `snippet_id` and `snippet_sha256` on every location (primary and alternative locations, path steps and their alternatives, control locations, `negative_analyses`, `fixed_locations`). `snippet_id` is `<task_id>:<file>:<start_line>-<end_line>`, the primary key that ties a label to a code snippet (spec comment SS1). `snippet_sha256` is the SHA-256 of those lines of `environment/repo/<file>`, read with CRLF as LF and joined with `
+` (`snippet_sha256` in `grade.py`). Line numbers are unchanged. Regenerate with `python tools/snippet_ids.py ../harbor-tasks` from `ng-sast-agent` (`--check` writes nothing and exits 1 when a file is out of date). The tool is deterministic and keeps each file's indent and key order.
+- `affected_asset` per finding (spec 1, measurement 2): `fixture_ids`, `data_class`, `classification` and `canary_ids` from the manifest `fixtures` and `data_classification`, matched through `evidence.canary_id`. An excessive-agency finding without data names the `resource` and the `manifest_path` it comes from instead.
+- `egress` on every path step whose role is `sink` or `action`: `{"kind": "external" | "internal", "boundary": "<trust_boundaries id>"}` (spec comment SS3, internal and external egress points).
+- `consequence` on every excessive-agency finding: one sentence of the finding's own `rationale`.
+- `violates` per finding: a list of `{"manifest_path": "authorized_recipients[1].data_scope", "summary": "..."}`, the manifest entries the finding breaks.
+- The first `source` or `model_decision` path step of every finding is `required` (spec 1, measurement 2, "from source or model decision to sink or action").
+- Negatives carry `controls`, `control_status` and `residual_risk` as above.
+
+## Scoring changes made after seeing results
+
+2026-10-12: `matching.require_cwe` is now `false` on every harbor-tasks ground truth. Reason: the client spec defines detection by risk type and location, not CWE. A result now matches a finding on risk family and location alone, and CWE agreement still feeds the classification sub-score (`0.8 * rule + 0.2 * cwe_ok`). The grader code did not change for this, only the labels. Needs lead sign-off.
+
 ## Task-level outcomes
 
 For client measurement 1 the grader decides, per task, which risk types the
@@ -201,7 +233,13 @@ Run it on every task at build time. It reports
   well defined. `task_781350`'s F1
   and F2 alternative at `_instrumentation.py:115` and `:107` are an example.
 
-`check_truth(truth)` in `grade.py` returns the same problems as a list.
+- from gt-0.2 on, the fields of "Ground truth gt-0.2" above: a missing snippet id or hash, a missing `affected_asset`, `violates`, `egress` on a sink or action step, `consequence` on an excessive-agency finding, a first `source` or `model_decision` step that is not required, and on a negative a missing `controls` entry or `residual_risk`,
+- whatever the version, a malformed new field: an `egress` kind other than external or internal, a `consequence` that is not text of the rationale, a negative control that is not complete or whose `at` is not one of `fixed_locations`,
+- with the repo (`--repo <dir>`, by default `../environment/repo` next to the truth's folder when it exists): a `snippet_sha256` that no longer matches the code, a location outside its file, and, from the repo's `security_manifest.json`, an `egress` boundary that is not a trust boundary id, an `affected_asset` fixture that does not exist or misses the fixtures carrying the finding's canary, a `data_class` that is not their asset class, and a `violates` or `affected_asset` `manifest_path` that does not resolve.
+
+A hash mismatch means the code or the label moved. Check that the label still points at the right lines before rerunning `tools/snippet_ids.py`.
+
+`check_truth(truth, repo=None, manifest=None)` in `grade.py` returns the same problems as a list.
 
 ## v2 fields (unchanged)
 
