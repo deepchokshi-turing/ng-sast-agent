@@ -11,6 +11,8 @@ What each field is built from:
   (threadFlowLocation) gets ``properties.role = "source"``, the last gets
   ``"sink"`` and the steps in between get no role, because no tool says which
   of them is a root cause or a context step. A one-step trace is a sink only.
+  When the tool names the role of every step itself (Claude review in scoped
+  mode), those roles are written instead.
   With no trace there is no ``codeFlows``: a flow made up from the match alone
   would earn path credit through the grader's line tolerance with nothing
   behind it. Semgrep OSS 1.179.0 gives no trace in JSON without a login, so
@@ -24,6 +26,11 @@ What each field is built from:
   reads only the top-level ``properties.controlStatus``, ``residualRisk`` and
   ``recommendations``, never scores them. Reports show them as a separate
   heuristic track.
+- ``properties.controlStatus``, ``residualRisk`` and ``recommendations`` (top
+  level, scored): only when the tool assessed them itself
+  (``Finding.control_status``, ``assessed_residual_risk`` and
+  ``recommendations``), taken from the first finding of the merged group that
+  has each. Pattern and taint scanners never set them.
 
 The grader (v3) matches results to ground-truth findings one to one by an
 optimal assignment that maximises the task reward (``task_format/grade.py``,
@@ -56,9 +63,13 @@ def _code_flows(trace: tuple[TraceStep, ...]) -> list[dict[str, Any]]:
     """SARIF codeFlows from a tool-reported trace (see the module docstring)."""
     locations = []
     last = len(trace) - 1
+    own_roles = all(step.role for step in trace)
     for i, step in enumerate(trace):
         location: dict[str, Any] = {"location": {"physicalLocation": _region(step.file, step.start_line, step.end_line)}}
-        role = "sink" if i == last else ("source" if i == 0 else None)
+        if own_roles:
+            role = step.role
+        else:
+            role = "sink" if i == last else ("source" if i == 0 else None)
         if role:
             location["properties"] = {"role": role}
         locations.append(location)
@@ -87,6 +98,9 @@ def _group(findings: list[Finding]) -> tuple[dict[tuple[str, int, str], dict[str
                 "tool_rule_ids": [f.tool_rule_id],
                 "residual_risk": f.residual_risk,
                 "trace": f.trace,
+                "control_status": f.control_status,
+                "assessed_residual_risk": f.assessed_residual_risk,
+                "recommendations": f.recommendations,
                 "extra": {k: [v] for k, v in f.extra},
                 "members": [f],
             }
@@ -103,6 +117,9 @@ def _group(findings: list[Finding]) -> tuple[dict[tuple[str, int, str], dict[str
             group["tool_rule_ids"].append(f.tool_rule_id)
         if not group["trace"] and f.trace:
             group["trace"] = f.trace
+        for key in ("control_status", "assessed_residual_risk", "recommendations"):
+            if not group[key] and getattr(f, key):
+                group[key] = getattr(f, key)
         for k, v in f.extra:
             values = group["extra"].setdefault(k, [])
             if v not in values:
@@ -142,6 +159,10 @@ def build(findings: list[Finding], *, tool_name: str, tool_version: str) -> tupl
                 "toolRuleIds": g["tool_rule_ids"],
                 **({"toolProperties": {k: v[0] if len(v) == 1 else v for k, v in g["extra"].items()}}
                    if g["extra"] else {}),
+                # Scored: the tool's own assessment, never a heuristic.
+                **({"controlStatus": g["control_status"]} if g["control_status"] else {}),
+                **({"residualRisk": g["assessed_residual_risk"]} if g["assessed_residual_risk"] else {}),
+                **({"recommendations": list(g["recommendations"])} if g["recommendations"] else {}),
                 # Never scored: see the module docstring.
                 "heuristics": {
                     "controlStatus": heuristics.CONTROL_STATUS,

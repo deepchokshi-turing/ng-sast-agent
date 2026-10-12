@@ -342,8 +342,15 @@ def test_scoped_scan_text_uses_the_upstream_format_and_leaks_no_label():
 
     text = (HERE / "scoped_scan_instructions.txt").read_text()
     headers = re.findall(r"^\*\*(.+):\*\*$", text, re.MULTILINE)
-    assert len(headers) == 3 and all(line.startswith(("**", "- ")) for line in text.splitlines() if line)
+    assert len(headers) == 4 and all(line.startswith(("**", "- ")) for line in text.splitlines() if line)
     assert "security_manifest.json" in text and '"cwe"' in text
+    for field in ('"path"', '"control_status"', '"residual_risk"', '"recommendation_ids"'):
+        assert field in text
+    # The catalogue is the task profile's, in its order, the one the normaliser accepts.
+    from sast import heuristics
+    assert re.findall(r"^- (REC-[A-Z-]+):", text, re.MULTILINE) == list(heuristics.CATALOGUE)
+    from sast.findings import PATH_ROLES
+    assert all(role in text for role in PATH_ROLES)
     assert "—" not in text and ";" not in text
     ours = shingles(words(text), SHINGLE)
     for truth in SAMPLE_TASKS.glob("*/tests/ground_truth.json"):

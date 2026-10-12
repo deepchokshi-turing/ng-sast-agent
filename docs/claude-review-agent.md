@@ -119,12 +119,10 @@ runs.
 
 ## Scoped mode
 
-`scoped_scan_instructions.txt` is passed as upstream's
-`custom_scan_instructions`. It holds the task instruction's public scope
-table in the upstream `**Category:**` format, a pointer to
-`security_manifest.json`, and asks for a `cwe` list per finding. It was
-written once from the public instruction and never from a task. A test checks
-that it shares no six-word run with any sample task's ground truth.
+`scoped_scan_instructions.txt` is passed as upstream's `custom_scan_instructions`. It holds the task instruction's public scope table in the upstream `**Category:**` format, a pointer to `security_manifest.json`, and asks for extra fields per finding: a `cwe` list, a `path` (file, line and role per step), `control_status`, `residual_risk` and `recommendation_ids` from the task profile's recommendation catalogue, which it lists. These are the output profile's own fields and vocabulary, so client measurements 2 to 4 (path, controls, recommendations) can be scored for this agent. No upstream code changes: upstream's JSON parser and filter keep every field the model adds, and only our normaliser reads them. It was written from the public instruction and never from a task. A test checks that it shares no six-word run with any sample task's ground truth, and that its catalogue is the one the normaliser accepts.
+
+Scoped results are not stock upstream. Upstream's prompt asks for its own schema "exactly", after our instructions, so the model may leave the extra fields out. `assessed_fields` in the metadata counts how often it gave each one. Upstream also asks only for findings the model is more than 80% sure are exploitable, so `control_status` will lean towards `none`.
+
 `scoped_filter_instructions.txt` is the upstream default filter text without
 hard exclusions 7 and 14, generated from the upstream source and checked
 against it by a test. Both texts' sha256 go into the metadata.

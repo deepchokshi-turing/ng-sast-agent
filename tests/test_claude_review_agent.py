@@ -605,6 +605,93 @@ def test_stock_mode_ignores_model_cwes(tmp_path, api_key):
     assert result["ruleId"] == "LLM03.EA.FUNCTIONALITY" and result["properties"]["cwe"] == ["CWE-95"]
 
 
+# ---------------------------------------------------------------- scoped path, controls, recommendations
+
+
+ASSESSED = {
+    "path": [{"file": "src/calc_agent/agent.py", "line": 12, "role": "model_decision"},
+             {"file": "./src/calc_agent/agent.py", "line": "8", "role": "SINK"}],
+    "control_status": "None", "residual_risk": "high",
+    "recommendation_ids": ["REC-NARROW-TYPED-TOOLS", "rec-policy-gate", "REC-NARROW-TYPED-TOOLS"],
+}
+
+
+def test_scoped_mode_writes_the_models_path_controls_and_recommendations(tmp_path, api_key):
+    kept = [finding("src/calc_agent/agent.py", 8, category="eval_injection", cwe=["CWE-95"], **ASSESSED)]
+    sandbox = FakeSandbox(document=driver_document(kept))
+    _, context, go = run_agent(tmp_path, sandbox, mode="scoped")
+    asyncio.run(go())
+    (result,) = sarif_of(sandbox)["runs"][0]["results"]
+    steps = result["codeFlows"][0]["threadFlows"][0]["locations"]
+    assert [(s["location"]["physicalLocation"]["artifactLocation"]["uri"],
+             s["location"]["physicalLocation"]["region"]["startLine"], s["properties"]["role"]) for s in steps] == [
+        ("src/calc_agent/agent.py", 12, "model_decision"), ("src/calc_agent/agent.py", 8, "sink")]
+    props = result["properties"]
+    assert props["controlStatus"] == "none" and props["residualRisk"] == "high"
+    assert props["recommendations"] == ["REC-NARROW-TYPED-TOOLS", "REC-POLICY-GATE"]
+    assert "heuristics" in props
+    assert context.metadata["assessed_fields"] == {"path": 1, "path_steps": 2, "control_status": 1,
+                                                   "residual_risk": 1, "recommendations": 1}
+
+
+def test_scoped_mode_drops_bad_steps_and_values(tmp_path, api_key):
+    kept = [finding("src/calc_agent/agent.py", 8, category="eval_injection", cwe=["CWE-95"],
+                    path=[{"file": "src/calc_agent/agent.py", "line": 999, "role": "sink"},
+                          {"file": "tests/test_x.py", "line": 1, "role": "source"},
+                          "not a step",
+                          {"file": "src/calc_agent/agent.py", "line": 12, "role": "made_up"},
+                          {"file": "src/calc_agent/agent.py", "line": 8, "role": "sink"}],
+                    control_status="mostly", residual_risk="severe",
+                    recommendation_ids=["REC-NOT-REAL", 7, "REC-POLICY-GATE"])]
+    sandbox = FakeSandbox(document=driver_document(kept))
+    _, context, go = run_agent(tmp_path, sandbox, mode="scoped")
+    asyncio.run(go())
+    (result,) = sarif_of(sandbox)["runs"][0]["results"]
+    steps = result["codeFlows"][0]["threadFlows"][0]["locations"]
+    # One role the profile does not know: the writer falls back to source/sink.
+    assert [(s["location"]["physicalLocation"]["region"]["startLine"], s.get("properties", {}).get("role"))
+            for s in steps] == [(12, "source"), (8, "sink")]
+    props = result["properties"]
+    assert "controlStatus" not in props and "residualRisk" not in props
+    assert props["recommendations"] == ["REC-POLICY-GATE"]
+    meta = context.metadata
+    assert meta["path_steps_dropped_count"] == 3
+    assert [d[0] for d in meta["path_steps_dropped"]] == ["line outside the file", "out of scope",
+                                                         "step is not an object"]
+    assert meta["assessed_values_rejected"] == ["mostly", "severe"]
+    assert meta["recommendations_rejected"] == ["REC-NOT-REAL", "7"]
+
+
+def test_scoped_mode_without_assessed_fields_scores_none(tmp_path, api_key):
+    kept = [finding("src/calc_agent/agent.py", 8, category="eval_injection", cwe=["CWE-95"])]
+    sandbox = FakeSandbox(document=driver_document(kept))
+    _, context, go = run_agent(tmp_path, sandbox, mode="scoped")
+    asyncio.run(go())
+    (result,) = sarif_of(sandbox)["runs"][0]["results"]
+    assert "codeFlows" not in result
+    assert not {"controlStatus", "residualRisk", "recommendations"} & set(result["properties"])
+    assert context.metadata["assessed_fields"]["path"] == 0
+
+
+def test_stock_mode_ignores_the_assessed_fields(tmp_path, api_key):
+    kept = [finding("src/calc_agent/agent.py", 8, category="eval_injection", **ASSESSED)]
+    sandbox = FakeSandbox(document=driver_document(kept))
+    _, _, go = run_agent(tmp_path, sandbox)
+    asyncio.run(go())
+    (result,) = sarif_of(sandbox)["runs"][0]["results"]
+    assert "codeFlows" not in result
+    assert not {"controlStatus", "residualRisk", "recommendations"} & set(result["properties"])
+
+
+def test_scoped_assessment_earns_path_controls_and_recommendations(tmp_path, api_key, grade_sarif):
+    kept = [finding("src/calc_agent/agent.py", 8, category="eval_injection", cwe=["CWE-95"], **ASSESSED)]
+    sandbox = FakeSandbox(document=driver_document(kept))
+    _, _, go = run_agent(tmp_path, sandbox, mode="scoped")
+    asyncio.run(go())
+    reward = grade_sarif(TASK, sarif_of(sandbox))
+    assert reward["path"] == 1.0 and reward["controls"] == 1.0 and reward["recommendations"] == 1.0
+
+
 def test_the_sarif_grades_like_any_scanner(tmp_path, api_key, grade_sarif):
     """The eval() finding on smoke_eval scores as the Semgrep one does: detection and classification."""
     kept = [finding("src/calc_agent/agent.py", 8, category="eval_injection")]

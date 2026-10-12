@@ -17,14 +17,25 @@ Each kept finding (after the upstream filter) has ``file``, ``line``,
 - Level and residual risk: HIGH gives ``error``/``high``, MEDIUM
   ``warning``/``medium``, LOW ``note``/``low`` (``heuristics.residual_risk``).
   Any other severity gives ``warning``/``medium`` and is counted.
-- No trace: the review reports an exploit scenario in prose, not a path, so no
-  codeFlows are written (see ``sast.sarif``).
+- Path (scoped mode only): the model's ``path`` list becomes ``Finding.trace``
+  and so the result's codeFlows. A step must be an object whose ``file`` and
+  ``line`` pass the same checks as the finding's own location, else it is
+  dropped and counted. Its ``role`` is kept when it is one of
+  ``findings.PATH_ROLES``. At most ``MAX_PATH_STEPS`` steps are kept. In stock
+  mode the review gives only an exploit scenario in prose, so no codeFlows are
+  written (see ``sast.sarif``).
+- Controls and recommendations (scoped mode only): ``control_status`` and
+  ``residual_risk`` are kept when they are one of the profile's values, and
+  ``recommendation_ids`` keeps the ids found in the task's catalogue
+  (``heuristics.CATALOGUE``), in order and without repeats. Anything else is
+  dropped and counted. These go to the scored top-level SARIF properties. In
+  stock mode, and for a field the model left out, nothing is scored: the
+  review's free-text recommendation cannot be turned into the task's REC ids
+  without guessing, and the fixed values from ``sast.heuristics`` stay under
+  ``properties.heuristics`` as for every scanner.
 - The category, severity, both confidences, the CWE source and short copies of
   the exploit scenario and recommendation go to ``Finding.extra``, which the
-  SARIF writer puts under ``toolProperties``. They are never scored. Control
-  status and recommendations come from ``sast.heuristics`` as for every
-  scanner, because the review's free-text recommendation cannot be turned into
-  the task's REC ids without guessing.
+  SARIF writer puts under ``toolProperties``. They are never scored.
 """
 
 from __future__ import annotations
@@ -33,13 +44,14 @@ from collections import Counter
 from typing import Any
 
 from .. import cwe_map, heuristics
-from ..findings import Finding
+from ..findings import CONTROL_STATUSES, PATH_ROLES, RISK_LEVELS, Finding, TraceStep
 from ..scope import in_scope, repo_path
 from . import category_map
 
 LEVELS = {"HIGH": "error", "MEDIUM": "warning", "LOW": "note"}
 MESSAGE_CHARS = 1000
 EXTRA_CHARS = 500
+MAX_PATH_STEPS = 20
 
 
 def _text(value: Any, limit: int) -> str:
@@ -56,6 +68,72 @@ def _line(value: Any) -> int | None:
     if isinstance(value, str) and value.strip().isdigit():
         return int(value.strip())
     return None
+
+
+def _location_problem(file: str, line: int | None, line_counts: dict[str, int], roots: list[str],
+                      excludes: list[str]) -> str | None:
+    """Why (file, line) is not a usable location, or None when it is."""
+    if not file or not in_scope(file, roots, excludes):
+        return "out of scope"
+    if file not in line_counts:
+        return "not a text file the review was given"
+    if line is None or line < 1 or line > line_counts[file]:
+        return "line outside the file"
+    return None
+
+
+def _path(value: Any, line_counts: dict[str, int], roots: list[str], excludes: list[str],
+          dropped: list[list[Any]]) -> tuple[TraceStep, ...]:
+    """The model's ``path`` list as trace steps; bad steps go to ``dropped``."""
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        dropped.append(["path is not a list", _text(value, 100), None])
+        return ()
+    steps: list[TraceStep] = []
+    for raw in value:
+        if not isinstance(raw, dict):
+            dropped.append(["step is not an object", _text(raw, 100), None])
+            continue
+        file = repo_path(str(raw.get("file") or ""))
+        line = _line(raw.get("line"))
+        problem = _location_problem(file, line, line_counts, roots, excludes)
+        if problem:
+            dropped.append([problem, str(raw.get("file") or "")[:200], raw.get("line")])
+            continue
+        if len(steps) == MAX_PATH_STEPS:
+            dropped.append(["more than {} steps".format(MAX_PATH_STEPS), file, line])
+            continue
+        role = str(raw.get("role") or "").strip().lower()
+        steps.append(TraceStep(file=file, start_line=line, end_line=line, role=role if role in PATH_ROLES else None))
+    return tuple(steps)
+
+
+def _choice(value: Any, allowed: tuple[str, ...], rejected: list[str]) -> str | None:
+    """``value`` when it is one of ``allowed`` (any case), else None (and counted unless missing)."""
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if text in allowed:
+        return text
+    rejected.append(_text(value, 50))
+    return None
+
+
+def _recommendations(value: Any, rejected: list[str]) -> tuple[str, ...]:
+    """The catalogue ids in ``value`` (a list, or one string), in order and without repeats."""
+    if value is None:
+        return ()
+    items = [value] if isinstance(value, str) else (value if isinstance(value, list) else [value])
+    ids: list[str] = []
+    for item in items:
+        text = item.strip().upper() if isinstance(item, str) else ""
+        if text in heuristics.CATALOGUE:
+            if text not in ids:
+                ids.append(text)
+        else:
+            rejected.append(_text(item, 60))
+    return tuple(ids)
 
 
 def normalise(
@@ -76,6 +154,11 @@ def normalise(
     decisions: Counter[str] = Counter({"none": 0, "unmapped": 0, "mapped": 0, "ambiguous": 0})
     rejected: list[str] = []
     severities: Counter[str] = Counter()
+    path_dropped: list[list[Any]] = []
+    assessed: Counter[str] = Counter({"path": 0, "path_steps": 0, "control_status": 0, "residual_risk": 0,
+                                      "recommendations": 0})
+    values_rejected: list[str] = []
+    recs_rejected: list[str] = []
 
     for item in kept:
         if not isinstance(item, dict):
@@ -84,14 +167,12 @@ def normalise(
         raw_file = str(item.get("file") or "")
         file = repo_path(raw_file)
         line = _line(item.get("line"))
-        if not file or not in_scope(file, roots, excludes):
+        problem = _location_problem(file, line, line_counts, roots, excludes)
+        if problem == "out of scope":
             dropped_scope.append([raw_file[:200], item.get("line")])
             continue
-        if file not in line_counts:
-            dropped_location.append(["not a text file the review was given", file, item.get("line")])
-            continue
-        if line is None or line < 1 or line > line_counts[file]:
-            dropped_location.append(["line outside the file", file, item.get("line")])
+        if problem:
+            dropped_location.append([problem, file, item.get("line")])
             continue
 
         category = category_map.normalise(item.get("category"))
@@ -127,6 +208,16 @@ def normalise(
         for key, field in (("exploitScenario", "exploit_scenario"), ("recommendation", "recommendation")):
             if item.get(field):
                 extra.append((key, _text(item.get(field), EXTRA_CHARS)))
+        trace: tuple[TraceStep, ...] = ()
+        control_status = residual = None
+        recs: tuple[str, ...] = ()
+        if mode == "scoped":
+            trace = _path(item.get("path"), line_counts, roots, excludes, path_dropped)
+            control_status = _choice(item.get("control_status"), CONTROL_STATUSES, values_rejected)
+            residual = _choice(item.get("residual_risk"), RISK_LEVELS, values_rejected)
+            recs = _recommendations(item.get("recommendation_ids"), recs_rejected)
+            assessed.update({"path": bool(trace), "path_steps": len(trace), "control_status": bool(control_status),
+                             "residual_risk": bool(residual), "recommendations": bool(recs)})
         findings.append(Finding(
             tool_rule_id="ccsr/" + (category or "uncategorised"),
             cwes=ordered,
@@ -136,7 +227,11 @@ def normalise(
             message=_text(item.get("description"), MESSAGE_CHARS) or category,
             level=LEVELS.get(severity, "warning"),
             residual_risk=heuristics.residual_risk(severity, None),
+            trace=trace,
             extra=tuple(extra),
+            control_status=control_status,
+            assessed_residual_risk=residual,
+            recommendations=recs,
         ))
 
     counts = {
@@ -152,5 +247,11 @@ def normalise(
         "results_by_cwe_decision": dict(decisions),
         "results_cwe_ambiguous": ambiguous[:200],
         "findings_by_severity": dict(sorted(severities.items())),
+        # Scoped mode: how many findings carried each assessed field.
+        "assessed_fields": dict(assessed),
+        "path_steps_dropped": path_dropped[:200],
+        "path_steps_dropped_count": len(path_dropped),
+        "assessed_values_rejected": values_rejected[:200],
+        "recommendations_rejected": recs_rejected[:200],
     }
     return findings, counts

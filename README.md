@@ -943,7 +943,7 @@ Every option is `--ak key=value` or the host variable `CLAUDE_REVIEW_<KEY>`
 |---|---|---|
 | `model` | upstream default, `claude-opus-4-1-20250805` (may be retired, see above) | model for the review and, unless `filter_model` is set, the filter. Harbor's `-m` is recorded and not used |
 | `filter_model` | `model` | model for the per-finding filter |
-| `mode` | `stock` | `stock`: upstream prompts and filter unchanged. `scoped`: adds the benchmark's LLM02/LLM03 scope and a pointer to `security_manifest.json` through the upstream custom instructions, asks for a CWE list per finding, and uses the upstream filter text without exclusions 7 ("lack of hardening") and 14 ("user content in AI prompts is not a vulnerability") |
+| `mode` | `stock` | `stock`: upstream prompts and filter unchanged. `scoped`: adds the benchmark's LLM02/LLM03 scope and a pointer to `security_manifest.json` through the upstream custom instructions, asks for a CWE list, the path, control status, residual risk and catalogue recommendation ids per finding, and uses the upstream filter text without exclusions 7 ("lack of hardening") and 14 ("user content in AI prompts is not a vulnerability") |
 | `auth` | `auto` | `api_key` (`ANTHROPIC_API_KEY`), `oauth` (`CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`), or `auto`: the API key when it is set, else the token |
 | `filter` | `claude` with an API key, `hard_rules` with a token | `claude`: the upstream regex rules plus the per-finding API check (needs an API key). `hard_rules`: the regex rules only |
 | `max_turns` | none | Claude Code `--max-turns` |
@@ -1026,12 +1026,11 @@ falls back to the regex rules), when any per-finding filter call fails
   and counted (`dropped_bad_location`, `dropped_out_of_scope`).
 - **Level and residual risk**: HIGH gives `error` and `high`, MEDIUM `warning`
   and `medium`, LOW `note` and `low`.
-- **No codeFlows.** The review describes the exploit in prose and gives no
-  path, so no trace is made up.
-- **Control status and recommendations** come from the fixed heuristics, under
-  `properties.heuristics`, and are never scored. The review's own
-  recommendation text, category, severity, confidences and exploit scenario
-  are kept under `toolProperties`.
+- **codeFlows, stock mode: none.** The review describes the exploit in prose and gives no path, so no trace is made up.
+- **codeFlows, scoped mode**: the model's own `path` list (file, line, role per step). Each step must pass the same location checks as the finding, else it is dropped and counted (`path_steps_dropped`). The roles are written when all of them are profile roles, else the first step is `source` and the last `sink`. At most 20 steps.
+- **Control status, residual risk and recommendations, stock mode** come from the fixed heuristics, under `properties.heuristics`, and are never scored.
+- **The same, scoped mode**: the model's own `control_status`, `residual_risk` and `recommendation_ids` (catalogue ids only) go to the scored top-level `controlStatus`, `residualRisk` and `recommendations`. Unknown values are dropped and counted (`assessed_values_rejected`, `recommendations_rejected`), and `assessed_fields` counts how many findings carried each field. A field the model left out is not scored, and the heuristics stay under `properties.heuristics` either way.
+- The review's own recommendation text, category, severity, confidences and exploit scenario are kept under `toolProperties`.
 
 ### What the metadata records
 
