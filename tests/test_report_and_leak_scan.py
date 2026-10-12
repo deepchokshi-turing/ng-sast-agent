@@ -440,7 +440,7 @@ def write_toml(task: Path, task_id: str, variant: str, related: str, pins: str) 
     (task / "task.toml").write_text(
         'version = "1.0"\n\n[metadata]\n'
         f'task_id = "{task_id}"\nvariant_id = "{variant}"\nrelated_variant_ids = ["{related}"]\n'
-        f'package_versions = {{ python = ">=3.10", mini = "{pins}" }}\n')
+        f'package_versions = {{ python = "3.12.15", mini = "{pins}" }}\n')
 
 
 def test_task_toml_may_differ_only_in_ids(tmp_path):
