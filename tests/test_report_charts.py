@@ -106,14 +106,17 @@ def test_chart_values_match_the_summary_tables(tmp_path, monkeypatch, capsys):
 
 def test_missing_measurements_are_written_not_drawn_as_zero(tmp_path, monkeypatch, capsys):
     _, payload, _ = build(tmp_path, monkeypatch, capsys)
-    nothing, absent = eval_report.NOTHING_TO_JUDGE, eval_report.NOT_PROVIDED
-    path = rows_of(ET.parse(tmp_path / "o" / "charts" / "m2-path.svg").getroot())
+    nothing, absent, free = eval_report.NOTHING_TO_JUDGE, eval_report.NOT_PROVIDED, eval_report.FREE_TEXT
     bars = lambda g: g.findall("s:path", NS) + g.findall("s:rect", NS)  # noqa: E731
-    for title in (f"Semgrep: {nothing}", f"CodeQL: {nothing}", f"Claude (Opus 5.5, stock): {absent}"):
-        g = path[title]
+    for chart, title in (("m2-path", f"Semgrep: {nothing}"), ("m2-path", f"CodeQL: {nothing}"),
+                         ("m2-path", f"Claude (Opus 5.5, stock): {free}"),
+                         ("m3-protections", f"Claude (Opus 5.5, stock): {absent}"),
+                         ("m4-fixes", f"Claude (Opus 5.5, stock): {free}")):
+        g = rows_of(ET.parse(tmp_path / "o" / "charts" / f"{chart}.svg").getroot())[title]
         assert bars(g) == [], title
         state = [t for t in g.findall("s:text", NS) if "state" in t.get("class")]
         assert [t.text for t in state] == [title.split(": ")[1]]
+    path = rows_of(ET.parse(tmp_path / "o" / "charts" / "m2-path.svg").getroot())
     scored = path["SonarQube: 25%"]
     assert len(scored.findall("s:path", NS)) == 1 and not [t for t in scored.findall("s:text", NS)
                                                            if "state" in t.get("class")]

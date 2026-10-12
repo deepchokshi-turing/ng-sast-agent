@@ -140,6 +140,77 @@ def task_id(task: str) -> tuple[str, str]:
     return report.parse_task_name(task)
 
 
+#: Free-text result properties (under properties.toolProperties) -> the measurement they speak to.
+FREE_TEXT_FIELDS = {"exploitScenario": "path", "recommendation": "recommendations"}
+
+
+def risk_family(rule) -> str:
+    """LLM03.EA.PERMISSIONS -> LLM03, else ""."""
+    head = str(rule or "").split(".")[0]
+    return head if head in ("LLM02", "LLM03") else ""
+
+
+def _int(v):
+    return v if isinstance(v, int) and not isinstance(v, bool) else None
+
+
+def wrong_type_findings(detail: dict, results: list, truth: dict | None) -> list[str]:
+    """Known findings the tool missed although one of its unmatched results lands within the line
+    tolerance of the finding's location under the other risk family (LLM02 for an LLM03 finding,
+    or the reverse). Location only: the CWE is not checked. Unknown ground-truth fields are ignored."""
+    if not isinstance(truth, dict) or not isinstance(detail, dict):
+        return []
+    per = [f for f in detail.get("per_finding") or [] if isinstance(f, dict)]
+    matched_ids = {f.get("finding") for f in per if f.get("matched")}
+    used = {f.get("result_index") for f in per if f.get("matched")}
+    tol = _int((truth.get("matching") or {}).get("line_tolerance")) if isinstance(truth.get("matching"), dict) else None
+    tol = 10 if tol is None else tol
+    out = []
+    for gt in truth.get("findings") or []:
+        if not isinstance(gt, dict) or gt.get("id") in matched_ids or gt.get("is_vulnerable") is False:
+            continue
+        family = risk_family(gt.get("rule_id"))
+        if not family:
+            continue
+        targets = [t for t in [gt.get("primary_location"), *(gt.get("alternative_primary_locations") or [])]
+                   if isinstance(t, dict) and t.get("file") and _int(t.get("start_line")) is not None]
+        for i, res in enumerate(results):
+            other = risk_family(res.get("ruleId") if isinstance(res, dict) else None)
+            if i in used or not other or other == family:
+                continue
+            loc_ = res_location(res)
+            if len(loc_) < 2 or _int(loc_[1]) is None:
+                continue
+            start = loc_[1]
+            end = _int(loc_[2]) if len(loc_) > 2 and _int(loc_[2]) is not None else start
+            if any(loc_[0] == t["file"] and start <= (_int(t.get("end_line")) or t["start_line"]) + tol
+                   and end >= t["start_line"] - tol for t in targets):
+                out.append(str(gt.get("id")))
+                break
+    return out
+
+
+def full_task_set(tasks_dir: Path | None, variants: dict | None = None) -> dict | None:
+    """How many apps (task folders) and app families the whole task set holds, or None when unknown.
+    A task folder holds a task.toml or a tests/ground_truth.json. Families come from the variant map."""
+    if tasks_dir is None:
+        return None
+    try:
+        names = sorted(p.name for p in Path(tasks_dir).iterdir()
+                       if p.is_dir() and not p.name.startswith((".", "_"))
+                       and ((p / "task.toml").is_file() or (p / "tests" / "ground_truth.json").is_file()))
+    except OSError:
+        return None
+    if not names:
+        return None
+    families = None
+    if variants:
+        fams = {(variants.get(n) or {}).get("family") for n in names}
+        if None not in fams:
+            families = len(fams)
+    return {"tasks": len(names), "families": families}
+
+
 # ---- per job ---------------------------------------------------------------------------
 
 def collect(job: Path, tasks_dir: Path | None, variants: dict | None = None) -> dict:
@@ -152,6 +223,8 @@ def collect(job: Path, tasks_dir: Path | None, variants: dict | None = None) -> 
     manifest = Counter()
     models = Counter()
     hits, false_positives, outside, warnings = [], [], [], []
+    free_text: Counter = Counter()
+    wrong_type = results_written = 0
     runs = Counter(r["task"] for r in rows)
     seen: Counter = Counter()
     for (result_file, trial), row in zip(report.trial_results(job), rows):
@@ -193,9 +266,19 @@ def collect(job: Path, tasks_dir: Path | None, variants: dict | None = None) -> 
         im = meta.get("image_manifest") or {}
         if im.get("manifest_sha256"):
             manifest[im["manifest_sha256"][:12]] += 1
+        results = sarif_results(trial_dir)
+        results_written += len(results)
+        # Free-text fields a tool wrote that the checker cannot score (a stock Claude review's
+        # exploit scenario and recommendation), counted over every result it wrote.
+        for res in results:
+            props = ((res.get("properties") or {}).get("toolProperties") or {}) if isinstance(res, dict) else {}
+            for field, key in FREE_TEXT_FIELDS.items():
+                if isinstance(props, dict) and props.get(field):
+                    free_text[key] += 1
         if not report.is_scored(row):
             continue
-        results = sarif_results(trial_dir)
+        if row["role"] == "positive":
+            wrong_type += len(wrong_type_findings(detail, results, report.ground_truth(trial, tasks_dir, variants)))
         for f in detail.get("per_finding") or []:
             if f.get("matched"):
                 res = result_at(results, f.get("result_index"))
@@ -227,6 +310,8 @@ def collect(job: Path, tasks_dir: Path | None, variants: dict | None = None) -> 
         "models": dict(models),
         "image_manifests": dict(manifest), "hits": hits, "false_positives": false_positives,
         "outside_scope": outside, "warnings": warnings,
+        "free_text": dict(free_text), "wrong_type_findings": wrong_type,
+        "results_written": results_written,
         "task_outcomes": task_outcomes(rows),
         # Counts only. Harbor's job-level metrics are means over positives and negatives, not scores.
         "harbor_job": {"n_total_trials": job_result.get("n_total_trials"),
@@ -768,7 +853,17 @@ TOOL_KINDS = {
     "claude-code-security-review": ("Claude", "an AI reviewer"),
 }
 NOT_PROVIDED = "not provided by this tool"
+FREE_TEXT = "given as free text, not scorable"
 NOTHING_TO_JUDGE = "nothing to judge"
+FREE_TEXT_NOUNS = {"path": "how each issue is reached", "controls": "the existing protections",
+                   "recommendations": "its suggested fixes"}
+STOCK_HOW = ("It read the app's code, including the app's security description, and ran in stock mode, with the "
+             "reviewer's own instructions and answer format.")
+SCOPED_HOW = ("It read the app's code, including the app's security description, and ran in scoped mode: on top "
+              "of that it was given the client's risk definitions and told the answer format our checker scores "
+              "(risk type, how the issue is reached, existing protections, and a fix chosen from a fixed list). "
+              "So its scores for paths, protections and fixes are not like-for-like with tools that were not "
+              "told that format.")
 SUMMARY_MEASURES = [
     ("path", "Described how the issue is reached", "paths", "describing how the issue is reached"),
     ("controls", "Judged existing protections", "protections", "judging existing protections"),
@@ -812,24 +907,38 @@ def tool_identity(j: dict) -> dict:
             label = ", ".join(x for x in (pretty, " and ".join(sorted(modes))) if x)
             name = f"Claude ({label})" if label else "Claude"
         if modes == {"stock"}:
-            how = "It ran as shipped (stock mode)."
+            how = STOCK_HOW
         elif modes == {"scoped"}:
-            how = "It was given the app's security description (scoped mode)."
+            how = SCOPED_HOW
         elif modes:
-            how = ("Some of its runs were given the app's security description (scoped mode) and some ran as "
-                   "shipped (stock mode).")
+            how = ("Some of its runs were in stock mode, with the reviewer's own instructions, and some in scoped "
+                   "mode, which adds the client's risk definitions and the answer format our checker scores.")
         else:
-            how = "Whether it was given the app's security description was not recorded."
+            how = "Whether it ran in stock or scoped mode was not recorded."
         model_text = f", using the {pretty} model" if pretty else ""
         return {"name": name, "kind": kind,
                 "tested": f"{name}: Claude Code security review, {kind}{model_text}. {how}"}
     return {"name": name, "kind": kind, "tested": f"{name}: {kind}."}
 
 
+def free_text_measures(j: dict) -> set:
+    """The measurements a tool answered only in free text the checker cannot score: from the free-text
+    fields of its results, and always path and fixes for a stock-mode Claude review (it writes an
+    exploit scenario and a recommendation as prose)."""
+    out = {key for key, n in (j.get("free_text") or {}).items() if n}
+    claude = versions_of(j).get("claude") or {}
+    if j["tool"] == "claude-code-security-review" and set(claude.get("mode") or {}) == {"stock"}:
+        out |= set(FREE_TEXT_FIELDS.values())
+    return out
+
+
 def summary_measure(j: dict, key: str) -> dict:
-    """One of the three measurement cells: a whole percent, not provided, or nothing to judge."""
+    """One of the three measurement cells: a whole percent, free text only, not provided, or nothing
+    to judge."""
     m = j["measures"]
     if m["supported"].get(key) is False:
+        if key in free_text_measures(j):
+            return {"status": "free_text", "text": FREE_TEXT, "value": None}
         return {"status": "not_provided", "text": NOT_PROVIDED, "value": None}
     if key in (m.get("no_results") or []):
         return {"status": "nothing_to_judge", "text": NOTHING_TO_JUDGE, "value": None}
@@ -878,9 +987,16 @@ def tool_meaning(t: dict, j: dict) -> list[str]:
         out.append(f"Because it found no known issue, there was nothing to judge for {joined(nouns, 'or')}.")
     if by_status.get("scored"):
         out.append("It scored " + joined([f"{t[k]['text']} on {v}" for k, _, v in by_status["scored"]]) + ".")
+    if by_status.get("free_text"):
+        nouns = [FREE_TEXT_NOUNS[k] for k, _, _ in by_status["free_text"]]
+        out.append(f"It wrote {joined(nouns)} as free text, which our checker cannot score.")
     if by_status.get("not_provided"):
         nouns = [n for _, n, _ in by_status["not_provided"]]
         out.append(f"It did not describe {joined(nouns, 'or')} in a form that can be scored.")
+    wrong = t.get("wrong_type") or 0
+    if wrong:
+        out.append(f"It pointed at {wrong} more known issue{'' if wrong == 1 else 's'} but under the wrong risk "
+                   f"type, so {'it was' if wrong == 1 else 'they were'} not counted.")
     if j["no_results"]:
         out.append(f"{name} reported nothing, so its clean results on fixed apps say nothing about it.")
     claude = versions_of(j).get("claude")
@@ -891,27 +1007,100 @@ def tool_meaning(t: dict, j: dict) -> list[str]:
              else f"{dropped} finding{' was' if dropped == 1 else 's were'} dropped here.")
         out.append("In stock mode some of the AI reviewer's findings can be dropped because their category names "
                    f"are not in our fixed list. {n}")
-    if claude:
-        filters = set(claude.get("filter_mode") or {})
-        if (filters and "claude" not in filters) or (not filters and "oauth" in (claude.get("auth") or {})):
-            out.append(f"{name} was run on a subscription token, without the extra AI check that normally removes "
-                       "false alarms.")
+    if filter_off(claude):
+        out.append(f"{name} was run on a subscription token, without the extra AI check that normally removes "
+                   "false alarms.")
+    return out
+
+
+def filter_off(claude: dict | None) -> bool:
+    """A Claude review run without the reviewer's second AI check (subscription-token runs)."""
+    if not claude:
+        return False
+    filters = set(claude.get("filter_mode") or {})
+    return bool((filters and "claude" not in filters) or (not filters and "oauth" in (claude.get("auth") or {})))
+
+
+#: Plain names of the issue kinds, by risk family: (group words, qualifier).
+CATEGORY_WORDS = {
+    "LLM02.SID.HIGH": ("disclosure", "high"), "LLM02.SID.MEDIUM": ("disclosure", "medium"),
+    "LLM03.EA.FUNCTIONALITY": ("agency", "extra-feature"), "LLM03.EA.PERMISSIONS": ("agency", "permission"),
+    "LLM03.EA.AUTONOMY": ("agency", "approval"),
+}
+FEW_RESULTS = 2  # a tool that wrote this many results or fewer in all "reported almost nothing"
+
+
+def category_phrase(rules: list[str]) -> str:
+    """["LLM03.EA.PERMISSIONS", "LLM03.EA.AUTONOMY"] -> "Excessive-agency permission and approval issues"."""
+    groups: dict = {}
+    for rule in rules:
+        group, qual = CATEGORY_WORDS.get(rule, ("other", rule))
+        groups.setdefault(group, []).append(qual)
+    parts = []
+    if groups.get("disclosure"):
+        parts.append(f"data disclosure issues of {joined(groups['disclosure'])} severity")
+    if groups.get("agency"):
+        parts.append(f"excessive-agency {joined(groups['agency'])} issues")
+    if groups.get("other"):
+        parts.append(f"{joined(groups['other'])} issues")
+    text = joined(parts)
+    return text[0].upper() + text[1:]
+
+
+def read_first(jobs: list[dict], data: dict, tools: list[dict]) -> list[str]:
+    """The main caveats, right under the first line of the summary. Only the ones that apply."""
+    out = []
+    counts = sorted({n for j in jobs for n in Counter(r["task"] for r in j["rows"]).values()})
+    if counts == [1]:
+        out.append("Each tool ran once per app, so differences of one or two issues between tools are not "
+                   "meaningful.")
+    elif len(counts) == 1:
+        out.append(f"Each tool ran {counts[0]} times per app, and the counts add up all its runs. Differences of "
+                   "one or two issues between tools are still not meaningful.")
+    elif counts:
+        out.append(f"The tools ran between {counts[0]} and {counts[-1]} times per app, and the counts add up all "
+                   "their runs. Differences of one or two issues between tools are not meaningful.")
+    claude_tools = [(j, t) for j, t in zip(jobs, tools) if versions_of(j).get("claude")]
+    off = [t["name"] for j, t in claude_tools if filter_off(versions_of(j)["claude"])]
+    if off:
+        if len(off) == len(claude_tools) and len(off) > 1:
+            out.append("Every AI reviewer run used a subscription token, so the reviewer's second AI check that "
+                       "removes false alarms was off, and the AI reviewer may show more false alarms than usual.")
+        else:
+            out.append(f"{joined(off)} {'was' if len(off) == 1 else 'were'} run on a subscription token, so the "
+                       "reviewer's second AI check that removes false alarms was off, and it may show more false "
+                       "alarms than usual.")
+    if any("scoped" in (versions_of(j)["claude"].get("mode") or {}) for j, _ in claude_tools):
+        out.append("In scoped mode the AI reviewer was told the answer format our checker scores, so its scores "
+                   "for paths, protections and fixes are not like-for-like with the other tools.")
+    cov = data.get("taxonomy_coverage") or {}
+    if cov.get("known"):
+        by_rule = cov.get("findings_by_rule") or {}
+        known = [r for r in report.TAXONOMY]
+        missing = [r for r in known if not by_rule.get(r)]
+        single = [r for r in known if by_rule.get(r) == 1]
+        parts = []
+        if missing:
+            parts.append(f"{category_phrase(missing)} are not in this set, so no tool is tested on them.")
+        if single:
+            parts.append(f"{category_phrase(single)} have only one example"
+                         f"{' each' if len(single) > 1 else ''}, so one hit or miss swings the result.")
+        if parts:
+            out.append(" ".join(parts))
+    quiet = [(t["name"], j.get("results_written", 0)) for j, t in zip(jobs, tools)
+             if j.get("results_written", 0) <= FEW_RESULTS]
+    if quiet:
+        wrote = joined([f"{name} wrote {'no results' if n == 0 else f'{n} result' + ('' if n == 1 else 's')}"
+                        for name, n in quiet])
+        one = len(quiet) == 1
+        out.append(f"{joined([name for name, _ in quiet])} reported almost nothing ({wrote} across all apps), so "
+                   f"{'its' if one else 'their'} few false alarms say little about {'it' if one else 'them'}.")
     return out
 
 
 def summary_notes(jobs: list[dict], data: dict) -> list[str]:
-    """Caveats that apply to the whole comparison."""
+    """Caveats that apply to the whole comparison, after the tools. The main ones are in read_first."""
     notes = []
-    counts = sorted({n for j in jobs for n in Counter(r["task"] for r in j["rows"]).values()})
-    if counts == [1]:
-        notes.append("Each tool ran once per app, so small differences between tools (one or two issues) are "
-                     "not meaningful.")
-    elif len(counts) == 1:
-        notes.append(f"Each tool ran {counts[0]} times per app, and the counts add up all its runs. Small "
-                     "differences between tools are still not meaningful.")
-    elif counts:
-        notes.append(f"The tools ran between {counts[0]} and {counts[-1]} times per app, and the counts add up all "
-                     "their runs. Small differences between tools are not meaningful.")
     if version_warnings(jobs):
         notes.append("The tools were run under different versions of our test setup, so compare them with care.")
     if not data["same_task_set"]:
@@ -923,8 +1112,33 @@ def summary_notes(jobs: list[dict], data: dict) -> list[str]:
     return notes
 
 
-def build_summary(jobs: list[dict], data: dict, generated: datetime | None = None) -> dict:
-    """The plain-English summary: the numbers and the sentences, shared by the Markdown and the HTML."""
+def coverage_line(data: dict, full: dict | None) -> str:
+    """How many apps of the whole set were run, e.g. "10 of 30 apps (5 of 15 app families) were run"."""
+    apps, fams = data["positives"] + data["negatives"], data["families"]
+
+    def plural(n, one, many):
+        return f"{n} {one if n == 1 else many}"
+    if not full:
+        return f"{plural(apps, 'app', 'apps')} ({plural(fams, 'app family', 'app families')}) were run"
+    total, total_fams = full["tasks"], full.get("families")
+    if apps >= total and (total_fams is None or fams >= total_fams):
+        fam_text = f" ({plural(total_fams if total_fams is not None else fams, 'app family', 'app families')})"
+        return f"All {plural(total, 'app', 'apps')}{fam_text} in the set were run"
+    fam_text = f" ({fams} of {plural(total_fams, 'app family', 'app families')})" if total_fams is not None else ""
+    return f"{apps} of {plural(total, 'app', 'apps')}{fam_text} were run"
+
+
+def task_set_size(tasks_dir: Path | None, variants_file: Path | None = None) -> dict | None:
+    """full_task_set with the variant map read from --variants or <tasks>/VARIANTS.json."""
+    if tasks_dir is None:
+        return None
+    return full_task_set(tasks_dir, report.load_variants(report.default_variants(tasks_dir, variants_file)))
+
+
+def build_summary(jobs: list[dict], data: dict, generated: datetime | None = None,
+                  full: dict | None = None) -> dict:
+    """The plain-English summary: the numbers and the sentences, shared by the Markdown and the HTML.
+    ``full`` is the whole task set's size (full_task_set), for the coverage line."""
     generated = generated or datetime.now(timezone.utc)
     tools = []
     names = Counter(tool_identity(j)["name"] for j in jobs)
@@ -940,7 +1154,8 @@ def build_summary(jobs: list[dict], data: dict, generated: datetime | None = Non
              "found": det.get("tp") or 0, "total": det.get("gt") or 0, "false_alarms": det.get("fp") or 0,
              "fixed_flagged": fixed - clean, "fixed_apps": fixed,
              "score": whole_percent(reward) if reward is not None else None,
-             "no_results": j["no_results"], "risks": risk_issues(j)}
+             "no_results": j["no_results"], "risks": risk_issues(j),
+             "wrong_type": j.get("wrong_type_findings") or 0}
         for key, *_ in SUMMARY_MEASURES:
             t[key] = summary_measure(j, key)
         t["meaning"] = tool_meaning(t, j)
@@ -974,16 +1189,27 @@ def build_summary(jobs: list[dict], data: dict, generated: datetime | None = Non
          "its known issues and describing them correctly, averaged over the vulnerable apps. 100 is perfect."},
     ]
     if any(versions_of(j).get("claude") for j in jobs):
-        glossary.append({"term": "Stock and scoped mode", "text": "Stock mode runs the AI reviewer as shipped. "
-                         "Scoped mode also gives it the app's security description."})
+        glossary.append({"term": "Stock and scoped mode", "text": "In both modes the AI reviewer reads the app's "
+                         "code, including the app's security description. Stock mode uses the reviewer's own "
+                         "instructions and answer format. Scoped mode adds extra instructions: the client's "
+                         "definitions of each risk, and the answer format our checker scores (risk type, how the "
+                         "issue is reached, existing protections, and a fix chosen from a fixed list)."})
+    if any(t[key]["status"] == "free_text" for t in tools for key, *_ in SUMMARY_MEASURES):
+        glossary.append({"term": "Free text, not scorable", "text": "The tool wrote this in its own words. Our "
+                         "checker only scores answers in a fixed format, so it cannot give these a score, even "
+                         "when they are good."})
     apps = data["positives"] + data["negatives"]
     return {
         "title": "Scanner evaluation: summary",
         "date": generated.strftime("%Y-%m-%d"),
-        "intro": f"{generated.day} {generated.strftime('%B %Y')}. {apps} app{'' if apps == 1 else 's'}: "
+        "intro": f"{generated.day} {generated.strftime('%B %Y')}. {coverage_line(data, full)}: "
                  f"{data['positives']} vulnerable, "
-                 f"{data['negatives']} fixed cop{'y' if data['negatives'] == 1 else 'ies'}. "
-                 f"{data['gt_findings']} known issue{'' if data['gt_findings'] == 1 else 's'} in the vulnerable apps.",
+                 f"{data['negatives']} fixed cop{'y' if data['negatives'] == 1 else 'ies'}, "
+                 f"with {data['gt_findings']} known issue{'' if data['gt_findings'] == 1 else 's'} in the "
+                 "vulnerable apps.",
+        "coverage": {"apps_run": apps, "families_run": data["families"],
+                     "apps_total": (full or {}).get("tasks"), "families_total": (full or {}).get("families")},
+        "read_first": read_first(jobs, data, tools),
         "apps": apps, "vulnerable_apps": data["positives"], "fixed_apps": data["negatives"],
         "known_issues": data["gt_findings"],
         "tools": tools,
@@ -993,7 +1219,7 @@ def build_summary(jobs: list[dict], data: dict, generated: datetime | None = Non
         "charts": summary_charts(tools),
         "notes": summary_notes(jobs, data),
         "glossary": glossary,
-        "labels": {"not_provided": NOT_PROVIDED, "nothing_to_judge": NOTHING_TO_JUDGE},
+        "labels": {"not_provided": NOT_PROVIDED, "free_text": FREE_TEXT, "nothing_to_judge": NOTHING_TO_JUDGE},
         "details_title": "Details for reviewers",
         "details_intro": DETAILS_INTRO,
     }
@@ -1001,7 +1227,10 @@ def build_summary(jobs: list[dict], data: dict, generated: datetime | None = Non
 
 def summary_markdown(summary: dict) -> list[str]:
     t = report.md_table
-    out = [f"# {summary['title']}", "", summary["intro"], "", "## What was tested", ""]
+    out = [f"# {summary['title']}", "", summary["intro"], ""]
+    if summary.get("read_first"):
+        out += ["## Read this first", ""] + [f"- {r}" for r in summary["read_first"]] + [""]
+    out += ["## What was tested", ""]
     out += [f"- {tool['tested']}" for tool in summary["tools"]]
     out += ["", "## Results at a glance"]
     out += t(summary["at_a_glance"]["columns"], summary["at_a_glance"]["rows"])
@@ -1027,6 +1256,8 @@ def summary_markdown(summary: dict) -> list[str]:
 
 CHARTS_INTRO = ("The four measurements as bars, one per tool, from the tables above. A tool with no bar has its "
                 "reason written in its row instead.")
+PER_APP = ("averaged over the vulnerable apps. An app's score counts each of its known issues, and a missed issue "
+           "counts as zero.")
 CHART_TEXT = {
     "issues": ("Measurement 1: risk detection", "Known issues found, by risk type",
                "How many of the known issues each tool found, for each risk type. Longer bars are better."),
@@ -1034,14 +1265,13 @@ CHART_TEXT = {
                 "How many fixed apps each tool still warned about. A separate job from finding issues, and "
                 "shorter bars are better here."),
     "path": ("Measurement 2: path tracing", "Described how the issue is reached",
-             "How well each tool described how each known issue is reached, where a missed issue counts as zero. "
-             "Longer bars are better."),
+             "How well each tool described how each known issue is reached, " + PER_APP + " Longer bars are better."),
     "controls": ("Measurement 3: mitigation detection", "Judged existing protections",
-                 "How well each tool judged the protections already in the code, where a missed issue counts as "
-                 "zero. Longer bars are better."),
+                 "How well each tool judged the protections already in the code, " + PER_APP +
+                 " Longer bars are better."),
     "recommendations": ("Measurement 4: recommendation", "Suggested fixes",
-                        "How well each tool suggested a fix for each known issue, where a missed issue counts as "
-                        "zero. Longer bars are better."),
+                        "How well each tool suggested a fix for each known issue, " + PER_APP +
+                        " Longer bars are better."),
 }
 CHART_FILES = {"issues": "m1-issues-found", "flagged": "m1-fixed-flagged", "path": "m2-path",
                "controls": "m3-protections", "recommendations": "m4-fixes"}
@@ -1268,7 +1498,7 @@ def render(jobs: list[dict], tasks_dir: Path | None, data: dict | None = None,
     data = data or dataset(jobs)
     task_set = task_set if task_set is not None else report.task_set_state(tasks_dir)
     warnings = warnings if warnings is not None else warnings_of(jobs, data, [], task_set)
-    summary = summary or build_summary(jobs, data)
+    summary = summary or build_summary(jobs, data, full=task_set_size(tasks_dir))
     labels = [j["label"] for j in jobs]
     tasks_text = display_path(tasks_dir) if tasks_dir else "the paths recorded in the trials, where found"
     # The plain summary first, then every technical section under "Details for reviewers".
@@ -1396,7 +1626,7 @@ def build_payload(jobs: list[dict], tasks_dir: Path | None, data: dict | None = 
     data = data or dataset(jobs)
     task_set = task_set if task_set is not None else report.task_set_state(tasks_dir)
     warnings = warnings if warnings is not None else warnings_of(jobs, data, [], task_set)
-    summary = summary or build_summary(jobs, data)
+    summary = summary or build_summary(jobs, data, full=task_set_size(tasks_dir))
     labels = ["Measure"] + [j["key"] for j in jobs]
     return {
         "schema": "sast-eval-report/2",
@@ -1463,7 +1693,8 @@ def main() -> None:
     data = dataset(jobs)
     task_set = report.task_set_state(args.tasks)  # read once, so every output states the same
     warnings = warnings_of(jobs, data, skipped, task_set)
-    summary = build_summary(jobs, data)  # built once, so the Markdown and the HTML show the same text
+    # Built once, so the Markdown and the HTML show the same text.
+    summary = build_summary(jobs, data, full=task_set_size(args.tasks, args.variants))
     markdown = render(jobs, args.tasks, data, warnings, task_set, summary)
     if args.out:
         args.out.mkdir(parents=True, exist_ok=True)

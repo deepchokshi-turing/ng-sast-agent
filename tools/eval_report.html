@@ -874,8 +874,10 @@ function renderSummary() {
     el("div", { class: "kicker" }, "Summary"),
     el("h1", {}, s.title),
     el("p", { class: "sub" }, s.intro),
+    (s.read_first || []).length ? section("first", null, "Read this first", null,
+      el("ul", { class: "plain-list" }, s.read_first.map(r => el("li", {}, r)))) : null,
     el("div", { class: "tiles sumtiles" },
-      tile(s.apps, "apps tested"), tile(s.vulnerable_apps, "vulnerable apps"),
+      tile(s.apps, (s.coverage || {}).apps_total ? `apps tested, of ${s.coverage.apps_total}` : "apps tested"), tile(s.vulnerable_apps, "vulnerable apps"),
       tile(s.fixed_apps, "fixed copies"), tile(s.known_issues, "known issues")),
     section("tested", null, "What was tested", null,
       el("ul", { class: "plain-list" }, s.tools.map(t => el("li", {}, dot(t), t.tested)))),
@@ -969,7 +971,7 @@ function renderMeasureCharts(s) {
 // The reviewer views start folded. They open on "Show details", on a link to one of them, or
 // when the page is opened on one, and stay as the reader left them when a chip re-renders.
 let detailsOpen = null;
-const hashInDetails = () => { const id = location.hash.slice(1); return !!id && id !== "summary" && !["tested", "glance", "measures", "meaning", "words"].includes(id); };
+const hashInDetails = () => { const id = location.hash.slice(1); return !!id && id !== "summary" && !["first", "tested", "glance", "measures", "meaning", "words"].includes(id); };
 function openDetails() {
   detailsOpen = true;
   const d = document.getElementById("details-body");
