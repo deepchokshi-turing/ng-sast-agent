@@ -29,12 +29,22 @@ not finish or reviewed no file, a filter whose API check failed, and any
 per-finding filter call that failed (upstream keeps such a finding at
 confidence 10). One deadline covers everything.
 
-The API key is read from ``--keyfile`` (a mode 600 file in a mode 700
+The credential is read from ``--keyfile`` (a mode 600 file in a mode 700
 directory that the agent removes afterwards). It is never put on a command
-line. The CLI gets it through an ``apiKeyHelper`` in a private settings file
-(``cli_auth`` "api_key_helper", the default) or, as a fallback, in the CLI
-process's own environment (``cli_auth`` "env"). The filter gets it as an
-argument. Every text this script writes is scrubbed of it.
+line. The request's ``auth`` says what it is:
+
+- ``api_key`` (an Anthropic API key): the CLI gets it through an
+  ``apiKeyHelper`` in a private settings file (``cli_auth``
+  "api_key_helper", the default) or, as a fallback, in the CLI process's own
+  environment (``cli_auth`` "env"). The filter gets it as an argument.
+- ``oauth`` (a Claude subscription token from ``claude setup-token``): the
+  token works for Claude Code only. The CLI process alone gets it, as
+  CLAUDE_CODE_OAUTH_TOKEN in its own environment, with no apiKeyHelper. The
+  API preflight is skipped, the filter runs its regex rules only, and the
+  anthropic SDK is replaced by a guard module that refuses to make a client,
+  so no code in this process can send the token to the API.
+
+Every text this script writes is scrubbed of the credential.
 
 Output: ``--out`` gets one JSON document (see ``main``), and the last stdout
 line is ``DRIVER_RESULT {json}``. Exit status 0 when the review can be
@@ -99,6 +109,13 @@ PREFLIGHT_ATTEMPTS = 3
 TAIL_CHARS = 4000
 #: Bytes read to decide whether a file is binary (as git does: a NUL byte).
 BINARY_SNIFF_BYTES = 8000
+
+#: What the CLI prints when it refuses a credential (Claude Code 2.1.296: "Invalid API key · Please run
+#: /login", "OAuth token revoked · Please run /login", "Failed to authenticate. API Error: 401 ...",
+#: "Login expired · Please run /login", "Not logged in"). Matched case-insensitively.
+AUTH_FAILURE_MARKERS = ("invalid api key", "please run /login", "not logged in", "oauth token revoked",
+                        "oauth token has expired", "login expired", "failed to authenticate", "authentication_error",
+                        "api error: 401", "invalid bearer token")
 
 #: CLI result subtypes that a retry cannot fix.
 FATAL_SUBTYPES = ("error_max_turns", "error_max_budget_usd")
@@ -196,7 +213,8 @@ def synthesise_pr(repo, files):
 
 
 def cli_settings(keyfile, home, cli_auth):
-    """The CLI's user settings. No secret in here: the helper only names the file."""
+    """The CLI's user settings. No secret in here: the helper only names the file.
+    Only ``cli_auth`` "api_key_helper" gets a helper (never "oauth")."""
     deny = list(DENIED_TOOLS)
     # The key's folder and the CLI's own home are outside the repository, and
     # print mode denies reads there anyway. These rules say so explicitly.
@@ -232,8 +250,13 @@ def cli_argv(claude, model, settings_file, max_turns=None, max_budget_usd=None):
     return argv
 
 
-#: The CLI's ``apiKeySource`` for each ``cli_auth``.
-EXPECTED_KEY_SOURCE = {"api_key_helper": "apiKeyHelper", "env": "ANTHROPIC_API_KEY"}
+#: The CLI's ``apiKeySource`` for each ``cli_auth``. With a subscription token
+#: Claude Code 2.1.296 reports "none": ``apiKeySource`` names where an API key
+#: came from, and its schema says "'none' (no API key in use - e.g. claude.ai
+#: OAuth login, a bearer token, or a third-party cloud provider)". The token's
+#: own source is a separate ``tokenSource`` that the init message does not carry.
+#: The allow-listed environment rules out a bearer token and the other providers.
+EXPECTED_KEY_SOURCE = {"api_key_helper": "apiKeyHelper", "env": "ANTHROPIC_API_KEY", "oauth": "none"}
 
 
 def init_summary(init):
@@ -248,7 +271,10 @@ def check_init(init, model, cli_auth):
       another model (an alias, a retired model, a setting from the
       environment), the review must not be reported under the requested one.
     - The credential must come from our key (``apiKeySource``), not from
-      anything else the sandbox may offer.
+      anything else the sandbox may offer. With a subscription token
+      (``cli_auth`` "oauth") the source must be "none": an API key from
+      anywhere (an apiKeyHelper, ANTHROPIC_API_KEY, a stored /login key) would
+      bill another account.
     - No denied tool may be available.
     """
     used = init.get("model")
@@ -284,7 +310,9 @@ CLI_ENV_ALLOW_PREFIXES = ("LC_",)
 
 def cli_environment(home, key, cli_auth, path_prefix):
     """The CLI's environment: the allow-listed variables of this process, plus
-    HOME and the quiet switches. The key is in it only with ``cli_auth`` env."""
+    HOME and the quiet switches. The key is in it only with ``cli_auth`` env
+    (as ANTHROPIC_API_KEY), and a subscription token only with ``cli_auth``
+    oauth (as CLAUDE_CODE_OAUTH_TOKEN, the one Claude setting added)."""
     env = {name: value for name, value in os.environ.items()
            if name in CLI_ENV_ALLOW or name.startswith(CLI_ENV_ALLOW_PREFIXES)}
     env.update(QUIET_ENV)
@@ -293,7 +321,18 @@ def cli_environment(home, key, cli_auth, path_prefix):
         env["PATH"] = path_prefix + os.pathsep + env.get("PATH", "/usr/bin:/bin")
     if cli_auth == "env":
         env["ANTHROPIC_API_KEY"] = key
+    elif cli_auth == "oauth":
+        env["CLAUDE_CODE_OAUTH_TOKEN"] = key
     return env
+
+
+def auth_failure(stdout, stderr):
+    """A short reason when the CLI's output says it refused the credential, else None."""
+    text = "{}\n{}".format(stdout or "", stderr or "").lower()
+    for marker in AUTH_FAILURE_MARKERS:
+        if marker in text:
+            return marker
+    return None
 
 
 def wrapper_summary(wrapper):
@@ -438,11 +477,13 @@ def judge_attempt(code, stdout, parse_json):
 
 
 def run_review(argv, prompt_for, cwd, env, attempts, cli_deadline, parse_json, sleep=time.sleep,
-               min_attempt_sec=MIN_ATTEMPT_SEC, check_init_for=None, record=None):
+               min_attempt_sec=MIN_ATTEMPT_SEC, check_init_for=None, record=None, refused=None):
     """Run the CLI until it gives a usable review. Returns (review, record).
 
     ``prompt_for(include_diff)`` builds the prompt. ``check_init_for(init)``
-    vets the CLI's init message (see ``check_init``). Raises DriverError when
+    vets the CLI's init message (see ``check_init``). ``refused`` is a
+    (code, message) pair: a failed attempt whose output says the credential
+    was refused raises it at once instead of retrying. Raises DriverError when
     no attempt gives a usable review. ``record`` (filled as it goes, so it is
     complete after a failure too) is returned with the review.
     """
@@ -475,6 +516,11 @@ def run_review(argv, prompt_for, cwd, env, attempts, cli_deadline, parse_json, s
         if judged["outcome"] != "ok":
             entry["stdout_tail"] = tail(out, 1500)
         record["attempts"].append(entry)
+        if refused and judged["outcome"] in ("retry", "fatal"):
+            marker = auth_failure(out, err)
+            if marker:
+                entry["auth_failure"] = marker
+                raise DriverError(refused[0], "{} (the CLI said {!r})".format(refused[1], marker))
         if judged["outcome"] == "ok":
             record["cli"] = judged.get("wrapper")
             if init is None:
@@ -716,6 +762,30 @@ def scrub_environment(keep):
     return sorted(removed)
 
 
+class SdkDisabled(RuntimeError):
+    pass
+
+
+def install_sdk_guard():
+    """Put a stand-in for the anthropic package into ``sys.modules`` before the
+    upstream code is imported. ``from anthropic import Anthropic`` still works,
+    but making a client raises, so a subscription token can never reach the
+    API from this process. The real SDK is not imported at all."""
+    import types
+
+    guard = types.ModuleType("anthropic")
+    guard.__version__ = None
+    guard.SDK_GUARD = True
+
+    class Anthropic(object):
+        def __init__(self, *args, **kwargs):
+            raise SdkDisabled("the anthropic SDK is disabled with a subscription token (auth oauth)")
+
+    guard.Anthropic = Anthropic
+    sys.modules["anthropic"] = guard
+    return guard
+
+
 def versions(anthropic_module):
     out = {"python": sys.version.split()[0], "anthropic": getattr(anthropic_module, "__version__", None)}
     try:
@@ -757,16 +827,28 @@ def execute(request, key, keyfile, document, started):
     home = request["home"]
     model = request["model"]
     filter_model = request.get("filter_model") or model
-    filter_mode = request.get("filter") or "claude"
-    cli_auth = request.get("cli_auth") or "api_key_helper"
+    auth = request.get("auth") or "api_key"
+    oauth = auth == "oauth"
+    filter_mode = request.get("filter") or ("hard_rules" if oauth else "claude")
+    cli_auth = "oauth" if oauth else (request.get("cli_auth") or "api_key_helper")
     files = list(request.get("files") or [])
+    if auth not in ("api_key", "oauth"):
+        raise DriverError("bad_request", "unknown auth {!r}".format(auth))
+    if oauth and filter_mode != "hard_rules":
+        raise DriverError("oauth_filter", "the {} filter needs an Anthropic API key, and this run has a subscription "
+                          "token only".format(filter_mode))
+    document["auth"] = auth
+    document["filter_mode"] = filter_mode
 
+    # Also removes a CLAUDE_CODE_OAUTH_TOKEN the process may have inherited: the token comes from the file.
     document["environment_removed"] = scrub_environment(keep=())
     # Upstream reads these at import time (constants.py, github_action_audit.py).
     os.environ["CLAUDE_MODEL"] = model
     os.environ["REPO_PATH"] = repo
     os.environ["ENABLE_CLAUDE_FILTERING"] = "true" if filter_mode == "claude" else "false"
     sys.path.insert(0, request["ccsr_dir"])
+    if oauth:
+        install_sdk_guard()
     try:
         import anthropic
         from claudecode import claude_api_client, findings_filter, json_parser, prompts
@@ -781,9 +863,14 @@ def execute(request, key, keyfile, document, started):
     document["api_usage"] = usage.by_model
 
     # 1. The API is reachable, takes the key and serves the models.
+    # No credential goes with the network check. The preflight needs an API key, so a
+    # subscription token skips it: a bad token or model shows up in the CLI's own run.
     document["network"] = network_check(request.get("network_check_url") or "https://api.anthropic.com/")
-    models = [model] + ([filter_model] if filter_mode == "claude" else [])
-    document["preflight"] = preflight(anthropic, key, models, usage)
+    if oauth:
+        document["preflight"] = "skipped_oauth"
+    else:
+        models = [model] + ([filter_model] if filter_mode == "claude" else [])
+        document["preflight"] = preflight(anthropic, key, models, usage)
 
     # 2. The pull request and the prompt.
     pr_data, diff, pr_record = synthesise_pr(repo, files)
@@ -812,13 +899,18 @@ def execute(request, key, keyfile, document, started):
                                     min(cli_deadline, deadline), json_parser.parse_json_with_fallbacks,
                                     min_attempt_sec=float(request.get("min_attempt_sec") or MIN_ATTEMPT_SEC),
                                     check_init_for=lambda init: check_init(init, model, cli_auth),
-                                    record=cli_record)
+                                    record=cli_record,
+                                    refused=("cli_oauth_refused", "Claude Code refused the subscription token. Run "
+                                             "`claude setup-token` again and set CLAUDE_CODE_OAUTH_TOKEN")
+                                    if oauth else None)
     document["review"] = review
     document["review_summary"] = check_review(review, len(pr_data["files"]))
 
     # 4. The false-positive filter.
     findings = list(review.get("findings") or [])
-    kept, excluded, filter_record = run_filter(findings_filter, claude_api_client, filter_mode, key, filter_model,
+    # A subscription token is never passed to the filter (it runs the regex rules only).
+    kept, excluded, filter_record = run_filter(findings_filter, claude_api_client, filter_mode,
+                                               None if oauth else key, filter_model,
                                                request.get("filter_instructions"), findings, usage, deadline)
     document["filter"] = filter_record
     document["kept"] = kept
@@ -839,16 +931,16 @@ def main(argv=None):
     try:
         with open(args.request) as f:
             request = json.load(f)
-        document.update({k: request.get(k) for k in ("mode", "model", "filter", "filter_model", "cli_auth",
+        document.update({k: request.get(k) for k in ("mode", "model", "filter", "filter_model", "auth", "cli_auth",
                                                      "max_turns", "max_budget_usd", "cli_attempts", "budget_sec",
                                                      "cli_share")})
         try:
             with open(args.keyfile) as f:
                 key = f.read().strip()
         except OSError as exc:
-            raise DriverError("no_key", "cannot read the key file: {}".format(exc))
+            raise DriverError("no_key", "cannot read the credential file: {}".format(exc))
         if not key:
-            raise DriverError("no_key", "the key file is empty")
+            raise DriverError("no_key", "the credential file is empty")
         execute(request, key, args.keyfile, document, started)
         document["status"] = "ok"
         code = 0

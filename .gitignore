@@ -7,3 +7,4 @@ jobs/
 handoff/
 # Local sample-task area, not tracked. Tests read the tracked copy in tests/fixtures/tasks/.
 dev/tasks/
+.env

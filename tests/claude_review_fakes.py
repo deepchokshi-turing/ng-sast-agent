@@ -22,6 +22,8 @@ FAKE_MODULES = FIXTURES / "claude_review" / "fake_modules"
 FAKE_REQUESTS = FIXTURES / "claude_review" / "fake_requests"
 DRIVER = ROOT / "sast" / "claude_review" / "driver.py"
 KEY = "sk-ant-api03-TESTKEY-0123456789abcdefghijklmnopqrstuvwxyz-ABCDEFGH"
+#: A made-up subscription token (the shape `claude setup-token` prints). Never a real one.
+OAUTH_TOKEN = "sk-ant-oat01-TESTOAUTH-9876543210zyxwvutsrqponmlkjihgfedcba-QRSTUVWX"
 
 #: The scripted CLI. It finds its files next to its own folder (the driver gives
 #: the CLI an allow-listed environment, so no FAKE_* variable reaches it):
@@ -53,6 +55,7 @@ if settings and settings.get("apiKeyHelper"):
 mode = oct(os.stat(settings_file).st_mode & 0o777) if settings_file else None
 log = {"argv": sys.argv, "cwd": os.getcwd(), "home": os.environ.get("HOME"),
        "env_has_key": "ANTHROPIC_API_KEY" in os.environ, "env_key": os.environ.get("ANTHROPIC_API_KEY"),
+       "env_oauth_token": os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"),
        "env_names": sorted(os.environ), "settings": settings, "settings_mode": mode, "helper_key": helper_key,
        "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(), "prompt_has_diff": "PR DIFF CONTENT:" in prompt,
        "prompt": prompt}
@@ -134,7 +137,7 @@ class DriverRun:
     """One real driver.py process with the fakes, in ``tmp``."""
 
     def __init__(self, tmp: Path, repo: Path, files: list[str], *, script: list[dict], anthropic: dict | None = None,
-                 net_url: str, **request):
+                 net_url: str, secret: str = KEY, **request):
         self.tmp = tmp
         self.bin = tmp / "bin"
         self.bin.mkdir(parents=True, exist_ok=True)
@@ -143,10 +146,11 @@ class DriverRun:
         claude.chmod(0o755)
         (tmp / "script.json").write_text(json.dumps(script))
         (tmp / "anthropic.json").write_text(json.dumps(anthropic or {}))
-        secret = tmp / "secret"
-        secret.mkdir(mode=0o700, exist_ok=True)
-        self.keyfile = secret / "anthropic-key"
-        self.keyfile.write_text(KEY + "\n")
+        secret_dir = tmp / "secret"
+        secret_dir.mkdir(mode=0o700, exist_ok=True)
+        self.keyfile = secret_dir / "anthropic-key"
+        self.secret = secret
+        self.keyfile.write_text(secret + "\n")
         self.keyfile.chmod(0o600)
         self.out = tmp / "out.json"
         self.request = {
@@ -169,6 +173,8 @@ class DriverRun:
             "PYTHONDONTWRITEBYTECODE": "1",
             "FAKE_ANTHROPIC_CONFIG": str(self.tmp / "anthropic.json"),
             "FAKE_ANTHROPIC_LOG": str(self.tmp / "anthropic.log"),
+            # The fake SDK touches this file when it is imported.
+            "FAKE_ANTHROPIC_IMPORTED": str(self.tmp / "anthropic.imported"),
             # The driver must remove these before anything runs.
             "ANTHROPIC_BASE_URL": "http://should-be-removed.invalid",
             "CLAUDE_CODE_USE_BEDROCK": "1",
@@ -186,6 +192,9 @@ class DriverRun:
     def claude_calls(self) -> list[dict]:
         log = self.tmp / "claude.log"
         return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+    def sdk_imported(self) -> bool:
+        return (self.tmp / "anthropic.imported").exists()
 
     def api_calls(self) -> list[dict]:
         log = self.tmp / "anthropic.log"

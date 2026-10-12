@@ -3,27 +3,36 @@ Claude Code security review (anthropics/claude-code-security-review) as a
 Harbor agent.
 
 Unlike the other agents this one calls a model, through the Claude Code CLI
-for the review and the Anthropic API for the upstream false-positive filter. It
+for the review and (with an API key) the Anthropic API for the upstream
+false-positive filter. It
 runs the upstream library code from its own driver (``driver.py``) inside the
 task sandbox, with no GitHub involved: the in-scope files of /app/repo are
 reviewed as one pull request that adds them all. See README.md for setup.
 
 Configuration, read on the host:
 
-- ``ANTHROPIC_API_KEY`` (required): the key for both stages. A missing key
-  fails the trial before anything runs.
+- The credential, one of:
+  ``ANTHROPIC_API_KEY``, an API key for both stages, or
+  ``CLAUDE_CODE_OAUTH_TOKEN``, a Claude subscription token made with
+  ``claude setup-token``. That token works for Claude Code only, so with it
+  the filter runs its regex rules only and the driver's API preflight is
+  skipped. The ``auth`` option picks one (``auto`` by default: the API key
+  when it is set, else the token). No credential fails the trial before
+  anything runs.
 - Options (``--ak key=value``, or ``CLAUDE_REVIEW_<KEY>`` in the environment):
-  ``model``, ``filter_model``, ``mode`` (stock or scoped), ``filter``,
-  ``max_turns``, ``max_budget_usd``, ``timeout_sec``, ``cli_share``,
-  ``cli_attempts``, ``cli_auth``, ``scan_roots``, ``exclude``. See options.py.
+  ``model``, ``filter_model``, ``mode`` (stock or scoped), ``auth``,
+  ``filter``, ``max_turns``, ``max_budget_usd``, ``timeout_sec``,
+  ``cli_share``, ``cli_attempts``, ``cli_auth``, ``scan_roots``, ``exclude``.
+  See options.py.
 
-The key is handled like SonarQube's token: it is uploaded as a file into a
-mode 700 directory under the work dir, copied under umask 077 into a mode 600
-file, read by the driver (which hands it to the CLI through an apiKeyHelper in
-a private settings file, and to the filter in-process) and deleted when the
-review ends, also after a failure. It is never on a command line, in the exec
-env, in the metadata, a log or an artifact, and all output that is kept is
-scrubbed of it.
+The credential is handled like SonarQube's token: it is uploaded as a file into
+a mode 700 directory under the work dir, copied under umask 077 into a mode 600
+file, read by the driver and deleted when the review ends, also after a
+failure. The driver hands an API key to the CLI through an apiKeyHelper in a
+private settings file and to the filter in-process, and a subscription token
+to the CLI process's own environment as CLAUDE_CODE_OAUTH_TOKEN, nowhere else.
+The credential is never on a command line, in the exec env, in the metadata, a
+log or an artifact, and all output that is kept is scrubbed of it.
 """
 
 from __future__ import annotations
@@ -56,8 +65,14 @@ SCAN_INSTRUCTIONS_FILE = _HERE / "scoped_scan_instructions.txt"
 FILTER_INSTRUCTIONS_FILE = _HERE / "scoped_filter_instructions.txt"
 
 KEY_ENV = "ANTHROPIC_API_KEY"
+OAUTH_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
+#: auth mode -> the host variable that holds its credential.
+CREDENTIAL_ENV = {"api_key": KEY_ENV, "oauth": OAUTH_ENV}
 KEY_DIR = "secret"
 KEY_FILE = "anthropic-key"
+OAUTH_FILE = "claude-oauth-token"
+#: auth mode -> the credential's file name in KEY_DIR.
+CREDENTIAL_FILE = {"api_key": KEY_FILE, "oauth": OAUTH_FILE}
 #: The CLI's HOME (its settings.json, auto-memory), under the work dir.
 CLI_HOME = "home/claude-review"
 DRIVER_OUT = "out/claude_review.json"
@@ -76,7 +91,7 @@ SYSTEM_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 #: driver error code -> what it means for the person reading the trial.
 ERROR_HINTS = {
-    "no_key": "the key file could not be read in the sandbox",
+    "no_key": "the credential file could not be read in the sandbox",
     "network": "the sandbox cannot reach api.anthropic.com. This agent needs HTTPS egress from the task container",
     "api_auth": "the API refused ANTHROPIC_API_KEY",
     "model_unavailable": "the model is not available (retired or misspelt?)",
@@ -90,7 +105,10 @@ ERROR_HINTS = {
     "filter_call_failed": "a per-finding filter call failed",
     "model_remapped": "Claude Code would run the review on another model than the one requested. Choose the "
                       "model with --ak model=<model id> (or CLAUDE_REVIEW_MODEL=<model id>) and run again",
-    "cli_auth": "Claude Code would not use the key the agent gave it",
+    "cli_auth": "Claude Code would not use the credential the agent gave it",
+    "cli_oauth_refused": "the subscription token was refused. Run `claude setup-token` again and set the new "
+                         "token in CLAUDE_CODE_OAUTH_TOKEN",
+    "oauth_filter": "the Claude filter needs an API key, and this run has a subscription token only",
     "cli_settings": "Claude Code did not apply the agent's tool restrictions",
     "cli_init_missing": "Claude Code did not say which model and tools it used",
 }
@@ -111,6 +129,41 @@ def budget_note(budget_sec: float, explicit: bool, task_timeout_sec: float | Non
             f"allows. Harbor's own limit (task.toml times --agent-timeout-multiplier) must be at least "
             f"{int(budget_sec) + TIMEOUT_MARGIN_SEC} s, or Harbor stops the review first. The agent cannot "
             "see that limit, so it is not checked")
+
+
+def choose_auth(requested: str, environ: Any = None) -> tuple[str | None, str]:
+    """(auth mode, how it was chosen). The mode is None when the credential it
+    needs is missing on the host, and the second value then says what is missing.
+
+    Only the variable names are looked at here: no value is returned or recorded.
+    """
+    environ = os.environ if environ is None else environ
+    has_key = bool(str(environ.get(KEY_ENV, "") or "").strip())
+    has_token = bool(str(environ.get(OAUTH_ENV, "") or "").strip())
+    if requested == "api_key":
+        return ("api_key", "auth=api_key") if has_key else (
+            None, f"auth=api_key needs {KEY_ENV}, which is not set on the host")
+    if requested == "oauth":
+        return ("oauth", "auth=oauth") if has_token else (
+            None, f"auth=oauth needs {OAUTH_ENV} (a token from `claude setup-token`), which is not set on the host")
+    if has_key and has_token:
+        return "api_key", f"auth=auto: both {KEY_ENV} and {OAUTH_ENV} are set, {KEY_ENV} is used"
+    if has_key:
+        return "api_key", f"auth=auto: {KEY_ENV} is set"
+    if has_token:
+        return "oauth", f"auth=auto: {OAUTH_ENV} is set, {KEY_ENV} is not"
+    return None, (f"neither {KEY_ENV} nor {OAUTH_ENV} is set on the host: the Claude Code security review agent "
+                  f"needs an Anthropic API key or a Claude subscription token from `claude setup-token` "
+                  "(see README.md)")
+
+
+def filter_conflict(auth: str | None, requested_filter: str | None) -> str | None:
+    """The reason a filter cannot run with this credential, else None."""
+    if auth == "oauth" and requested_filter == "claude":
+        return (f"filter=claude needs an Anthropic API key, and this run uses {OAUTH_ENV}. The subscription token "
+                "works for Claude Code only, not for the API the filter calls. Drop filter=claude (the filter then "
+                f"runs its regex rules only) or set {KEY_ENV} and use auth=api_key")
+    return None
 
 
 def bounded(command: str, seconds: float) -> str:
@@ -151,14 +204,20 @@ class ClaudeReviewAgent(ScannerAgent):
 
     @classmethod
     def preflight(cls, kwargs=None, env=None) -> None:
-        """Before any trial is queued: valid options and a key on the host."""
+        """Before any trial is queued: valid options, a credential on the host and
+        a filter that the credential can run."""
         super().preflight(kwargs, env)
-        cls.parse_options(kwargs, env)
+        options = cls.parse_options(kwargs, env)
         # No model is refused here. Whether a model id is served as itself is only known at run time:
         # the driver reads the CLI's init message and stops the review at once on any other model.
-        if not os.environ.get(KEY_ENV, "").strip():
-            raise ValueError(f"{KEY_ENV} is not set on the host: the Claude Code security review agent needs an "
-                             "Anthropic API key enabled for the API and Claude Code (see README.md)")
+        # The credential is read from the host's own environment only, never from --ae (Harbor writes
+        # agent env values into the job config).
+        auth, note = choose_auth(options.auth)
+        if auth is None:
+            raise ValueError(note)
+        conflict = filter_conflict(auth, options.filter)
+        if conflict:
+            raise ValueError(conflict)
 
     def tool_version(self) -> str:
         return f"{pins.CCSR_COMMIT[:7]}+claude-code-{pins.CLAUDE_CODE_VERSION}"
@@ -175,6 +234,22 @@ class ClaudeReviewAgent(ScannerAgent):
     def filter_model(self) -> str:
         return self.review_options.filter_model or self.review_model()
 
+    def auth_mode(self) -> str | None:
+        """api_key or oauth, from the option and the host's variables. None when the credential is missing."""
+        return choose_auth(self.review_options.auth)[0]
+
+    def filter_mode(self) -> str:
+        """The filter that runs: the option, else claude with an API key and hard_rules with a subscription token."""
+        chosen = self.review_options.filter
+        if chosen:
+            return chosen
+        return "hard_rules" if self.auth_mode() == "oauth" else "claude"
+
+    def results_label(self) -> str:
+        """How results of this configuration should be labelled in a report."""
+        return "{} CLI + {} filter".format(self.review_options.mode,
+                                           "Claude" if self.filter_mode() == "claude" else "hard-rule")
+
     def to_agent_info(self) -> AgentInfo:
         """The model this agent really calls, not Harbor's ``-m``."""
         return AgentInfo(name=self.name(), version=self.version() or "unknown",
@@ -185,9 +260,10 @@ class ClaudeReviewAgent(ScannerAgent):
         return {
             "model": self.review_model(),
             "model_source": "option" if options.model else "upstream_default",
-            "filter_model": self.filter_model() if options.filter == "claude" else None,
+            "filter_model": self.filter_model() if self.filter_mode() == "claude" else None,
             "mode": options.mode,
-            "filter_mode": options.filter,
+            "filter_mode": self.filter_mode(),
+            "auth": self.auth_mode(),
             # Harbor's -m: recorded, never used (the platform makes every run name one).
             "harbor_model_name_ignored": self.model_name,
             "reasoning_effort_ignored": options.reasoning_effort,
@@ -195,7 +271,8 @@ class ClaudeReviewAgent(ScannerAgent):
 
     def sarif_driver_properties(self) -> dict[str, Any]:
         options = self.review_options
-        return {"model": self.review_model(), "mode": options.mode, "filterMode": options.filter,
+        return {"model": self.review_model(), "mode": options.mode, "filterMode": self.filter_mode(),
+                "auth": self.auth_mode(),
                 "upstreamCommit": pins.CCSR_COMMIT, "claudeCodeVersion": pins.CLAUDE_CODE_VERSION,
                 "categoryMap": category_map.VERSION}
 
@@ -229,13 +306,18 @@ class ClaudeReviewAgent(ScannerAgent):
         explicit = options.timeout_sec or options.scan_budget_sec
         return float(explicit) if explicit else super()._scan_budget(settings)
 
-    @staticmethod
-    def _api_key() -> str:
-        key = os.environ.get(KEY_ENV, "").strip()
-        if not key:
-            raise ScannerError(f"{KEY_ENV} is not set on the host: the Claude Code security review agent needs an "
-                               "Anthropic API key (see README.md)")
-        return key
+    def _credential(self) -> tuple[str, str, str]:
+        """(auth mode, how it was chosen, the secret). The secret goes nowhere but the credential file."""
+        auth, note = choose_auth(self.review_options.auth)
+        if auth is None:
+            raise ScannerError(note)
+        conflict = filter_conflict(auth, self.review_options.filter)
+        if conflict:
+            raise ScannerError(conflict)
+        secret = os.environ.get(CREDENTIAL_ENV[auth], "").strip()
+        if not secret:  # changed since choose_auth looked: treat as missing
+            raise ScannerError(f"{CREDENTIAL_ENV[auth]} is not set on the host")
+        return auth, note, secret
 
     async def scan(
         self,
@@ -244,23 +326,28 @@ class ClaudeReviewAgent(ScannerAgent):
         budget_sec: float,
         meta: dict[str, Any],
     ) -> list[Finding]:
-        key = self._api_key()
+        auth, auth_note, key = self._credential()
         work = getattr(self, "_work_dir", None)
         install = getattr(self, "_install", None) or {}
         if work is None or not install.get("venv_python"):
             raise ScannerError("setup() did not run: the review tools were not checked")
         deadline = time.monotonic() + budget_sec
         options = self.review_options
+        filter_mode = self.filter_mode()
         review: dict[str, Any] = {
             "mode": options.mode,
             "model": self.review_model(),
-            "filter_model": self.filter_model() if options.filter == "claude" else None,
-            "filter_mode": options.filter,
+            "filter_model": self.filter_model() if filter_mode == "claude" else None,
+            "filter_mode": filter_mode,
+            "filter_mode_source": "option" if options.filter else "default_for_" + auth,
+            "auth": auth,
+            "auth_choice": auth_note,
+            "results_label": self.results_label(),
             "upstream_repo": pins.CCSR_REPO,
             "upstream_commit": pins.CCSR_COMMIT,
             "claude_code_version_pinned": pins.CLAUDE_CODE_VERSION,
             "category_map": category_map.VERSION,
-            "cli_auth": options.cli_auth,
+            "cli_auth": options.cli_auth if auth == "api_key" else "oauth_env",
             "cli_attempts": options.cli_attempts,
             "max_turns": options.max_turns,
             "max_budget_usd": options.max_budget_usd,
@@ -282,12 +369,12 @@ class ClaudeReviewAgent(ScannerAgent):
         if len(files) > MAX_FILES:
             raise ScannerError(f"{len(files)} files are in scope, more than the {MAX_FILES} this agent reviews")
 
-        # 2. The request: everything but the key.
+        # 2. The request: everything but the credential.
         scan_text, filter_text = self.instructions()
         review["scan_instructions_sha256"] = _sha256(scan_text) if scan_text else None
         review["filter_instructions_sha256"] = _sha256(filter_text) if filter_text else None
         key_dir = f"{work}/{KEY_DIR}"
-        key_file = f"{key_dir}/{KEY_FILE}"
+        key_file = f"{key_dir}/{CREDENTIAL_FILE[auth]}"
         out_file = f"{work}/{DRIVER_OUT}"
         left = deadline - time.monotonic() - PREPARE_RESERVE_SEC
         driver_seconds = left - KILL_AFTER_SEC - EXEC_SLACK_SEC
@@ -299,7 +386,8 @@ class ClaudeReviewAgent(ScannerAgent):
             "mode": options.mode,
             "model": self.review_model(),
             "filter_model": self.filter_model(),
-            "filter": options.filter,
+            "filter": filter_mode,
+            "auth": auth,
             "max_turns": options.max_turns,
             "max_budget_usd": options.max_budget_usd,
             "cli_attempts": options.cli_attempts,
@@ -314,7 +402,7 @@ class ClaudeReviewAgent(ScannerAgent):
         }
         request_bytes = json.dumps(request, indent=1).encode("utf-8")
         if key.encode() in request_bytes:  # a programming error
-            raise ScannerError(f"refusing to upload a request that contains {KEY_ENV}")
+            raise ScannerError(f"refusing to upload a request that contains {CREDENTIAL_ENV[auth]}")
         review["request_sha256"] = _sha256(request_bytes)
         request_file = f"{work}/out/claude_review_request.json"
         await self._upload_bytes(environment, request_bytes, request_file)
@@ -323,7 +411,7 @@ class ClaudeReviewAgent(ScannerAgent):
             # Inside the try: a failed upload or protect step must still remove the file.
             await self._write_key(environment, key_dir, key_file, key, review)
             document = await self._run_driver(environment, key, install, request_file, key_file, out_file,
-                                               driver_seconds, review)
+                                               driver_seconds, review, secret_name=CREDENTIAL_ENV[auth])
         finally:
             await self._remove_key(environment, key_dir, review)
 
@@ -352,6 +440,7 @@ class ClaudeReviewAgent(ScannerAgent):
         out_file: str,
         seconds: float,
         review: dict[str, Any],
+        secret_name: str = KEY_ENV,
     ) -> dict[str, Any]:
         python = install["venv_python"]
         claude_dir = str(Path(install.get("claude") or f"{pins.INSTALL_DIR}/bin/claude").parent)
@@ -366,7 +455,7 @@ class ClaudeReviewAgent(ScannerAgent):
         )
         result = await self._run_logged(environment, "command-1", command, key, env=env,
                                         timeout_sec=exec_timeout(seconds), what="the Claude Code security review",
-                                        cwd=REPO_DIR)
+                                        cwd=REPO_DIR, secret_name=secret_name)
         review["driver_exit_code"] = result.return_code
         review["driver_result"] = _result_line(result.stdout or "", "DRIVER_RESULT")
         document = await self._read_output(environment, out_file, key)
@@ -404,6 +493,9 @@ class ClaudeReviewAgent(ScannerAgent):
             "cli_settings": document.get("cli_settings"),
             "environment_removed": document.get("environment_removed"),
             "cli_init": cli.get("init"),
+            # Where the CLI says its credential came from (a source name such as "none" or
+            # "apiKeyHelper", never a value).
+            "cli_credential_source": (cli.get("init") or {}).get("apiKeySource"),
             "prompt_sha256": cli.get("prompt_sha256"),
             "prompt_bytes": cli.get("prompt_bytes"),
             "diff_omitted": cli.get("diff_omitted"),
@@ -457,10 +549,12 @@ class ClaudeReviewAgent(ScannerAgent):
         timeout_sec: float,
         what: str,
         cwd: str | None = None,
+        secret_name: str = KEY_ENV,
     ) -> ExecResult:
-        """One exec, logged with the key scrubbed. The key is in neither the command nor the env."""
-        if key in command or any(key in value for value in env.values()):  # a programming error
-            raise ScannerError(f"refusing to run a command whose command line or env contains {KEY_ENV}")
+        """One exec, logged with the credential scrubbed. It is in neither the command nor the env."""
+        if key in command or any(key in value for value in env.values()) or \
+                any(name in CREDENTIAL_ENV.values() for name in env):  # a programming error
+            raise ScannerError(f"refusing to run a command whose command line or env contains {secret_name}")
         started = time.monotonic()
         try:
             result = await self._exec(environment, command, timeout_sec=timeout_sec, what=what, cwd=cwd, env=env)
@@ -490,14 +584,14 @@ class ClaudeReviewAgent(ScannerAgent):
     async def _write_key(
         self, environment: BaseEnvironment, key_dir: str, key_file: str, key: str, review: dict[str, Any]
     ) -> None:
-        """The key as a mode 600 file in a mode 700 directory. No command here holds the key.
+        """The credential as a mode 600 file in a mode 700 directory. No command here holds it.
 
         Same steps as the SonarQube token: the upload may arrive owned by another
         user, so the sandbox user copies it under umask 077 and removes the
         upload. The caller removes the whole directory in a ``finally``.
         """
         quoted_dir, quoted_file = shlex.quote(key_dir), shlex.quote(key_file)
-        upload = f"{key_dir}/{KEY_FILE}.upload"
+        upload = f"{key_file}.upload"
         quoted_upload = shlex.quote(upload)
         result = await self._exec(environment, f"rm -rf {quoted_dir} && mkdir -p {quoted_dir} && chmod 700 {quoted_dir}",
                                   timeout_sec=60, what="preparing the key directory")

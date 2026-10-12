@@ -16,7 +16,8 @@ Behaviour comes from the JSON file named by FAKE_ANTHROPIC_CONFIG:
   gets ``keep_finding: false``; any other gets ``keep_finding: true``.
 - ``finding_reply_text``: the raw reply text for every finding analysis.
 
-Every call is appended to the file named by FAKE_ANTHROPIC_LOG as one JSON
+Importing the module touches the file named by FAKE_ANTHROPIC_IMPORTED, so a
+test can tell whether the SDK was loaded at all. Every call is appended to the file named by FAKE_ANTHROPIC_LOG as one JSON
 line: the model, max_tokens, whether a system prompt was given, the api_key the
 client was made with, and the categories in the prompt.
 """
@@ -26,6 +27,10 @@ import os
 import re
 
 __version__ = "0.79.0-fake"
+
+if os.environ.get("FAKE_ANTHROPIC_IMPORTED"):
+    with open(os.environ["FAKE_ANTHROPIC_IMPORTED"], "a") as _f:
+        _f.write("imported\n")
 
 
 class APIError(Exception):

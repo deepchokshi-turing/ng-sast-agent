@@ -775,8 +775,9 @@ This agent runs Anthropic's open-source
 (pinned at commit `0c6a49f`, 2026-02-11) on a task. Unlike the other agents it
 calls a model: the Claude Code CLI (2.1.296, pinned) does the review, and the
 upstream false-positive filter calls the Anthropic API once per finding. It
-needs an Anthropic API key and HTTPS access to `api.anthropic.com` from the
-task container. The design and what was and was not verified are in
+needs an Anthropic API key (or a Claude subscription token, with the limits
+described below) and HTTPS access to `api.anthropic.com` from the task
+container. The design and what was and was not verified are in
 [docs/claude-review-agent.md](docs/claude-review-agent.md).
 
 The upstream tool reviews a GitHub pull request. The agent uses its library
@@ -807,25 +808,83 @@ installs it into the work directory instead. That needs the sandbox to reach
 registry.npmjs.org, raw.githubusercontent.com and pypi.org, a glibc Linux on
 x86_64 or aarch64, and Python 3.9 or newer.
 
-### 2. Set the key
+### 2. Set the credential
+
+The agent takes one of two credentials from the host where Harbor runs. The
+`auth` option picks which (`--ak auth=api_key`, `--ak auth=oauth`, or the
+default `auto`, which uses the API key when `ANTHROPIC_API_KEY` is set and
+otherwise the subscription token). When both are set, `auto` uses the API key
+and the metadata says so. A missing credential stops the job before any trial
+starts. Do not pass either one with `--ae`, since Harbor writes agent env
+values into the job config.
+
+**An API key (recommended).**
 
 ```bash
 export ANTHROPIC_API_KEY=<key>
 ```
 
-The key must be enabled for the Claude API and for Claude Code. It is read on
-the host where Harbor runs. A missing key stops the job before any trial
-starts. Do not pass it with `--ae`, since Harbor writes agent env values into
-the job config.
+The key must be enabled for the Claude API and for Claude Code. This is the
+configuration the rest of this section describes, and the one to use for
+numbers you report to a client.
 
-How the key reaches the sandbox: the same way as SonarQube's token. It is
-uploaded as a file into a mode 700 directory under the work dir, copied under
-umask 077 into a mode 600 file, and the whole directory is removed when the
-review ends, also after a failure. The driver reads it in-process. The CLI gets
-it through an `apiKeyHelper` (`cat <key file>`) in a private settings file, so
-the key is in no command line and in no process environment. The key is never
-in a log, an artifact or the run metadata, and all output that is kept is
-scrubbed of it. The unit tests check all of this.
+**A Claude subscription token.** If you have a Claude plan instead of an API
+key, make a long-lived token with `claude setup-token` on your own machine and
+put it in the repo's `.env` file (`.gitignore` lists it, never commit it):
+
+```bash
+CLAUDE_CODE_OAUTH_TOKEN=<token from claude setup-token>
+```
+
+Then load it and run (bash, or Git Bash on Windows), with `R` set to the repo
+folder:
+
+```bash
+R=$PWD
+set -a; source "$R/.env"; set +a
+PYTHONPATH=$R .venv/bin/harbor run -y --force-build -p dev/tasks -n 1 \
+  -a sast.claude_review.agent:ClaudeReviewAgent -o jobs/claude-review-oauth \
+  --include-task-name smoke_eval \
+  --agent-timeout-multiplier 3 \
+  --ak auth=oauth --ak model=claude-opus-5-5 --ak timeout_sec=2400
+```
+
+In Git Bash on Windows the venv's Harbor is `.venv/Scripts/harbor`. `--ak
+auth=auto` works too when `ANTHROPIC_API_KEY` is not set. Know what
+changes with a token before you use it:
+
+- The token works for Claude Code only. It is not an API key, so the upstream
+  filter's per-finding Claude check cannot run. The filter runs its regex
+  rules only (`filter=hard_rules`), which is a different configuration from
+  the upstream stock one. Label such results "stock CLI + hard-rule filter"
+  (the metadata's `results_label` says the same) and do not compare them
+  directly with API-key runs. Asking for `--ak filter=claude` with a token
+  fails before any trial starts.
+- There is no fast preflight check. With an API key the driver sends one tiny
+  request per model before the review. A token cannot do that, so a refused
+  token or an unavailable model only shows up when the CLI starts. A refused
+  token fails the trial with "the subscription token was refused. Run `claude
+  setup-token` again" and is not retried.
+- Every review counts against your plan's usage limits. A long job can hit
+  them halfway, and the remaining trials then fail.
+- Subscription tokens are meant for your own personal use of Claude Code.
+  Check your plan's terms before you run large automated jobs with one.
+
+For results you report to a client, use an API key.
+
+How the credential reaches the sandbox: the same way as SonarQube's token. It
+is uploaded as a file into a mode 700 directory under the work dir, copied
+under umask 077 into a mode 600 file, and the whole directory is removed when
+the review ends, also after a failure. The driver reads it in-process. An API
+key goes to the CLI through an `apiKeyHelper` (`cat <key file>`) in a private
+settings file, so it is in no command line and in no process environment, and
+to the filter as an argument. A subscription token goes only into the CLI
+process's own environment as `CLAUDE_CODE_OAUTH_TOKEN` (no `apiKeyHelper`),
+and the driver replaces the `anthropic` package with a stand-in that refuses
+to make a client, so nothing else in the driver can send it anywhere. Neither
+credential is ever on a command line, in Harbor's exec env, a log, an artifact
+or the run metadata, and all output that is kept is scrubbed of it. The unit
+tests check all of this.
 
 ### 3. Run
 
@@ -885,13 +944,14 @@ Every option is `--ak key=value` or the host variable `CLAUDE_REVIEW_<KEY>`
 | `model` | upstream default, `claude-opus-4-1-20250805` (may be retired, see above) | model for the review and, unless `filter_model` is set, the filter. Harbor's `-m` is recorded and not used |
 | `filter_model` | `model` | model for the per-finding filter |
 | `mode` | `stock` | `stock`: upstream prompts and filter unchanged. `scoped`: adds the benchmark's LLM02/LLM03 scope and a pointer to `security_manifest.json` through the upstream custom instructions, asks for a CWE list per finding, and uses the upstream filter text without exclusions 7 ("lack of hardening") and 14 ("user content in AI prompts is not a vulnerability") |
-| `filter` | `claude` | `claude`: the upstream regex rules plus the per-finding API check. `hard_rules`: the regex rules only |
+| `auth` | `auto` | `api_key` (`ANTHROPIC_API_KEY`), `oauth` (`CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`), or `auto`: the API key when it is set, else the token |
+| `filter` | `claude` with an API key, `hard_rules` with a token | `claude`: the upstream regex rules plus the per-finding API check (needs an API key). `hard_rules`: the regex rules only |
 | `max_turns` | none | Claude Code `--max-turns` |
 | `max_budget_usd` | none | Claude Code `--max-budget-usd` for the review (the filter is not counted) |
 | `timeout_sec` | task timeout minus 120 s | wall-clock limit for the whole review |
 | `cli_share` | 0.6 | share of that limit the CLI may use, the filter gets the rest |
 | `cli_attempts` | 3 | CLI attempts, as upstream |
-| `cli_auth` | `api_key_helper` | `env` puts the key into the CLI process's own environment instead (a fallback, never a command line) |
+| `cli_auth` | `api_key_helper` | `env` puts the API key into the CLI process's own environment instead (a fallback, never a command line). Not used with a token |
 | `scan_roots`, `exclude` | the task's | as for the other agents |
 
 ### What a run does
@@ -910,7 +970,8 @@ Every option is `--ak key=value` or the host variable `CLAUDE_REVIEW_<KEY>`
      that turn off telemetry), so no host setting such as
      `CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST` can choose the model, checks that `api.anthropic.com` answers, and sends one tiny
      request per model, so a bad key, a retired model or a blocked network
-     fails in seconds.
+     fails in seconds. With a subscription token the per-model request is
+     skipped (`"preflight": "skipped_oauth"` in the metadata).
    - builds the pull request (a file whose diff holds `@generated` is left
      out, as upstream does, and so are binary files) and the upstream prompt.
    - runs the CLI in `/app/repo` with the upstream command line plus `-p`,
@@ -921,7 +982,8 @@ Every option is `--ak key=value` or the host variable `CLAUDE_REVIEW_<KEY>`
      Bash, WebFetch, WebSearch, Edit, MultiEdit, Write and NotebookEdit, and
      reads of the key and the CLI home folders. The CLI's first message is
      checked before the review spends anything: it must use the requested
-     model, take its key from the apiKeyHelper, and offer none of the denied
+     model, take its key from the apiKeyHelper (with a token: report no API
+     key in use, `"apiKeySource": "none"`), and offer none of the denied
      tools, or the CLI is stopped at once.
    - retries a failed attempt (3 in all) and, when the prompt is too long,
      runs once more with the file list only, as upstream does.
@@ -973,14 +1035,18 @@ falls back to the regex rules), when any per-finding filter call fails
 
 ### What the metadata records
 
-Under `claude_review`: mode, model and filter model, the upstream commit, the
+Under `claude_review`: `auth` (`api_key` or `oauth`) and `auth_choice` (how
+it was chosen), `cli_credential_source` (the credential source the CLI
+reported, a name such as `apiKeyHelper` or `none`, never a value),
+`filter_mode` and where it came from, `results_label`, mode, model and filter
+model, the upstream commit, the
 pinned and reported Claude Code version, the `anthropic`, `requests` and Python
 versions, the exact CLI command line, the CLI settings, the CLI's init message
 (model, key source, tools), the sha256 of the prompt, the request and the
 scoped instruction texts, every attempt with its outcome, `total_cost_usd`,
 `num_turns`, `usage` and `modelUsage` from the CLI, token counts of the direct
 API calls per model, the filter's summary and every excluded finding with its
-reason. At the top level: `model`, `filter_model`, `mode`, `filter_mode`,
+reason. At the top level: `model`, `filter_model`, `mode`, `filter_mode`, `auth`,
 `harbor_model_name_ignored`, and the mapping counts above. Harbor's agent info
 names the model the review used. The driver's full result is kept as the
 artifact `claude_review.json`.

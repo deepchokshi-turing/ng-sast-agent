@@ -48,7 +48,8 @@ def line_counts(files=IN_SCOPE):
     return {f: len((REPO / f).read_text().splitlines()) for f in files}
 
 
-def driver_document(kept=None, *, status="ok", error=None, raw=None, excluded=None, echo_key=False, files=IN_SCOPE):
+def driver_document(kept=None, *, status="ok", error=None, raw=None, excluded=None, echo_key=False, files=IN_SCOPE,
+                    secret=KEY, init=None):
     kept = [] if kept is None else kept
     doc = {
         "driver_format": 1, "status": status, "seconds": 75.0,
@@ -65,7 +66,8 @@ def driver_document(kept=None, *, status="ok", error=None, raw=None, excluded=No
         "cli": {"attempts": [{"exit_code": 0, "seconds": 70.0, "outcome": "ok", "include_diff": True,
                               "wrapper": {"total_cost_usd": 0.42}}],
                 "diff_omitted": False, "prompt_sha256": "cd", "prompt_bytes": 12000,
-                "cli": {k: v for k, v in wrapper(review([])).items() if k != "review"}},
+                "cli": {k: v for k, v in wrapper(review([])).items() if k != "review"},
+                **({"init": init} if init is not None else {})},
         "review": review(raw if raw is not None else kept, files_reviewed=len(files)),
         "review_summary": {"files_reviewed": len(files), "review_completed": True},
         "filter": {"mode": "claude", "calls": [], "summary": {"total_findings": len(raw or kept)}},
@@ -77,7 +79,7 @@ def driver_document(kept=None, *, status="ok", error=None, raw=None, excluded=No
     if error:
         doc["error"] = error
     if echo_key:
-        doc["note"] = f"the key was {KEY}"
+        doc["note"] = f"the key was {secret}"
     return doc
 
 
@@ -85,7 +87,7 @@ class FakeSandbox:
     """Just enough of BaseEnvironment: a dict file system and scripted exec."""
 
     def __init__(self, document=None, driver_exit=0, driver_stdout=None, prepare_exit=0, fail_upload=False,
-                 protect_exit=0, driver_stderr="", write_document=True):
+                 protect_exit=0, driver_stderr="", write_document=True, secret=KEY):
         self.environment_dir = SAMPLE_TASKS / TASK / "environment"
         self.files: dict[str, bytes] = {}
         self.commands: list[tuple[str, dict | None, float | None]] = []
@@ -100,6 +102,7 @@ class FakeSandbox:
         self.protect_exit = protect_exit
         self.write_document = write_document
         self.request = None
+        self.secret = secret
 
     def _remove_tree(self, path):
         for name in [n for n in self.files if n == path or n.startswith(path + "/")]:
@@ -143,7 +146,7 @@ class FakeSandbox:
         if "driver.py" in command:
             args = shlex.split(command.split(" && exec ", 1)[1])
             keyfile = args[args.index("--keyfile") + 1]
-            self.key_reads.append((keyfile, self.files.get(keyfile, b"").strip() == KEY.encode()))
+            self.key_reads.append((keyfile, self.files.get(keyfile, b"").strip() == self.secret.encode()))
             self.request = json.loads(self.files[args[args.index("--request") + 1]])
             if self.write_document:
                 self.files[args[args.index("--out") + 1]] = json.dumps(self.document).encode()
@@ -178,11 +181,15 @@ class FakeSandbox:
         return [(c, env, t) for c, env, t in self.commands if needle in c]
 
 
+#: Host variables that would change a test's outcome, removed by the credential fixtures.
+CLEAN_ENV = ("CLAUDE_REVIEW_MODEL", "CLAUDE_REVIEW_MODE", "CLAUDE_REVIEW_FILTER", "CLAUDE_REVIEW_MAX_TURNS",
+             "CLAUDE_REVIEW_TIMEOUT_SEC", "CLAUDE_REVIEW_FILTER_MODEL", "CLAUDE_REVIEW_AUTH", "CLAUDE_CODE_OAUTH_TOKEN")
+
+
 @pytest.fixture
 def api_key(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", KEY)
-    for name in ("CLAUDE_REVIEW_MODEL", "CLAUDE_REVIEW_MODE", "CLAUDE_REVIEW_FILTER", "CLAUDE_REVIEW_MAX_TURNS",
-                 "CLAUDE_REVIEW_TIMEOUT_SEC", "CLAUDE_REVIEW_FILTER_MODEL"):
+    for name in CLEAN_ENV:
         monkeypatch.delenv(name, raising=False)
 
 
@@ -362,6 +369,7 @@ def test_options_from_the_environment_lose_to_kwargs(tmp_path, api_key, monkeypa
 
 
 @pytest.mark.parametrize("bad", [{"mode": "fancy"}, {"filter": "none"}, {"max_turns": "0"}, {"cli_auth": "argv"},
+                                 {"auth": "subscription"},
                                  {"model": "two words"}, {"timeout_sec": "30"}])
 def test_bad_options_are_refused(tmp_path, bad):
     with pytest.raises(ValueError):
@@ -369,9 +377,9 @@ def test_bad_options_are_refused(tmp_path, bad):
 
 
 def test_preflight_needs_the_key_on_the_host(monkeypatch):
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("CLAUDE_REVIEW_MODEL", raising=False)
-    with pytest.raises(ValueError, match="ANTHROPIC_API_KEY is not set on the host"):
+    for name in ("ANTHROPIC_API_KEY", *CLEAN_ENV):
+        monkeypatch.delenv(name, raising=False)
+    with pytest.raises(ValueError, match="neither ANTHROPIC_API_KEY nor CLAUDE_CODE_OAUTH_TOKEN is set on the host"):
         ClaudeReviewAgent.preflight({"model": MODEL}, {})
     monkeypatch.setenv("ANTHROPIC_API_KEY", KEY)
     ClaudeReviewAgent.preflight({"mode": "scoped", "model": MODEL}, {})
@@ -380,7 +388,8 @@ def test_preflight_needs_the_key_on_the_host(monkeypatch):
 def test_upstream_default_passes_preflight(monkeypatch):
     """No static refusal: whether a model id is served as itself is only known from the CLI's init message."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", KEY)
-    monkeypatch.delenv("CLAUDE_REVIEW_MODEL", raising=False)
+    for name in CLEAN_ENV:
+        monkeypatch.delenv(name, raising=False)
     ClaudeReviewAgent.preflight({}, {})
     ClaudeReviewAgent.preflight({"model": "opus"}, {})
     assert not hasattr(pins, "CLI_MODEL_REMAPS")
@@ -427,10 +436,11 @@ def test_a_remap_at_run_time_tells_how_to_choose_the_model(tmp_path, api_key):
 
 
 def test_missing_key_fails_before_anything_runs(tmp_path, monkeypatch):
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    for name in ("ANTHROPIC_API_KEY", *CLEAN_ENV):
+        monkeypatch.delenv(name, raising=False)
     sandbox = FakeSandbox()
     _, context, go = run_agent(tmp_path, sandbox)
-    with pytest.raises(ScannerError, match="ANTHROPIC_API_KEY is not set on the host"):
+    with pytest.raises(ScannerError, match="neither ANTHROPIC_API_KEY nor CLAUDE_CODE_OAUTH_TOKEN is set on the host"):
         asyncio.run(go())
     assert context.metadata["status"] == "error"
     assert not sandbox.commands_with("driver.py") and "/app/output/findings.sarif" not in sandbox.files

@@ -2,8 +2,9 @@
 
 Every option can also come from the host's environment, as
 ``CLAUDE_REVIEW_<OPTION>`` (for example ``CLAUDE_REVIEW_MODEL``). An ``--ak``
-value wins over the environment. The API key is not an option: it is read from
-``ANTHROPIC_API_KEY`` on the host, so it never sits in a job config.
+value wins over the environment. The credential is not an option: it is read
+from ``ANTHROPIC_API_KEY`` or ``CLAUDE_CODE_OAUTH_TOKEN`` on the host, so it
+never sits in a job config. ``auth`` only says which of the two to use.
 
 Unknown keys are accepted and recorded instead of rejected, as for the other
 agents: Harbor validates options once per job, so one stray key would fail
@@ -43,10 +44,19 @@ class ClaudeReviewOptions(AgentOptions):
         "and the security_manifest.json pointer through the upstream custom instructions, asks for a CWE list per "
         "finding, and uses a filter text without two default exclusions that cover those risks.",
     )
-    filter: Annotated[Literal["claude", "hard_rules"], _env("filter")] = Field(
-        default="claude",
+    auth: Annotated[Literal["api_key", "oauth", "auto"], _env("auth")] = Field(
+        default="auto",
+        description="Which host credential to use. api_key: ANTHROPIC_API_KEY. oauth: CLAUDE_CODE_OAUTH_TOKEN, a "
+        "subscription token made with `claude setup-token` (the filter then runs its regex rules only and there is "
+        "no API preflight). auto: api_key when ANTHROPIC_API_KEY is set, else oauth when CLAUDE_CODE_OAUTH_TOKEN "
+        "is set.",
+    )
+    filter: Annotated[Literal["claude", "hard_rules"] | None, _env("filter")] = Field(
+        default=None,
         description="claude: upstream hard rules plus the per-finding Claude check (the action's default with "
-        "filtering on). hard_rules: the regex rules only, no API calls.",
+        "filtering on). hard_rules: the regex rules only, no API calls. Default: claude with an API key, "
+        "hard_rules with a subscription token (which cannot call the API). claude with a subscription token is "
+        "refused.",
     )
     max_turns: Annotated[int | None, _env("max_turns")] = Field(
         default=None, ge=1, description="Claude Code --max-turns for the review. Default: none, as upstream."
@@ -70,8 +80,9 @@ class ClaudeReviewOptions(AgentOptions):
     )
     cli_auth: Annotated[Literal["api_key_helper", "env"], _env("cli_auth")] = Field(
         default="api_key_helper",
-        description="How the CLI gets the key: an apiKeyHelper that reads the key file (default), or the CLI "
-        "process's own environment (fallback if a CLI version ignores apiKeyHelper). Never on a command line.",
+        description="How the CLI gets an API key: an apiKeyHelper that reads the key file (default), or the CLI "
+        "process's own environment (fallback if a CLI version ignores apiKeyHelper). Never on a command line. Not "
+        "used with auth oauth: a subscription token always goes into the CLI process's environment.",
     )
     scan_roots: list[str] | None = Field(
         default=None,

@@ -34,7 +34,8 @@ the other agents. Every finding is checked against that scope again.
 | a reply with no findings JSON counts as a clean review | retried, then an error | a failed review must not look like a clean one |
 | `is_error` and subtypes unchecked | checked, `error_max_turns` and `error_max_budget_usd` are fatal | as above |
 | 20 minutes per CLI attempt, the timeout input is dead | one deadline for the whole review, split between CLI and filter, and `timeout -k` around the driver | Harbor must not kill the agent first |
-| no preflight | network check and one tiny request per model | a bad key, a retired model or a blocked network fails in seconds instead of after the CLI's own long retries |
+| no preflight | network check and one tiny request per model (skipped with a subscription token) | a bad key, a retired model or a blocked network fails in seconds instead of after the CLI's own long retries |
+| filter with the Claude stage when filtering is on | with a subscription token, the regex rules only | the token cannot call the API. See "Subscription tokens" below |
 
 Kept unchanged: the prompt text, the custom instruction mechanism, the
 filter's prompts, retries and regex rules, the `@generated` rule, the
@@ -66,6 +67,55 @@ What protects the result instead, at run time:
   model there is not the requested one, and checks the result's `modelUsage`
   the same way (`model_remapped`). The error tells the user to pass
   `--ak model=<model id>`.
+
+## Subscription tokens (auth oauth)
+
+A Claude subscription token made with `claude setup-token` is read by Claude
+Code from `CLAUDE_CODE_OAUTH_TOKEN`. It is not an API key. It cannot be sent
+as `x-api-key` with the Anthropic Python SDK, and it must not go through
+`apiKeyHelper`, which is for API keys. So with `auth=oauth` (or `auto` with
+only the token set):
+
+- The token goes through the same file as the API key (mode 600 file in a
+  mode 700 directory, removed in a `finally`, scrubbed from every kept
+  output). The driver reads it and puts it only into the CLI child process's
+  environment as `CLAUDE_CODE_OAUTH_TOKEN`. That is the one Claude variable
+  added to the CLI's allow-listed environment, and every other `ANTHROPIC_*`
+  and `CLAUDE_*` variable is still dropped. The settings file has no
+  `apiKeyHelper`.
+- The driver's per-model API preflight is skipped (`"preflight":
+  "skipped_oauth"`). The network check still runs, with no credential.
+- The filter runs its regex rules only. An explicit `filter=claude` with a
+  token is refused at Harbor preflight. The driver refuses it too.
+- Before the upstream package is imported, the driver puts a stand-in
+  `anthropic` module into `sys.modules`. `from anthropic import Anthropic`
+  still works for the upstream imports, but making a client raises. The real
+  SDK is never loaded, and the filter is given no key. A test checks that the
+  fake SDK is neither imported nor called.
+- A failed CLI attempt whose output says the credential was refused
+  (`Invalid API key`, `Please run /login`, `OAuth token revoked`, `Failed to
+  authenticate`, `API Error: 401` and similar) stops the review at once with
+  `cli_oauth_refused`, and the agent reports "the subscription token was
+  refused. Run `claude setup-token` again". It is not retried.
+
+Which credential source the CLI reports. The init message's `apiKeySource`
+names where an API key came from. In the pinned Claude Code 2.1.296 binary
+(read as text, never run with a credential) its schema reads: "'none' (no API
+key in use - e.g. claude.ai OAuth login, a bearer token, or a third-party
+cloud provider)". The function that picks the key returns `none` when there is
+no `ANTHROPIC_API_KEY`, no `apiKeyHelper` and no key stored by `/login`, and
+the OAuth token is tracked apart from it as `tokenSource`, which the init
+message does not carry. So with a token `check_init` accepts `none` only and
+rejects `apiKeyHelper`, `ANTHROPIC_API_KEY` and `/login managed key`, any of
+which would mean an API key from somewhere else, possibly another account's.
+The allow-listed environment already rules out a bearer token
+(`ANTHROPIC_AUTH_TOKEN`) and the cloud providers. The reported source is kept
+in the metadata as `cli_credential_source`.
+
+Results of a token run are a different configuration from upstream stock
+(no Claude filter stage), so they are labelled "stock CLI + hard-rule filter"
+(`results_label` in the metadata) and should be reported apart from API-key
+runs.
 
 ## Scoped mode
 
@@ -99,6 +149,16 @@ Checked on 2026-10-12, in a dev container:
   host-managed container, so treat it with the same care.
 
 Not checked:
+
+- Any run with a real subscription token. No token was available, and the
+  real CLI was not run with any credential. That `apiKeySource` is `none`
+  with a token comes from reading the 2.1.296 binary, not from watching it.
+  If a later CLI reports something else for a token, the review stops at
+  once with `cli_auth` and the reported value in the message, before it
+  spends anything. The exact text the CLI prints when it refuses a token was
+  also taken from the binary's strings, so `cli_oauth_refused` may miss a
+  wording it does not list. Such a failure is then retried and ends as
+  `cli_failed` with the CLI's output in the attempt record.
 
 - A full review with a real key. No key was available, so cost, time, the
   shape of real findings and how often the model returns the JSON as asked
