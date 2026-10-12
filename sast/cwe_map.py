@@ -1,8 +1,10 @@
 """CWE -> task ruleId, version ``cwe-map-5``. Frozen: changing it is a new version.
 
-The task asks every agent, LLM or scanner, to report only five ruleIds
-(``instruction.md``). A scanner reports CWEs, so each CWE is assigned to one of
-them **by what the CWE means**, using the scope definitions in the instruction:
+The task asks every agent, LLM or scanner, to report only five ruleIds (the
+``Scope`` table of the output contract in the task's
+``instruction.md``; the fixtures under ``tests/fixtures/tasks`` carry the same
+table). A scanner reports CWEs, so each CWE is assigned to one of them **by
+what the CWE means**, using those scope definitions:
 
 - ``LLM02.SID.HIGH``: the weakness is a *flow* of sensitive data to a party or
   place it should not reach (exposure, sensitive data in logs, errors or sent

@@ -9,8 +9,9 @@ Each kept finding (after the upstream filter) has ``file``, ``line``,
   the in-scope text files the driver read, and ``line`` a positive integer no
   larger than that file's line count. It is used as start and end line, since
   the review gives one line. Anything else is dropped and counted.
-- CWEs: in scoped mode the model's list when at least one entry is valid
-  (``category_map.valid_cwes``), else the category table. In stock mode the
+- CWEs: in scoped mode the model's list when at least one entry is a
+  well-formed CWE id (``category_map.valid_cwes``; any id is accepted, only
+  malformed values are rejected and counted), else the category table. In stock mode the
   table only. The set is decided by ``cwe_map.decide_unordered``, as for
   CodeQL and SonarQube: an ambiguous set is dropped and counted, and a finding
   with no mapped CWE is passed on and counted by the SARIF writer as unmapped.
@@ -255,7 +256,9 @@ def normalise(
         "dropped_out_of_scope_count": len(dropped_scope),
         "unmapped_by_category": dict(sorted(unmapped_category.items())),
         "cwe_source": dict(sorted(sources.items())),
+        # Scoped mode: malformed CWE values (any well-formed id is accepted).
         "cwes_rejected": rejected[:200],
+        "cwes_rejected_count": len(rejected),
         "results_by_cwe_decision": dict(decisions),
         "results_cwe_ambiguous": ambiguous[:200],
         "findings_by_severity": dict(sorted(severities.items())),

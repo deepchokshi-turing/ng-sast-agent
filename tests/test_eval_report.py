@@ -287,7 +287,8 @@ def test_risk_fpr_is_over_negatives_only(tmp_path, monkeypatch, capsys):
     assert (sid["FP"], sid["TN"], sid["FPR"]) == (1, 1, 0.5)
     assert (ea["FP"], ea["TN"], ea["TN_other_pos"]) == (0, 2, 2)
     assert "FPR 0.500 (1 of 2 negatives)" in md
-    assert "TPR 0.000 (0 of 2 positives), FPR 0.500 (1 of 2 negatives), score -0.500" in md  # category table
+    # Category table: n on every row, then the rates.
+    assert "n 2 positives, 2 negatives: TPR 0.000 (0 of 2), FPR 0.500 (1 of 2), score -0.500" in md
 
 
 def test_crashed_positive_is_not_a_negative_and_errors_are_listed(tmp_path, monkeypatch, capsys):

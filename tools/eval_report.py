@@ -41,6 +41,11 @@ both reports always agree). On top of them this script adds:
   were dropped because no OWASP rule covers them,
 - every true positive, every scored false positive and the results outside
   the scored scope, read from each trial's verifier/grading_detail.json.
+- the external-audit additions: fixed-answer and empty-SARIF baselines, the
+  matched-findings means, the strict view, fixed apps with any result, harness
+  and filter effects per Claude job, category n with the categories a tool
+  cannot emit left out of its mean, and the task's own family_id as the family
+  key (the variant map's name in brackets).
 
 A tool that wrote no result at all carries a "no results, scores not
 meaningful" badge everywhere it is named. Harbor's job-level means are never
@@ -215,6 +220,12 @@ def full_task_set(tasks_dir: Path | None, variants: dict | None = None) -> dict 
 
 def collect(job: Path, tasks_dir: Path | None, variants: dict | None = None) -> dict:
     rows = report.rows_for(job, tasks_dir, variants or {})
+    for r in rows:
+        # The task's own family_id (task_metadata.json or task.toml) is the family key, with the
+        # private variant map's family name kept beside it.
+        r["family_name"] = r["family"]
+        if r.get("family_id"):
+            r["family"] = r["family_id"]
     summary = report.summarise(rows)
     funnel = Counter()
     unmapped = Counter()
@@ -291,7 +302,7 @@ def collect(job: Path, tasks_dir: Path | None, variants: dict | None = None) -> 
             if "result_index" in th:
                 traps_by_index.setdefault(th["result_index"], []).append(th.get("trap", ""))
         for kind, key in (("unmatched", "unmatched_results"), ("trap", "trap_hits"),
-                          ("near_fix", "results_near_fixed_code")):
+                          ("near_fix", "results_near_fixed_code"), ("in_scope", "results_in_scope")):
             for res in detail.get(key) or []:
                 if kind == "trap" and "result_index" in res:
                     continue
@@ -318,6 +329,25 @@ def collect(job: Path, tasks_dir: Path | None, variants: dict | None = None) -> 
                        "n_completed_trials": stats.get("n_completed_trials"),
                        "n_errored_trials": stats.get("n_errored_trials")},
     }
+
+
+def common_truths(jobs: list[dict]) -> dict:
+    """{task: ground truth} of every scored positive over all jobs, each task once."""
+    truths: dict = {}
+    for j in jobs:
+        for r in report.by_role(j["rows"], "positive"):
+            if r.get("_truth"):
+                truths.setdefault(r["task"], r["_truth"])
+    return truths
+
+
+def apply_common_baselines(jobs: list[dict]) -> str | None:
+    """Recompute every job's measurement 4 baseline with the one recommendation id that is most common
+    over all the jobs' ground truths, so every tool is compared with the same fixed answer."""
+    rec_id = report.common_recommendation(list(common_truths(jobs).values()))
+    for j in jobs:
+        j["summary"]["fixed_answer_baselines"] = report.fixed_answer_baselines(j["rows"], rec_id)
+    return rec_id
 
 
 def assign_keys(jobs: list[dict]) -> None:
@@ -368,7 +398,15 @@ def measures_of(j: dict) -> dict:
         "results_with": s["measurement_support"]["results_with"],
         "hits": len(j["hits"]), "hits_with_flow": sum(1 for h in j["hits"] if h.get("has_flow")),
         "negatives_clean": clean, "negatives": negatives,
+        "negatives_any_result": neg.get("any_result", 0),
         "failed_near_fix": neg.get("failed_near_fix", 0), "failed_trap": neg.get("failed_trap", 0),
+        "failed_in_scope": neg.get("failed_in_scope", 0),
+        "cross_family": sum(r.get("cross_family") or 0 for r in rows),
+        "complete_claims": sum(r.get("complete_claims") or 0 for r in report.usable(j["rows"])),
+        "matched_only": s.get("measurements_matched_only") or {},
+        "fixed_answer": s.get("fixed_answer_baselines") or {},
+        "empty_sarif": s.get("empty_sarif_baseline") or {},
+        "strict": s.get("strict") or {},
     }
 
 
@@ -378,6 +416,39 @@ def measure_value(j: dict, key: str) -> str:
     if key in (j["measures"].get("no_results") or []):
         return NO_RESULTS_MEASURE
     return fmt(j["measures"][key]) or "n/a"
+
+
+def matched_value(j: dict, key: str) -> str:
+    """A measurement over the matched findings only (unsupported and no-results as measure_value)."""
+    if j["measures"]["supported"].get(key) is False:
+        return NOT_SUPPORTED
+    if key in (j["measures"].get("no_results") or []):
+        return NO_RESULTS_MEASURE
+    matched = j["measures"].get("matched_only") or {}
+    return fmt(matched.get(key)) or "n/a"
+
+
+def baseline_value(j: dict, key: str, which: str = "per_app") -> str:
+    """The fixed-answer baseline of measurement 3 or 4 on this tool's scored positives."""
+    b = (j["measures"].get("fixed_answer") or {}).get(key) or {}
+    return fmt(b.get(which)) or "n/a"
+
+
+def strict_text(j: dict, role: str, key: str) -> str:
+    v = ((j["measures"].get("strict") or {}).get(role) or {})
+    if key == "recall":
+        return f"{fmt(v.get('recall')) or 'n/a'} ({v.get('tp', 0)}/{v.get('gt', 0)})" if v else "n/a"
+    if key == "failed":
+        return f"{v.get('failed', 0)}/{v.get('tasks', 0)}" if v else "n/a"
+    return fmt(v.get(key)) or "n/a"
+
+
+def empty_text(j: dict) -> str:
+    e = j["measures"].get("empty_sarif") or {}
+    pos, neg = (e.get("positive") or {}), (e.get("negative") or {})
+    if not (pos.get("tasks") or neg.get("tasks")):
+        return "n/a"
+    return f"{fmt(pos.get('mean_reward')) or 'n/a'} / {fmt(neg.get('mean_reward')) or 'n/a'}"
 
 
 # ---- versions --------------------------------------------------------------------------
@@ -408,7 +479,7 @@ def version_rows(jobs: list[dict]) -> list[list]:
         return f"{c['dropped_unmapped']}{' (' + top + ')' if top else ''}{unknown}"
 
     rows = [("Agent version", field("agent_version")), ("CWE map", field("cwe_map")),
-            ("Heuristics", field("heuristics"))]
+            ("Heuristics", field("heuristics")), ("Grader version", field("grader_version"))]
     if any(versions_of(j).get("claude") or versions_of(j)["fields"].get("category_map") for j in jobs):
         def category_map(j):
             v = versions_of(j)
@@ -416,8 +487,26 @@ def version_rows(jobs: list[dict]) -> list[list]:
 
         rows += [("Claude category map", category_map), ("Claude review mode", claude("mode")),
                  ("Claude auth", claude("auth")), ("Claude results label", claude("results_label")),
-                 ("Claude findings dropped, category not in the map", dropped)]
+                 ("Claude findings dropped, category not in the map", dropped),
+                 (HARNESS_LABEL, harness_text)]
     return [[label] + [fn(j) for j in jobs] for label, fn in rows]
+
+
+HARNESS_LABEL = ("Removed or changed before grading (harness and filter effects, not scanner false alarms)")
+
+
+def harness_text(j: dict) -> str:
+    """Per Claude review job: what the harness and the reviewer's false-alarm filter removed or changed
+    before grading, from the SARIF run properties or the agent metadata."""
+    if not versions_of(j).get("claude"):
+        return ""
+    effects = j["summary"].get("harness_effects")
+    if effects is None:
+        effects = report.harness_totals(j["rows"])
+    if not effects:
+        return "not recorded"
+    nonzero = {k: v for k, v in effects.items() if v}
+    return ", ".join(f"{k} {v}" for k, v in nonzero.items()) if nonzero else "none"
 
 
 def version_warnings(jobs: list[dict]) -> list[str]:
@@ -427,7 +516,7 @@ def version_warnings(jobs: list[dict]) -> list[str]:
         text = report.mixed_versions_warning(versions_of(j), f"the trials of {j['key']}")
         if text:
             out.append(text[0].upper() + text[1:])
-    for name in ("agent_version", "cwe_map", "heuristics", "category_map"):
+    for name in ("agent_version", "cwe_map", "heuristics", "category_map", "grader_version"):
         values: dict = {}
         for j in jobs:
             for v in versions_of(j)["fields"].get(name) or {}:
@@ -478,6 +567,11 @@ def dataset(jobs: list[dict]) -> dict:
             sets[{("SID", "EA"): "both", ("SID",): "SID only", ("EA",): "EA only"}.get(t["risks"], "neither")] += 1
     all_rows = [r for j in jobs for r in j["rows"]]
     per_tool = {j["key"]: sorted({r["task"] for r in j["rows"]}) for j in jobs}
+    # One scored positive per task, over every job, for the baselines over the whole run.
+    first_pos: dict = {}
+    for r in all_rows:
+        if r.get("role") == "positive" and r.get("_truth") and report.is_scored(r):
+            first_pos.setdefault(r["task"], r)
     union = sorted(tasks)
     return {
         "tasks": len(tasks), "families": len({t["family"] for t in tasks.values()}),
@@ -491,6 +585,8 @@ def dataset(jobs: list[dict]) -> dict:
         "same_task_set": all(v == union for v in per_tool.values()),
         "missing_by_tool": {k: [t for t in union if t not in set(v)] for k, v in per_tool.items()
                             if v != union},
+        "fixed_answer_baselines": report.fixed_answer_baselines(list(first_pos.values())),
+        "empty_sarif_baseline": report.empty_sarif_baseline(all_rows),
     }
 
 
@@ -622,20 +718,49 @@ def headline(jobs: list[dict]) -> list[list]:
         row("Exact risk set, positives", lambda j: exact(j, "positive")),
         row("Exact risk set, negatives (neither)", lambda j: exact(j, "negative")),
         row("Negatives clean", neg_clean),
-        row("Negatives failed on a decoy / next to the fix",
-            lambda j: f"{role(j, 'negative', 'failed_trap')} / {role(j, 'negative', 'failed_near_fix')}"),
+        row("Negatives with any result in scope (counted or not)",
+            lambda j: f"{j['measures']['negatives_any_result']}/{j['measures']['negatives']}"),
+        row("Negatives failed on a decoy / next to the fix / anywhere in scope",
+            lambda j: f"{role(j, 'negative', 'failed_trap')} / {role(j, 'negative', 'failed_near_fix')} / "
+                      f"{role(j, 'negative', 'failed_in_scope') or 0}"),
         row("Mean reward, positives", lambda j: fmt(role(j, "positive", "mean_reward")) or "n/a"),
         row("Mean reward, negatives", lambda j: fmt(role(j, "negative", "mean_reward")) or "n/a"),
+        row(STRICT_ROWS[0], lambda j: strict_text(j, "positive", "recall")),
+        row(STRICT_ROWS[1], lambda j: strict_text(j, "positive", "mean_reward")),
+        row(STRICT_ROWS[2], lambda j: strict_text(j, "negative", "failed")),
+        row(STRICT_ROWS[3], lambda j: strict_text(j, "negative", "mean_reward")),
+        row(EMPTY_ROW, empty_text),
         row("Path tracing (measurement 2), mean on positives", lambda j: measure_value(j, "path")),
+        row("Path tracing (measurement 2), matched findings only", lambda j: matched_value(j, "path")),
         row("Mitigation detection (measurement 3), mean on positives", lambda j: measure_value(j, "controls")),
+        row("Mitigation detection (measurement 3), matched findings only", lambda j: matched_value(j, "controls")),
+        row(CONTROLS_BASELINE, lambda j: baseline_value(j, "controls")),
         row("Recommendation (measurement 4), mean on positives", lambda j: measure_value(j, "recommendations")),
-        row("OWASP mean TPR", lambda j: fmt(cat(j, "mean_TPR")) or "n/a"),
-        row("OWASP mean FPR", lambda j: fmt(cat(j, "mean_FPR")) or "n/a"),
-        row("OWASP score (mean TPR minus mean FPR)", lambda j: fmt(cat(j, "score")) or "n/a"),
+        row("Recommendation (measurement 4), matched findings only",
+            lambda j: matched_value(j, "recommendations")),
+        row(recs_baseline_label(jobs), lambda j: baseline_value(j, "recommendations")),
+        row("OWASP mean TPR", lambda j: report.macro_text(j["summary"]["categories"]["overall"], "mean_TPR")),
+        row("OWASP mean FPR", lambda j: report.macro_text(j["summary"]["categories"]["overall"], "mean_FPR")),
+        row("OWASP score (mean TPR minus mean FPR)",
+            lambda j: report.macro_text(j["summary"]["categories"]["overall"], "score")),
         row("Results outside scope (not scored)", lambda j: j["summary"]["fp_outside_scope"]),
         row("Mean setup seconds", lambda j: f"{setup(j):.1f}" if setup(j) is not None else "n/a"),
         row("Mean scan seconds", lambda j: f"{scan(j):.1f}" if scan(j) is not None else "n/a"),
     ]
+
+
+STRICT_ROWS = ("Recall, strict (unfinished trials count as misses)",
+               "Mean reward, positives, strict (unfinished trials score 0)",
+               "Negatives failed, strict (unfinished trials count as failed)",
+               "Mean reward, negatives, strict (unfinished trials score 0)")
+EMPTY_ROW = "Empty SARIF baseline, mean reward on positives / negatives (current grader)"
+CONTROLS_BASELINE = "Fixed answer baseline: controlStatus none, residualRisk high on every finding (mean on positives)"
+
+
+def recs_baseline_label(jobs: list[dict]) -> str:
+    rec = next((((j["measures"].get("fixed_answer") or {}).get("recommendation_id")) for j in jobs
+                if (j["measures"].get("fixed_answer") or {}).get("recommendation_id")), None)
+    return (f"Fixed answer baseline: recommendations [{rec or 'none found'}] on every finding (mean on positives)")
 
 
 def measurement_rows(jobs: list[dict]) -> list[list]:
@@ -652,11 +777,26 @@ def measurement_rows(jobs: list[dict]) -> list[list]:
         [frac(j["measures"]["near"], j["measures"]["gt_with_metadata"]) for j in jobs],
         ["Near, with an acceptable CWE"] + [frac(j["measures"]["near_cwe"], j["measures"]["gt_with_metadata"]) for j in jobs],
         ["Path score, mean on positives (measurement 2)"] + [measure_value(j, "path") for j in jobs],
+        ["Path score, matched findings only"] + [matched_value(j, "path") for j in jobs],
         ["Matched detections with a code flow"] + [f"{j['measures']['hits_with_flow']}/{j['measures']['hits']}" for j in jobs],
         ["Control and residual-risk score, mean on positives (measurement 3)"] + [measure_value(j, "controls") for j in jobs],
+        ["Control and residual-risk score, matched findings only"] + [matched_value(j, "controls") for j in jobs],
+        [CONTROLS_BASELINE] + [baseline_value(j, "controls") for j in jobs],
+        ["Fixed answer none/high, mean per finding (compare with matched findings only)"] +
+        [baseline_value(j, "controls", "per_finding") for j in jobs],
         ["Negatives clean (measurement 3, other side)"] +
         [f"{j['measures']['negatives_clean']}/{j['measures']['negatives']}" for j in jobs],
+        ["Negatives with any result in scope (counted or not)"] +
+        [f"{j['measures']['negatives_any_result']}/{j['measures']['negatives']}" for j in jobs],
         ["Recommendation score, mean on positives (measurement 4)"] + [measure_value(j, "recommendations") for j in jobs],
+        ["Recommendation score, matched findings only"] + [matched_value(j, "recommendations") for j in jobs],
+        [recs_baseline_label(jobs)] + [baseline_value(j, "recommendations") for j in jobs],
+        ["Fixed recommendation, mean per finding (compare with matched findings only)"] +
+        [baseline_value(j, "recommendations", "per_finding") for j in jobs],
+        ["Matched findings credited across risk families through the CWE (cross_family)"] +
+        [str(j["measures"].get("cross_family", 0)) for j in jobs],
+        ["Results claiming a complete control (complete_claims, neither failed nor counted as FP)"] +
+        [str(j["measures"].get("complete_claims", 0)) for j in jobs],
         ["Graded results with codeFlows / controlStatus or residualRisk / recommendations"] +
         [f"{withr(j, 'codeFlows')} / {max(withr(j, 'controlStatus'), withr(j, 'residualRisk'))} / "
          f"{withr(j, 'recommendations')}" for j in jobs],
@@ -670,12 +810,26 @@ def category_rows(jobs: list[dict]) -> list[list]:
         line = [c]
         for j in jobs:
             v = j["summary"]["categories"]["per_category"].get(c)
-            line.append("" if not v else
-                        f"TPR {fmt(v['TPR']) or 'n/a'} ({v['TP']} of {v['positives']} positives), "
-                        f"FPR {fmt(v['FPR']) or 'n/a'} ({v['FP']} of {v['negatives']} negatives), "
-                        f"score {fmt(v['youden']) or 'n/a'}")
+            cannot = c in (j["summary"]["categories"]["overall"].get("cannot_emit") or [])
+            text = "" if not v else (
+                f"n {count_of(v['positives'], 'positive')}, {count_of(v['negatives'], 'negative')}: "
+                f"TPR {fmt(v['TPR']) or 'n/a'} ({v['TP']} of {v['positives']}), "
+                f"FPR {fmt(v['FPR']) or 'n/a'} ({v['FP']} of {v['negatives']}), "
+                f"score {fmt(v['youden']) or 'n/a'}")
+            if cannot:
+                text = (text + ". " if text else "") + CANNOT_EMIT
+            line.append(text)
         out.append(line)
+    out.append(["Mean score over the categories it can emit"] +
+               [report.macro_text(j["summary"]["categories"]["overall"], "score") for j in jobs])
     return out
+
+
+CANNOT_EMIT = "Cannot emit this category (ruleIds from the CWE map), left out of its mean"
+
+
+def count_of(n: int, noun: str) -> str:
+    return f"{n} {noun}{'' if n == 1 else 's'}"
 
 
 def risk_rows(jobs: list[dict], key: str) -> list[list]:
@@ -768,8 +922,14 @@ def matrix_rows(jobs: list[dict]) -> list[list]:
             if t["role"] == "unknown" and o["role"] != "unknown":
                 t["role"] = o["role"]
         cells.append(mine)
+    names = {}
+    for j in jobs:
+        for r in j["rows"]:
+            if r.get("family_name") and r["family_name"] != r["family"]:
+                names.setdefault(r["task"], r["family_name"])
     order = sorted(tasks, key=lambda k: (str(tasks[k]["family"]), ROLE_ORDER.get(tasks[k]["role"], 2), k))
-    return [[tasks[k]["family"], k, tasks[k]["role"]] + [c.get(k, "not run") for c in cells] for k in order]
+    return [[tasks[k]["family"] + (f" ({names[k]})" if names.get(k) else ""), k, tasks[k]["role"]] +
+            [c.get(k, "not run") for c in cells] for k in order]
 
 
 def funnel_rows(jobs: list[dict]) -> list[list]:
@@ -821,8 +981,33 @@ def observations(jobs: list[dict]) -> list[dict]:
                 parts.append(f"{neg['failed_trap']} on a decoy")
             if neg["failed_near_fix"]:
                 parts.append(f"{neg['failed_near_fix']} next to the fixed code")
+            if neg.get("failed_in_scope"):
+                parts.append(f"{neg['failed_in_scope']} anywhere in scope")
             notes.append({"tool": j["key"], "text": f"{j['key']} failed {neg['failed']} of {neg['tasks']} "
                           f"negatives ({' and '.join(parts)}), so it flags safe code as vulnerable there."})
+        overall = s["categories"]["overall"]
+        if overall.get("excluded_cannot_emit"):
+            notes.append({"tool": j["key"], "text": f"{j['key']} takes its ruleIds from the CWE map, which no CWE "
+                          f"maps to {', '.join(overall['excluded_cannot_emit'])}. That category is shown in its "
+                          "row but left out of the tool's OWASP mean."})
+        strict = s.get("strict") or {}
+        if strict.get("differs"):
+            sp, sn = strict["positive"], strict["negative"]
+            reasons = Counter()
+            for role in report.ROLES:
+                reasons.update(strict[role].get("reasons") or {})
+            notes.append({"tool": j["key"], "text": f"{j['key']}: {sp['unfinished'] + sn['unfinished']} trial(s) "
+                          f"ended without a scored answer ({', '.join(f'{k} x{v}' for k, v in reasons.items())}). "
+                          f"The strict view counts them as misses and failures: recall "
+                          f"{fmt(sp.get('recall')) or 'n/a'} ({sp.get('tp', 0)}/{sp.get('gt', 0)}), negatives "
+                          f"failed {sn.get('failed', 0)}/{sn['tasks']}."})
+        effects = j["summary"].get("harness_effects") or {}
+        if versions_of(j).get("claude") and any(effects.values()):
+            notes.append({"tool": j["key"], "text": f"{j['key']}: before grading, the harness and the reviewer's "
+                          "false-alarm filter removed or changed findings ("
+                          + ", ".join(f"{k} {v}" for k, v in effects.items() if v) +
+                          "). These are harness and filter effects, not scanner false alarms, and some of them "
+                          "may have been correct findings."})
     unsupported = [m for m in ("path", "controls", "recommendations")
                    if jobs and all(j["measures"]["supported"].get(m) is False for j in jobs)]
     if unsupported:
@@ -833,6 +1018,10 @@ def observations(jobs: list[dict]) -> list[dict]:
         notes.append({"tool": None, "text": "No tool put " + joined +
                       " in a field the grader reads, so those measurements are shown as not supported by "
                       "these tools rather than as 0."})
+    if any(j["summary"]["categories"]["overall"].get("too_few_tasks") for j in jobs):
+        notes.append({"tool": None, "text": f"The OWASP category means are shown as \"{report.TOO_FEW}\": a mean "
+                      f"is only given when every category in it has at least {report.MIN_CATEGORY_TASKS} positives "
+                      f"and {report.MIN_CATEGORY_TASKS} negatives. The per-category rows still give n."})
     tps = [(j["summary"]["pooled_detection"] or {}).get("tp") or 0 for j in jobs]
     if jobs and max(tps) == 0:
         notes.append({"tool": None, "text": "No tool detected any ground-truth finding. The OWASP scores are "
@@ -1010,7 +1199,25 @@ def tool_meaning(t: dict, j: dict) -> list[str]:
     if filter_off(claude):
         out.append(f"{name} was run on a subscription token, without the extra AI check that normally removes "
                    "false alarms.")
+    for key, verb, answer in (("controls", "judging existing protections", "a fixed answer"),
+                              ("recommendations", "suggesting fixes", "always suggesting the same fix")):
+        base = ((j["measures"].get("fixed_answer") or {}).get(key) or {}).get("per_app")
+        if t[key]["status"] == "scored" and base is not None and abs(t[key]["value"] - base) <= CLOSE + 1e-9:
+            out.append(f"Its {t[key]['text']} on {verb} is within 5 points of the {whole_percent(base)}% that "
+                       f"{answer} gets on the same apps, so that score shows little real skill.")
+    effects = dict(j["summary"].get("harness_effects") or {})
+    if claude and "stock" in (claude.get("mode") or {}):
+        # Already said above, in the sentence on the category list.
+        effects.pop(report.HARNESS_FIELDS[1][1], None)
+    removed = sum(v for v in effects.values() if isinstance(v, int))
+    if claude and removed:
+        out.append(f"Before our checker saw its answers, {removed} of its findings "
+                   f"{'was' if removed == 1 else 'were'} removed or changed by the reviewer's own false-alarm "
+                   f"filter or by our test setup. {'It is' if removed == 1 else 'They are'} not counted as its false alarms.")
     return out
+
+
+CLOSE = 0.05  # "within 5 points" of a fixed-answer score
 
 
 def filter_off(claude: dict | None) -> bool:
@@ -1072,7 +1279,12 @@ def read_first(jobs: list[dict], data: dict, tools: list[dict]) -> list[str]:
                        "alarms than usual.")
     if any("scoped" in (versions_of(j)["claude"].get("mode") or {}) for j, _ in claude_tools):
         out.append("In scoped mode the AI reviewer was told the answer format our checker scores, so its scores "
-                   "for paths, protections and fixes are not like-for-like with the other tools.")
+                   "for paths, protections and fixes are not like-for-like with the other tools. Its filter that "
+                   "removes false alarms is also slightly looser in scoped mode, because two of the usual "
+                   "exclusion rules are switched off.")
+    fixed = fixed_answer_caveat(data, tools)
+    if fixed:
+        out.append(fixed)
     cov = data.get("taxonomy_coverage") or {}
     if cov.get("known"):
         by_rule = cov.get("findings_by_rule") or {}
@@ -1098,7 +1310,62 @@ def read_first(jobs: list[dict], data: dict, tools: list[dict]) -> list[str]:
     return out
 
 
-def summary_notes(jobs: list[dict], data: dict) -> list[str]:
+def fixed_answer_caveat(data: dict, tools: list[dict]) -> str | None:
+    """What a fixed answer scores on judging protections and suggesting fixes, over all the vulnerable
+    apps, when some tool was scored on that measurement."""
+    base = data.get("fixed_answer_baselines") or {}
+    parts = []
+    ctrl = (base.get("controls") or {}).get("per_app")
+    if ctrl is not None and any(t["controls"]["status"] == "scored" for t in tools):
+        parts.append(f"Answering \"no protection, high risk\" for every known issue, without reading the code, "
+                     f"would score {whole_percent(ctrl)}% on judging existing protections.")
+    recs = (base.get("recommendations") or {}).get("per_app")
+    if recs is not None and any(t["recommendations"]["status"] == "scored" for t in tools):
+        parts.append(f"Suggesting the same fix for every known issue, the most common one on our list, would "
+                     f"score {whole_percent(recs)}% on suggesting fixes.")
+    if not parts:
+        return None
+    return ("A fixed answer already scores well on part of this. " + " ".join(parts) +
+            " Read the tools' scores there against these figures.")
+
+
+def strict_lines(jobs: list[dict], tools: list[dict]) -> list[str]:
+    """One plain line per tool whose numbers change when unfinished runs count as misses."""
+    out = []
+    for j, t in zip(jobs, tools):
+        strict = j["summary"].get("strict") or {}
+        if not strict.get("differs"):
+            continue
+        sp, sn = strict["positive"], strict["negative"]
+        k = sp["unfinished"] + sn["unfinished"]
+        parts = []
+        if sp["unfinished"]:
+            parts.append(f"found {sp.get('tp', 0)} of {sp.get('gt', 0)} known issues (not {t['found']} of "
+                         f"{t['total']})")
+        if sn["unfinished"]:
+            parts.append(f"wrongly flagged {sn.get('failed', 0)} of {sn['tasks']} fixed apps (not "
+                         f"{t['fixed_flagged']} of {t['fixed_apps']})")
+        out.append(f"{t['name']}: {k} of its runs did not finish or gave no answer, and the numbers above leave "
+                   f"{'it' if k == 1 else 'them'} out. Counting {'it as a miss' if k == 1 else 'them as misses'}, "
+                   f"it " + joined(parts) + ".")
+    return out
+
+
+def empty_report_line(data: dict) -> str | None:
+    e = data.get("empty_sarif_baseline") or {}
+    pos, neg = (e.get("positive") or {}).get("mean_reward"), (e.get("negative") or {}).get("mean_reward")
+    if pos is None and neg is None:
+        return None
+    parts = []
+    if pos is not None:
+        parts.append(f"{whole_percent(pos)} on the vulnerable apps")
+    if neg is not None:
+        parts.append(f"{whole_percent(neg)} on the fixed apps")
+    return ("A tool that warned about nothing at all would get an average score of " + joined(parts) +
+            " from our checker, so a perfect score on the fixed apps alone says nothing.")
+
+
+def summary_notes(jobs: list[dict], data: dict, tools: list[dict] | None = None) -> list[str]:
     """Caveats that apply to the whole comparison, after the tools. The main ones are in read_first."""
     notes = []
     if version_warnings(jobs):
@@ -1109,6 +1376,10 @@ def summary_notes(jobs: list[dict], data: dict) -> list[str]:
     if unfinished:
         notes.append(f"{unfinished} run{' did' if unfinished == 1 else 's did'} not finish cleanly and "
                      f"{'is' if unfinished == 1 else 'are'} left out of the numbers.")
+    notes += strict_lines(jobs, tools or [])
+    empty = empty_report_line(data)
+    if empty:
+        notes.append(empty)
     return notes
 
 
@@ -1135,6 +1406,9 @@ def task_set_size(tasks_dir: Path | None, variants_file: Path | None = None) -> 
     return full_task_set(tasks_dir, report.load_variants(report.default_variants(tasks_dir, variants_file)))
 
 
+FIXED_ANY = "Fixed apps with any warning in the checked code"
+
+
 def build_summary(jobs: list[dict], data: dict, generated: datetime | None = None,
                   full: dict | None = None) -> dict:
     """The plain-English summary: the numbers and the sentences, shared by the Markdown and the HTML.
@@ -1153,6 +1427,7 @@ def build_summary(jobs: list[dict], data: dict, generated: datetime | None = Non
         t = {"key": j["key"], "name": ident["name"], "kind": ident["kind"], "tested": ident["tested"],
              "found": det.get("tp") or 0, "total": det.get("gt") or 0, "false_alarms": det.get("fp") or 0,
              "fixed_flagged": fixed - clean, "fixed_apps": fixed,
+             "fixed_any": j["summary"]["reward_by_role"]["negative"].get("any_result", 0),
              "score": whole_percent(reward) if reward is not None else None,
              "no_results": j["no_results"], "risks": risk_issues(j),
              "wrong_type": j.get("wrong_type_findings") or 0}
@@ -1165,6 +1440,7 @@ def build_summary(jobs: list[dict], data: dict, generated: datetime | None = Non
         ["Known issues found"] + [of_text(t["found"], t["total"]) for t in tools],
         ["False alarms on the vulnerable apps"] + [str(t["false_alarms"]) for t in tools],
         ["Fixed apps wrongly flagged"] + [f"{t['fixed_flagged']} of {t['fixed_apps']}" for t in tools],
+        [FIXED_ANY] + [f"{t['fixed_any']} of {t['fixed_apps']}" for t in tools],
         ["Average score on vulnerable apps (0–100)"] +
         [str(t["score"]) if t["score"] is not None else "not available" for t in tools],
     ] + [[label] + [t[key]["text"] for t in tools] for key, label, *_ in SUMMARY_MEASURES]
@@ -1180,7 +1456,9 @@ def build_summary(jobs: list[dict], data: dict, generated: datetime | None = Non
         {"term": "Known issue", "text": "A security problem we put in a vulnerable app and wrote down, with where "
          "it is and how it should be fixed. The tools never see this list."},
         {"term": "False alarm", "text": "A warning near the code we check that is not one of the known issues. On "
-         "a fixed app, a warning about the fixed code, or about safe code made to look risky, counts as one."},
+         "a fixed app, a warning about the fixed code, or about safe code made to look risky, counts as one. With "
+         "the newest checker, so does a warning of the fixed risk type anywhere in the checked code. Other "
+         "warnings in a fixed app are not counted, but the row on fixed apps with any warning shows them."},
         {"term": "Data disclosure", "text": "Private or sensitive data reaching someone who is not allowed to see "
          "it."},
         {"term": "Excessive agency", "text": "The AI agent can do more than its job needs: extra tool features, "
@@ -1194,6 +1472,11 @@ def build_summary(jobs: list[dict], data: dict, generated: datetime | None = Non
                          "instructions and answer format. Scoped mode adds extra instructions: the client's "
                          "definitions of each risk, and the answer format our checker scores (risk type, how the "
                          "issue is reached, existing protections, and a fix chosen from a fixed list)."})
+    first = read_first(jobs, data, tools)
+    if any("fixed answer" in line for line in first) or any(
+            "fixed answer" in line or "the same fix" in line for t in tools for line in t["meaning"]):
+        glossary.append({"term": "Fixed answer", "text": "The same answer given for every known issue without "
+                         "reading the code. Its score shows how much of a tool's score could come from that."})
     if any(t[key]["status"] == "free_text" for t in tools for key, *_ in SUMMARY_MEASURES):
         glossary.append({"term": "Free text, not scorable", "text": "The tool wrote this in its own words. Our "
                          "checker only scores answers in a fixed format, so it cannot give these a score, even "
@@ -1209,7 +1492,7 @@ def build_summary(jobs: list[dict], data: dict, generated: datetime | None = Non
                  "vulnerable apps.",
         "coverage": {"apps_run": apps, "families_run": data["families"],
                      "apps_total": (full or {}).get("tasks"), "families_total": (full or {}).get("families")},
-        "read_first": read_first(jobs, data, tools),
+        "read_first": first,
         "apps": apps, "vulnerable_apps": data["positives"], "fixed_apps": data["negatives"],
         "known_issues": data["gt_findings"],
         "tools": tools,
@@ -1217,7 +1500,7 @@ def build_summary(jobs: list[dict], data: dict, generated: datetime | None = Non
         "by_risk": {"columns": columns, "rows": by_risk},
         "charts_intro": CHARTS_INTRO,
         "charts": summary_charts(tools),
-        "notes": summary_notes(jobs, data),
+        "notes": summary_notes(jobs, data, tools),
         "glossary": glossary,
         "labels": {"not_provided": NOT_PROVIDED, "free_text": FREE_TEXT, "nothing_to_judge": NOTHING_TO_JUDGE},
         "details_title": "Details for reviewers",
@@ -1460,7 +1743,10 @@ METHOD = [
     "are outside scope and not scored. A task that lists no changed files counts every unmatched result.",
     "A negative fails on a result whose OWASP prefix is one of the contrasted prefixes and that lands within "
     "the line tolerance of the fixed code (next to the fix), or on a result with a decoy's prefix within "
-    "tolerance of that decoy. No CWE agreement is needed to fail. Every other result is outside scope.",
+    "tolerance of that decoy. Under grader v3.2 it also fails on a contrasted-prefix result anywhere in the "
+    "scanned scope (in_scope), and a failure counts against the category the result emitted. A result that "
+    "claims a complete control (controlStatus complete) is listed apart and neither fails a negative nor counts "
+    "as a false positive. No CWE agreement is needed to fail. Every other result is outside scope.",
     "Risk detection (measurement 1) counts a risk as predicted only from results that matched a finding or "
     "that fail the negative. TPR is over the positives labelled with the risk and FPR over the negatives only, "
     "since a positive without a risk can never predict it under this rule.",
@@ -1475,9 +1761,26 @@ METHOD = [
     "measurement is shown as not supported by that tool. When it matched none, it is shown as n/a (no "
     "results), since that shows nothing about the field. Agents that write heuristic values under "
     "properties.heuristics are not scored on them.",
+    "Constant-answer baselines for measurements 3 and 4 are scored with the grader's own functions on the same "
+    "ground truths: controlStatus none and residualRisk high for every finding, and the one recommendation id "
+    "most often required over all the jobs' findings for every finding. They assume every finding was "
+    "matched, so they are what a fixed answer earns, not what a tool earns by finding issues. The matched-"
+    "findings rows average the per-finding scores of matched findings only.",
+    "The empty SARIF baseline is the mean reward the current grader gives a SARIF with no results on the same "
+    "tasks, per role.",
     "Trials that errored, whose agent reported an error, whose SARIF was missing or whose grader crashed are "
     "not scored. Neither is a trial recorded before the role-free rename under a name whose role has since "
-    "changed, since it was graded against the old label. Their findings are named apart and not added to recall.",
+    "changed, since it was graded against the old label. Their findings are named apart and not added to recall. "
+    "The strict rows count every such trial (except the renamed ones), and every trial whose agent recorded a "
+    "tool_outcome, as a miss on a positive (reward 0, its findings unfound) and as a failure on a negative.",
+    "Category means (OWASP score) leave out the categories a tool cannot emit: the CWE map reaches no "
+    "LLM03.EA.AUTONOMY, so Semgrep, CodeQL, SonarQube and a stock Claude review are not averaged over it. A "
+    f"mean is shown only when every category in it has at least {report.MIN_CATEGORY_TASKS} positives and "
+    f"{report.MIN_CATEGORY_TASKS} negatives, else it reads \"{report.TOO_FEW}\".",
+    "The near rows (location recall) pair findings with raw results one to one, so a result within tolerance of "
+    "two findings counts for one of them.",
+    "Families are named by the task's own family_id (task_metadata.json or task.toml), with the private variant "
+    "map's family name in brackets in the task matrix.",
     "A task's role and family come from the private variant map when present, else from the task name, else "
     "from the ground truth. The reward never decides a role.",
 ]
@@ -1578,7 +1881,8 @@ def render(jobs: list[dict], tasks_dir: Path | None, data: dict | None = None,
     md_section(out, "False positives",
                "`unmatched` is a result on a positive, in a file the fix changed, that matched no finding (Traps "
                "names a decoy it landed on). `trap` is a result on a negative's decoy, `near_fix` a result on a "
-               "negative next to the fixed code.",
+               "negative next to the fixed code, `in_scope` (grader v3.2) a result of a contrasted family anywhere "
+               "in the scanned scope of a negative.",
                t(["Tool", "Task", "Kind", "Rule", "Location", "Traps"], fps) if fps else ["", "None."])
     outside = Counter((j["label"], run_label(o)) for j in jobs for o in j["outside_scope"])
     rules: dict = {}
@@ -1646,7 +1950,8 @@ def build_payload(jobs: list[dict], tasks_dir: Path | None, data: dict | None = 
         "no_results_measure": NO_RESULTS_MEASURE,
         "no_results_badge": NO_RESULTS_BADGE,
         "harbor_mean_warning": report.HARBOR_MEAN_WARNING,
-        "tools": [{k: v for k, v in j.items() if k != "rows"} | {"trials": j["rows"]} for j in jobs],
+        "tools": [{k: v for k, v in j.items() if k != "rows"} | {"trials": [report.public_row(r) for r in j["rows"]]}
+                  for j in jobs],
     }
 
 
@@ -1666,7 +1971,7 @@ def render_html(payload: dict) -> str:
 
 CSV_COLUMNS = ["tool", "task", "family", "role", "status", "reward", "tp", "fp", "fn", "gt", "fp_out", "raw",
                "security", "emitted", "setup_s", "scan_s", "detection", "classification", "path", "controls",
-               "recommendations", "neg_fail_trap", "neg_fail_near_fix", "error"]
+               "recommendations", "neg_fail_trap", "neg_fail_near_fix", "neg_fail_in_scope", "grader_version", "error"]
 
 
 def main() -> None:
@@ -1689,6 +1994,7 @@ def main() -> None:
         jobs.append(collect(job, args.tasks, variants))
     if not jobs:
         sys.exit("eval_report: no Harbor trials found in any of the given folders")
+    apply_common_baselines(jobs)
     assign_keys(jobs)
     data = dataset(jobs)
     task_set = report.task_set_state(args.tasks)  # read once, so every output states the same

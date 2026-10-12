@@ -484,6 +484,14 @@ const noResults = (t, k) => (M(t).no_results || []).includes(k);
 const measureCell = (t, k, value, tipText) => !supported(t, k) ? nsCell()
   : noResults(t, k) ? el("span", { class: "ns", "data-tip": `${t.key} matched no finding, so this cannot be scored` }, NR())
   : meter(value, t, tipText);
+// Measurements 2 to 4 over the matched findings only, and the fixed-answer baselines of 3 and 4.
+const matchedCell = (t, k) => measureCell(t, k, (M(t).matched_only || {})[k],
+  `Mean over the ${(M(t).matched_only || {}).findings ?? 0} matched findings only`);
+const fixedOf = (t, k) => ((M(t).fixed_answer || {})[k]) || {};
+const fixedCell = (t, k, tipText) => fixedOf(t, k).per_app === null || fixedOf(t, k).per_app === undefined ? "n/a"
+  : meter(fixedOf(t, k).per_app, null, `${tipText}, mean over ${fixedOf(t, k).tasks} positives (per finding ${num(fixedOf(t, k).per_finding)})`);
+const TOO_FEW = "too few tasks";
+const macro = (t, key) => cat(t).suppressed ? TOO_FEW : num(cat(t)[key]);
 
 // ---- reusable pieces ---------------------------------------------------------------
 function meter(value, t, tipText, invert) {
@@ -603,14 +611,15 @@ function renderScoreboard() {
     const v = r[colOf.get(t.key)];
     return v === NS() ? nsCell() : v === NR() ? el("span", { class: "ns" }, NR()) : String(v ?? "");
   })]);
-  const chart = barChart(ts.map(t => chartItem(t, cat(t).score, `TPR ${num(cat(t).mean_TPR)}, FPR ${num(cat(t).mean_FPR)}`)),
+  const chart = barChart(ts.map(t => chartItem(t, cat(t).suppressed ? null : cat(t).score,
+    cat(t).suppressed ? `${TOO_FEW}: a category has fewer than ${cat(t).min_tasks_per_side || 5} positives or negatives` : `TPR ${num(cat(t).mean_TPR)}, FPR ${num(cat(t).mean_FPR)}`)),
     { min: -1, max: 1, label: "OWASP Benchmark style score per scanner, from -1 to 1" });
   return el("section", { class: "block", "aria-labelledby": "score-h" },
     el("h2", { id: "score-h" }, "Scoreboard"),
     el("p", { class: "lede" }, "The same rows as the scoreboard in eval_report.md. Positives and negatives are always scored apart, since a scanner that reports nothing passes every negative. \"" + NS() + "\" means the scanner matched a finding but no graded result of it carries the field the grader reads. \"" + NR() + "\" means it matched no finding, so that cannot be told."),
     table(["Measure", ...ts.map(toolHead)], rows, ts.map((_, i) => i + 1)),
     el("h3", {}, "OWASP Benchmark style score per scanner"),
-    el("p", { class: "small" }, "Mean true positive rate minus mean false positive rate over the taxonomy categories. 1 is perfect. 0 is what guessing earns, and also what reporting nothing earns."),
+    el("p", { class: "small" }, "Mean true positive rate minus mean false positive rate over the taxonomy categories the scanner can emit. 1 is perfect. 0 is what guessing earns, and also what reporting nothing earns. No bar (n/a) means " + TOO_FEW + ": the mean is only drawn when every category in it has at least 5 positives and 5 negatives."),
     chart, chartFootnote(ts));
 }
 
@@ -670,41 +679,48 @@ function renderM2() {
   const ts = shown();
   return section("m2", "Measurement 2", "Reachability and path tracing",
     "Does the scanner identify the weakness, the affected asset and the reachable path from the source or model decision to the sink or action? Scored on positive tasks against each ground-truth finding.",
-    table(["Scanner", "Findings matched", "Finding recall", "Raw result near the finding", "Near, with an acceptable CWE", "Path score (mean)", "Detections with a code flow"],
+    table(["Scanner", "Findings matched", "Finding recall", "Raw result near the finding", "Near, with an acceptable CWE", "Path score (mean)", "Path score, matched findings only", "Detections with a code flow"],
       ts.map(t => { const m = M(t); return [toolHead(t), `${m.matched ?? 0} / ${m.gt ?? 0}`,
         meter(m.finding_recall, t, "Matched as the grader does: same risk family, within the line tolerance, and a shared CWE"),
         meter(m.near_recall, t, `${m.near ?? "n/a"} of ${m.gt_with_metadata ?? "n/a"}: any security result of the scanner within the line tolerance of the finding, before OWASP mapping`),
         meter(m.near_cwe_recall, t, `${m.near_cwe ?? "n/a"} of ${m.gt_with_metadata ?? "n/a"}: as before, and the raw result carries the finding's primary CWE or an acceptable one`),
         measureCell(t, "path", m.path, "Share of the labelled path steps covered by the result's codeFlows, averaged over every finding (missed findings score 0)"),
-        `${m.hits_with_flow ?? 0} / ${m.hits ?? 0}`]; }), [1, 6]),
-    el("p", { class: "note" }, "The two near columns look at the scanner's raw output, before anything is mapped to an OWASP rule. They show how close a scanner came even when it reported the wrong risk or no rule. \"" + NS() + "\" means no graded result of the scanner has a codeFlows entry, so the path score cannot be earned. \"" + NR() + "\" means it matched no finding, so that cannot be told."));
+        matchedCell(t, "path"),
+        `${m.hits_with_flow ?? 0} / ${m.hits ?? 0}`]; }), [1, 7]),
+    el("p", { class: "note" }, "The two near columns look at the scanner's raw output, before anything is mapped to an OWASP rule, and pair each finding with a different raw result (one result never counts for two findings). They show how close a scanner came even when it reported the wrong risk or no rule. \"" + NS() + "\" means no graded result of the scanner has a codeFlows entry, so the path score cannot be earned. \"" + NR() + "\" means it matched no finding, so that cannot be told."));
 }
 
 function renderM3() {
   const ts = shown();
   return section("m3", "Measurement 3", "Mitigation detection",
     "Can the scanner tell vulnerable code from code with partial or complete controls, and judge the residual risk? On positives this is the control status and residual risk of each matched result. The ambiguous negatives, where a working control is the main difference, test the same skill from the other side.",
-    table(["Scanner", "Control and residual-risk score (positives, mean)", "Ambiguous negatives judged clean", "Flagged next to the fixed code", "Flagged on a decoy"],
+    table(["Scanner", "Control and residual-risk score (positives, mean)", "Matched findings only", "Fixed answer none/high on every finding", "Ambiguous negatives judged clean", "Negatives with any result in scope", "Flagged next to the fixed code", "Flagged on a decoy", "Flagged anywhere in scope"],
       ts.map(t => { const m = M(t);
         return [toolHead(t), measureCell(t, "controls", m.controls, "controlStatus (75%) and residualRisk (25%) compared with the labels, missed findings score 0"),
+          matchedCell(t, "controls"),
+          fixedCell(t, "controls", "controlStatus none and residualRisk high on every finding, scored by the grader"),
           meter(ratio(m.negatives_clean, m.negatives), t, `${m.negatives_clean} of ${m.negatives} negatives with no failing result`),
-          String(m.failed_near_fix || 0), String(m.failed_trap || 0)]; }), [3, 4]),
-    el("p", { class: "note" }, "A negative counts as clean unless a result of a contrasted OWASP prefix (LLM02 or LLM03) lands next to the fixed code, or a result with a decoy's prefix lands on that decoy. Results elsewhere in the repository are listed under scanner output but not held against it."));
+          `${m.negatives_any_result ?? 0} / ${m.negatives ?? 0}`,
+          String(m.failed_near_fix || 0), String(m.failed_trap || 0), String(m.failed_in_scope || 0)]; }), [5, 6, 7, 8]),
+    el("p", { class: "note" }, "The fixed answer column is what controlStatus none and residualRisk high on every finding earns, scored with the grader's own functions on the same positives as if every finding were matched. A score close to it shows little judgement. A negative counts as clean unless a result of a contrasted OWASP prefix (LLM02 or LLM03) lands next to the fixed code, or a result with a decoy's prefix lands on that decoy. Results elsewhere in the repository are not held against it, so the any-result column counts them too."));
 }
 
 function renderM4() {
   const ts = shown();
   return section("m4", "Measurement 4", "Mitigation recommendation",
     "Does the scanner recommend risk-specific controls where they are missing or ineffective, such as authorizing before retrieval, minimising context, sink-side enforcement, least-privilege tools and exact-action approval?",
-    table(["Scanner", "Recommendation score (positives, mean)", "Matched detections"],
-      ts.map(t => [toolHead(t), measureCell(t, "recommendations", M(t).recommendations, "Recommendations that apply to the finding earn credit, inapplicable ones are penalised, missed findings score 0"), String((t.hits || []).length)]), [2]),
+    table(["Scanner", "Recommendation score (positives, mean)", "Matched findings only", `Fixed answer ${(M(DATA.tools[0] || {}).fixed_answer || {}).recommendation_id || ""} on every finding`, "Matched detections"],
+      ts.map(t => [toolHead(t), measureCell(t, "recommendations", M(t).recommendations, "Recommendations that apply to the finding earn credit, inapplicable ones are penalised, missed findings score 0"),
+        matchedCell(t, "recommendations"),
+        fixedCell(t, "recommendations", `The single most common required recommendation id (${(M(t).fixed_answer || {}).recommendation_id || "none"}) on every finding, scored by the grader`),
+        String((t.hits || []).length)]), [4]),
     el("p", { class: "note" }, "Only the top-level recommendations property of a matched result is scored. Agents that write fixed heuristic recommendations under properties.heuristics are not scored on them, so a scanner with no recommendations of its own shows \"" + NS() + "\"."));
 }
 
 function renderNegatives() {
   const ts = shown();
   const fps = ts.flatMap(t => (t.false_positives || []).filter(f => f.kind !== "unmatched").map(f => [toolHead(t), f.family || parseTaskName(f.task)[0], runLabel(f),
-    f.kind === "trap" ? "Decoy" : "Next to the fix", code(f.rule || ""), code(loc(f.location)), f.traps || ""]));
+    f.kind === "trap" ? "Decoy" : f.kind === "in_scope" ? "Anywhere in scope" : "Next to the fix", code(f.rule || ""), code(loc(f.location)), f.traps || ""]));
   const chart = barChart(ts.map(t => { const m = M(t); return chartItem(t, ratio(m.negatives_clean, m.negatives), `${m.negatives_clean} of ${m.negatives}`); }),
     { min: 0, max: 1, label: "Share of ambiguous negatives judged clean per scanner" });
   return section("negatives", "Ambiguous negatives", "Hard negatives near the P/N boundary",
@@ -733,10 +749,11 @@ const ROLE_RANK = { positive: 0, negative: 1 };
 function renderFamilies() {
   const ts = shown();
   const fams = new Map();
-  const famOf = id => { if (!fams.has(id)) fams.set(id, { id, cats: new Set(), tasks: new Map(), byTool: new Map() }); return fams.get(id); };
+  const famOf = id => { if (!fams.has(id)) fams.set(id, { id, name: null, cats: new Set(), tasks: new Map(), byTool: new Map() }); return fams.get(id); };
   for (const t of ts) {
     for (const r of t.trials) {
       const f = famOf(r.family);
+      if (r.family_name && r.family_name !== r.family) f.name = r.family_name;
       if (!f.tasks.has(r.task)) f.tasks.set(r.task, { role: r.role || "unknown", gt: null, raw: new Map() });
       const task = f.tasks.get(r.task);
       if (task.role === "unknown" && r.role) task.role = r.role;
@@ -788,12 +805,12 @@ function renderFamilies() {
       return el("div", {}, el("p", {}, toolHead(t)),
         table(["Task", "Outcome", "Rule", "Location", "Decoy"],
           [...hits.map(h => [who(h), status("ok", "matched " + h.finding), code(h.rule), code(loc(h.location)), ""]),
-           ...fps.map(x => [who(x), status("bad", { unmatched: "unmatched", trap: "on a decoy", near_fix: "next to the fix" }[x.kind] || x.kind), code(x.rule), code(loc(x.location)), x.traps || ""]),
+           ...fps.map(x => [who(x), status("bad", { unmatched: "unmatched", trap: "on a decoy", near_fix: "next to the fix", in_scope: "anywhere in scope" }[x.kind] || x.kind), code(x.rule), code(loc(x.location)), x.traps || ""]),
            ...outs.map(x => [who(x), status("na", "outside scope (not scored)"), code(x.rule), code(loc(x.location)), ""])]));
     });
     return el("details", { class: "fam" },
       el("summary", { style: `grid-template-columns:${cols}` },
-        el("div", {}, el("span", { class: "caret", "aria-hidden": "true" }, "▸"), " ", el("strong", { class: "mono" }, f.id),
+        el("div", {}, el("span", { class: "caret", "aria-hidden": "true" }, "▸"), " ", el("strong", { class: "mono" }, f.id), f.name ? el("span", { class: "small mono" }, ` (${f.name})`) : null,
           el("div", {}, [...f.cats].sort().map(c => el("span", { class: "tag", "data-tip": c }, SHORT_CATEGORY[c] || c)),
             hasGt ? el("span", { class: "small" }, ` ${plural(gtSum, "finding")}`) : null)),
         cells),
@@ -812,11 +829,16 @@ function renderTaxonomy() {
     return [i === 0 ? el("strong", {}, CATEGORY_LABEL[c] || c) : "", toolHead(t),
       meter(v.TPR, t, `${v.TP || 0} of ${P} positives labelled with this category detected`),
       meter(v.FPR, null, `${v.FP || 0} of ${N} negatives that contrast this category flagged`, true),
-      num(v.youden), `${v.TP || 0} / ${P}`, `${v.FP || 0} / ${N}`]; }));
+      num(v.youden), `${P} / ${N}`, `${v.TP || 0} / ${P}`, `${v.FP || 0} / ${N}`,
+      (cat(t).cannot_emit || []).includes(c) ? el("span", { class: "ns", "data-tip": "Its ruleIds come from the CWE map, and no CWE maps to this category" }, "cannot emit, left out of its mean") : ""]; }));
+  const means = ts.map(t => [toolHead(t), macro(t, "mean_TPR"), macro(t, "mean_FPR"), macro(t, "score"),
+    (cat(t).excluded_cannot_emit || []).join(", ") || "none"]);
   return section("taxonomy", "Risk taxonomy", "Scores per taxonomy category (OWASP Benchmark style)",
     "Every scored task is a test case for each category it is labelled with: a positive for the categories of its findings, a negative for the categories it contrasts. The score per category is the true positive rate minus the false positive rate (Youden), as in the OWASP Benchmark scorecard, but with this benchmark's matching rules and test cases.",
-    table(["Category", "Scanner", "TPR", "FPR", "Score", "TP / positives", "FP / negatives"], rows, [4, 5, 6]),
-    el("p", { class: "note" }, "On a negative, a category counts as flagged when a failing result has the same OWASP prefix (LLM02 or LLM03), so an Excessive Agency result of any subtype flags an Excessive Agency negative. The overall score is the mean over the categories that have both positives and negatives."),
+    table(["Category", "Scanner", "TPR", "FPR", "Score", "n positives / negatives", "TP / positives", "FP / negatives", "Note"], rows, [4, 5, 6, 7]),
+    el("h3", {}, "Means over the categories"),
+    table(["Scanner", "Mean TPR", "Mean FPR", "Score", "Left out: cannot emit"], means, [1, 2, 3]),
+    el("p", { class: "note" }, "On a negative, a category counts as flagged when a failing result has the same OWASP prefix (LLM02 or LLM03), so an Excessive Agency result of any subtype flags an Excessive Agency negative. The means are over the categories that have both positives and negatives and that the scanner can emit (Semgrep, CodeQL, SonarQube and a stock Claude review take their rule from the CWE map, which never gives LLM03.EA.AUTONOMY). A mean reads \"" + TOO_FEW + "\" when any category in it has fewer than 5 positives or 5 negatives."),
     DATA.coverage_note ? el("p", { class: "note" }, DATA.coverage_note) : null);
 }
 

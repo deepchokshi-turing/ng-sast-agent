@@ -165,7 +165,8 @@ def test_job_directory_mode_still_works(tmp_path):
             "agent_result": {"metadata": {"status": "ok"}}}))
     proc = subprocess.run([sys.executable, str(REPORT), str(tmp_path / "jobs")], check=True,
                           capture_output=True, text=True)
-    assert "trials 4, graded 4" in proc.stdout and "mean TPR 0.750" in proc.stdout
+    # Categories of one or two tasks per side: the category means are not printed (audit A6).
+    assert "trials 4, graded 4" in proc.stdout and "mean TPR too few tasks" in proc.stdout
     rows = json.loads(subprocess.run([sys.executable, str(REPORT), str(job), "--json"], check=True,
                                      capture_output=True, text=True).stdout)
     assert [r["fp_out"] for r in rows] == [1, 1, 1, 1]

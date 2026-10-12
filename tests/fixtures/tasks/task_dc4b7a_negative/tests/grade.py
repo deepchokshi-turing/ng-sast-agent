@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Grade a scanner's SARIF output against ground_truth.json.
 
-grader v3 (2026-10-07, revised after the audit the same day). Every new field
-is optional. A ground truth without them is graded exactly as by v2 (and a v2
-task without the v2 fields exactly as by v1).
+grader v3.2 (v3: 2026-10-07, revised after the audit the same day; v3.1 and
+v3.2: 2026-10-12). Every field added since v1 is optional. v3.2 changes how
+some results are scored whatever the fields (see "v3.2" below); without the
+v3.2 fields it falls back to ``fix_changed_files`` and ``trap_rule_prefixes``.
 
 v2 fields:
 
@@ -58,6 +59,30 @@ v3.1 (2026-10-12):
   their complete ``controls`` and ``residual_risk``. None of these fields
   changes how a positive is graded.
 
+v3.2 (2026-10-12, scoring changes made in response to the external audit; see
+task_format/README.md, "v3.2"). ``GRADER_VERSION`` is written to grading_detail.json.
+
+- Scope (``scope_of``): ``matching.scanner_roots`` minus ``matching.excluded_paths``,
+  else ``fix_changed_files``, else the whole repo.
+- Negatives (F-B1, A7): a contrast-family result anywhere in scope fails the
+  negative (bucket ``in_scope``, flag ``neg.fail.in_scope``), next to
+  ``near_fix`` and ``trap``. A result with ``controlStatus`` "complete" is never
+  a failure (``complete_claims``); the v3.1 complete-control credit is kept.
+  An empty SARIF scores 1.0, a missing SARIF 0 on both sides.
+- Positives (F-M1): an unmatched result in scope is a false positive. A
+  "complete" result claims no weakness: it neither matches nor counts as a
+  false positive.
+- No cross-family match: a result matches only a finding of its own risk
+  family (OWASP Benchmark categories). A cross-family match on a shared CWE
+  (audit A1) was added in v3.2 and reverted on 2026-10-12.
+- Path (A3): ``coverage * (0.2 + 0.8 * order * role) * precision`` (``score_path``).
+- Traps (F-M5): ``trap_rule_ids`` on a trap, when present, are the exact rule
+  ids that fail it; otherwise ``trap_rule_prefixes`` as before.
+- Categories (A6): a failing result on a negative counts against its own
+  category (``cat.<category>.detected``), not the contrast prefix.
+- ``norm_uri`` (m9) also strips ``file://``, everything up to ``/app/repo/``,
+  leading ``/`` and a leading ``repo/``.
+
 Matching (revised after audit 040, L3): results are matched to findings one to
 one by an optimal assignment that maximises the reward (see ``assign``), not
 greedily in file order. A partial-credit result therefore no longer takes a
@@ -105,17 +130,35 @@ import sys
 import traceback
 from pathlib import Path
 
+GRADER_VERSION = "v3.2"
 RISK_PREFIX = {"LLM02": "sensitive_information_disclosure", "LLM03": "excessive_agency"}
 RISK_SHORT = {"sensitive_information_disclosure": "SID", "excessive_agency": "EA"}
 MEASUREMENTS = ("classification", "path", "controls", "recommendations")
+KNOWN_CATEGORIES = ("LLM02.SID", "LLM03.EA.FUNCTIONALITY", "LLM03.EA.PERMISSIONS", "LLM03.EA.AUTONOMY")
 
 
-def norm_uri(uri: str) -> str:
-    uri = uri.replace("file://", "")
-    for prefix in ("/app/repo/", "app/repo/", "./"):
-        if uri.startswith(prefix):
-            uri = uri[len(prefix):]
-    return uri.lstrip("/")
+def norm_uri(uri) -> str:
+    """A repo-relative path from a SARIF uri.
+
+    Strips a ``file://`` scheme, everything up to and including ``/app/repo/``,
+    leading ``/`` and ``./``, and a leading ``repo/``. Backslashes are read as ``/``.
+    """
+    uri = str(uri or "").strip().replace("\\", "/")
+    if uri.lower().startswith("file://"):
+        uri = uri[len("file://"):]
+    cut = ("/" + uri).find("/app/repo/")
+    if cut >= 0:
+        uri = ("/" + uri)[cut + len("/app/repo/"):]
+    while True:
+        stripped = uri.lstrip("/")
+        if stripped.startswith("./"):
+            stripped = stripped[2:]
+        if stripped == uri:
+            break
+        uri = stripped
+    if uri.startswith("repo/"):
+        uri = uri[len("repo/"):]
+    return uri
 
 
 CWE_RE = re.compile(r"CWE-(\d+)", re.IGNORECASE)
@@ -201,20 +244,97 @@ def load_results(sarif_path: Path):
     return results
 
 
-def score_path(result: dict, finding: dict, tol: int):
-    flows = result.get("codeFlows") or []
+# Path roles. The output contract names seven roles. source and model_decision are
+# both the start of a path and count as one role. Older ground truths may still use
+# four legacy roles, which are read as their contract equivalents.
+ROLE_ALIASES = {"model_decision": "source", "tool_output": "model_consumption",
+                "pass_through": "context_assembly", "action": "sink", "control": "control_point"}
+# path = coverage * (PATH_BASE + (1 - PATH_BASE) * order * role) * precision
+PATH_BASE = 0.2
+PATH_SLACK = 2  # emitted steps allowed beyond the ground-truth path before precision drops
+
+
+def norm_role(role):
+    if not isinstance(role, str):
+        return None
+    role = role.strip().lower()
+    return ROLE_ALIASES.get(role, role) or None
+
+
+def flow_steps(result: dict) -> list:
+    """(file, start, end, role) of every threadFlow location of every codeFlow, in order."""
     steps = []
-    for flow in flows:
-        for tf in flow.get("threadFlows", []):
-            steps.extend(phys(l) for l in tf.get("locations", []))
+    for flow in result.get("codeFlows") or []:
+        if not isinstance(flow, dict):
+            continue
+        for tf in flow.get("threadFlows") or []:
+            if not isinstance(tf, dict):
+                continue
+            for loc in tf.get("locations") or []:
+                if not isinstance(loc, dict):
+                    continue
+                role = (loc.get("properties") or {}).get("role")
+                if role is None and isinstance(loc.get("location"), dict):
+                    role = (loc["location"].get("properties") or {}).get("role")
+                steps.append((*phys(loc), role))
+    return steps
+
+
+def longest_chain(candidates: list) -> int:
+    """Longest run of steps, in ground-truth order, whose emitted positions do not go back.
+
+    ``candidates[k]`` lists the emitted step indexes that cover the k-th covered
+    ground-truth step. Each step may use any one of its candidates, and two steps
+    may share one emitted step (both within tolerance of it).
+    """
+    best = []  # best[k][e]: longest chain ending at step k on emitted index e
+    top = 0
+    for k, cands in enumerate(candidates):
+        row = {}
+        for e in cands:
+            prev = [best[i][x] for i in range(k) for x in best[i] if x <= e]
+            row[e] = 1 + max(prev, default=0)
+            top = max(top, row[e])
+        best.append(row)
+    return top
+
+
+def score_path(result: dict, finding: dict, tol: int):
+    """Path score in [0, 1] and the per-step detail.
+
+    ``coverage`` is the share of required ground-truth steps that some emitted
+    threadFlow location lands within ``tol`` of (the step or one of its
+    ``alternatives``). Over the covered steps, ``order`` is the longest chain of
+    them whose emitted positions follow the ground-truth order, divided by the
+    covered count, and ``role`` is the share whose covering location carries the
+    step's role (``norm_role``). ``precision`` is ``min(1, (len(path) + 2) /
+    emitted steps)``, so a flow much longer than the labelled path costs credit.
+    The score is ``coverage * (0.2 + 0.8 * order * role) * precision``. Order and role
+    multiply because steps within tolerance of each other cannot be ordered by line
+    (order is then 1 whichever way the flow runs), so only their roles tell a
+    reversed path from the right one, and a path needs both to be right.
+    """
+    steps = flow_steps(result)
     required = [s for s in finding["path"] if s["required"]]
-    covered = []
+    covered, candidates = [], []
     for s in required:
-        targets = [s] + s.get("alternatives", [])
-        hit = any(near(f, a, b, t, tol) for (f, a, b) in steps for t in targets)
-        covered.append({"step": s["step"], "role": s["role"], "covered": hit})
-    score = sum(c["covered"] for c in covered) / len(required) if required else 1.0
-    return score, covered
+        targets = [s] + (s.get("alternatives") or [])
+        idx = [i for i, (f, a, b, _) in enumerate(steps) if any(near(f, a, b, t, tol) for t in targets)]
+        role_ok = any(norm_role(steps[i][3]) == norm_role(s["role"]) for i in idx)
+        covered.append({"step": s["step"], "role": s["role"], "covered": bool(idx), "role_ok": role_ok})
+        if idx:
+            candidates.append(idx)
+    if not required:
+        return 1.0, covered
+    if not candidates:
+        return 0.0, covered
+    coverage = len(candidates) / len(required)
+    order = longest_chain(candidates) / len(candidates)
+    role = sum(c["role_ok"] for c in covered) / len(candidates)
+    precision = min(1.0, (len(finding["path"]) + PATH_SLACK) / len(steps))
+    # Divided by the same expression at order = role = 1, so a perfect path is exactly 1.0.
+    shape = (PATH_BASE + (1 - PATH_BASE) * order * role) / (PATH_BASE + (1 - PATH_BASE))
+    return min(1.0, coverage * shape * precision), covered
 
 
 def rec_set(value) -> set:
@@ -283,18 +403,79 @@ def truth_risk_types(truth: dict) -> set:
 
 # ---- matching ----------------------------------------------------------------------
 
-def score_match(res: dict, f: dict, ptol: int) -> dict:
-    """The four measurement scores a result earns when it is matched to a finding."""
+# ---- scope, traps and claims --------------------------------------------------------------
+
+def _under(uri: str, patterns) -> bool:
+    """``uri`` is one of ``patterns`` or lies under one (a glob when it has * ? or [)."""
+    from fnmatch import fnmatchcase
+    for p in patterns:
+        p = norm_uri(p).rstrip("/")
+        if p in ("", "."):
+            return True
+        if any(ch in p for ch in "*?["):
+            if fnmatchcase(uri, p) or fnmatchcase(uri, p + "/*"):
+                return True
+        elif uri == p or uri.startswith(p + "/"):
+            return True
+    return False
+
+
+def scope_of(truth: dict):
+    """(mode, predicate on a repo-relative path): where a result is scored.
+
+    ``matching.scanner_roots`` minus ``matching.excluded_paths`` when the ground
+    truth has roots (the scope the scanner was given), else ``fix_changed_files``
+    (minus the exclusions), else the whole repo (minus the exclusions).
+    """
+    m = truth.get("matching") or {}
+    roots = [r for r in m.get("scanner_roots") or [] if isinstance(r, str)]
+    excluded = [x for x in m.get("excluded_paths") or [] if isinstance(x, str)]
+    fix = set(truth.get("fix_changed_files") or [])
+    if roots:
+        return "scanner_roots", lambda uri: bool(uri) and _under(uri, roots) and not _under(uri, excluded)
+    if fix:
+        return "fix_changed_files", lambda uri: uri in fix and not _under(uri, excluded)
+    return "repo", lambda uri: not _under(uri, excluded)
+
+
+def trap_rules(trap: dict):
+    """("ids", [...]) when the trap lists ``trap_rule_ids``, else ("prefixes", [...])."""
+    ids = trap.get("trap_rule_ids")
+    if isinstance(ids, list) and ids:
+        return "ids", [r for r in ids if isinstance(r, str)]
+    return "prefixes", list(trap.get("trap_rule_prefixes") or [])
+
+
+def hits_trap(rule: str, primary, trap: dict, tol: int) -> bool:
+    """A wrong claim on the trap: the trap's exact rule ids (else its prefixes), within tolerance."""
+    kind, rules = trap_rules(trap)
+    claimed = rule in rules if kind == "ids" else rule_prefix(rule) in rules
+    return claimed and near(*primary, trap, tol)
+
+
+def is_complete_claim(res: dict) -> bool:
+    """controlStatus "complete": the result says a control closes the path (not a weakness)."""
+    return (res.get("properties") or {}).get("controlStatus") == "complete"
+
+
+def score_match(res: dict, f: dict, ptol: int, cross: bool = False) -> dict:
+    """The four measurement scores a result earns when it is matched to a finding.
+
+    ``cross`` is kept for compatibility and is never set (cross-family matching was
+    reverted); when true the rule part of classification would be 0.
+    """
     props = res.get("properties") or {}
     rule = res.get("ruleId", "")
     cls = 1.0 if rule in f["acceptable_rule_ids"] else (0.5 if rule in f.get("partial_credit_rule_ids", []) else 0.0)
+    if cross:
+        cls = 0.0
     cwe_ok = bool(cwe_set(props.get("cwe")) & finding_cwes(f))
     cls = 0.8 * cls + 0.2 * cwe_ok
     path_score, path_cov = score_path(res, f, ptol)
     ctrl = 0.75 * (props.get("controlStatus") == f["control_status"]) + 0.25 * (props.get("residualRisk") == f["residual_risk"])
     rec_score, inapplicable = score_recs(res, f)
     return {"classification": cls, "path": path_score, "controls": ctrl, "recommendations": rec_score,
-            "cwe_ok": cwe_ok, "path_steps": path_cov, "inapplicable": inapplicable}
+            "cwe_ok": cwe_ok, "path_steps": path_cov, "inapplicable": inapplicable, "cross_family": cross}
 
 
 def assign(scores: dict, n_results: int, n_findings: int, w: dict, in_scope: int) -> dict:
@@ -406,11 +587,13 @@ def grade(sarif_path: Path, truth: dict) -> tuple[dict, dict]:
         else:
             cats = {category_of(f["rule_id"]): (True, False) for f in findings}
         tl = task_level(truth_risk_types(truth), set(), cats)
-        detail = {"error": f"missing {sarif_path}", "task_level": tl}
+        # No SARIF is no answer: 0 on a positive and on a negative alike (an empty
+        # SARIF, the tool saying "clean", is what scores 1.0 on a negative).
+        detail = {"grader_version": GRADER_VERSION, "error": f"missing {sarif_path}", "task_level": tl}
         summary = _summarise(0.0, 0, 0, len(findings), 0, {}, w, findings)
         summary.update(flat_task_level(tl), sarif_missing=1)
         if negative:
-            summary.update({"neg.fail.near_fix": 0, "neg.fail.trap": 0})
+            summary.update({"neg.fail.near_fix": 0, "neg.fail.trap": 0, "neg.fail.in_scope": 0})
             if complete_controls(truth):
                 summary.update({"neg.controls": 0.0, "neg.complete_control_recognised": 0})
         return summary, detail
@@ -420,23 +603,32 @@ def grade(sarif_path: Path, truth: dict) -> tuple[dict, dict]:
         return grade_negative(results, truth, w, tol)
     if not findings and truth.get("fixed_locations"):
         return grade_twin(results, truth, w, tol)
-    scope_files = set(truth.get("fix_changed_files") or [])
-    unmatched, trap_hits, outside = [], [], []
+    scope_mode, in_scope_at = scope_of(truth)
+    traps = [t for t in traps or [] if isinstance(t, dict) and is_trap(t)]
+    unmatched, trap_hits, outside, complete_claims = [], [], [], []
+
+    def accepts(f, primary):
+        targets = [f["primary_location"]] + f.get("alternative_primary_locations", [])
+        return any(near(*primary, t, tol) for t in targets)
 
     scores = {}  # (result index, finding index) -> score_match() of every pair that may match
     for idx, res in enumerate(results):
+        if is_complete_claim(res):  # says a control closes the path: not a claim of a weakness
+            continue
         risk = risk_of(res.get("ruleId", ""))
         primary = primary_of(res)
         res_cwes = cwe_set((res.get("properties") or {}).get("cwe"))
+        # A result matches only a finding of its own risk family, as an OWASP Benchmark result
+        # counts only in its own category. (v3.2 briefly allowed a cross-family match on a shared
+        # CWE for CWE-map scanners; reverted 2026-10-12, the client spec is followed first and
+        # OWASP Benchmark where it is silent.)
         for j, f in enumerate(findings):
-            if risk != f["risk_type"]:
+            if risk is None or risk != f["risk_type"] or not accepts(f, primary):
                 continue
             if require_cwe and not (res_cwes & finding_cwes(f)):
                 continue
-            targets = [f["primary_location"]] + f.get("alternative_primary_locations", [])
-            if any(near(*primary, t, tol) for t in targets):
-                scores[(idx, j)] = score_match(res, f, ptol)
-    in_scope = sum(1 for res in results if not scope_files or primary_of(res)[0] in scope_files)
+            scores[(idx, j)] = score_match(res, f, ptol)
+    in_scope = sum(1 for res in results if not is_complete_claim(res) and in_scope_at(primary_of(res)[0]))
     pairs = assign(scores, len(results), len(findings), w, in_scope)
     matched = {findings[j]["id"]: (idx, results[idx]) for idx, j in pairs.items()}
 
@@ -445,12 +637,15 @@ def grade(sarif_path: Path, truth: dict) -> tuple[dict, dict]:
         primary = primary_of(res)
         if idx in pairs:
             continue
-        if scope_files and primary[0] not in scope_files:
+        if is_complete_claim(res):
+            complete_claims.append({"index": idx, "ruleId": rule, "location": primary})
+            continue
+        if not in_scope_at(primary[0]):
             outside.append({"index": idx, "ruleId": rule, "location": primary})
             continue
         unmatched.append({"index": idx, "ruleId": rule, "location": primary})
         for trap in traps:
-            if rule_prefix(rule) in (trap.get("trap_rule_prefixes") or []) and near(*primary, trap, tol):
+            if hits_trap(rule, primary, trap, tol):
                 trap_hits.append({"trap": trap["id"], "result_index": idx})
 
     tp, fp, fn = len(matched), len(unmatched), len(findings) - len(matched)
@@ -473,6 +668,7 @@ def grade(sarif_path: Path, truth: dict) -> tuple[dict, dict]:
             "finding": f["id"], "matched": True, "result_index": idx, "ruleId": res.get("ruleId", ""),
             "cwe_ok": m["cwe_ok"], "path_steps": m["path_steps"], "controlStatus": props.get("controlStatus"),
             "residualRisk": props.get("residualRisk"), "inapplicable_recommendations": m["inapplicable"],
+            "cross_family": m["cross_family"],
             "scores": {k: round(m[k], 4) for k in MEASUREMENTS},
             **links,
         })
@@ -482,15 +678,18 @@ def grade(sarif_path: Path, truth: dict) -> tuple[dict, dict]:
         recall = tp / len(findings)
         detection = 2 * precision * recall / (precision + recall) if (precision + recall) else 0.0
     else:
-        detection = 1.0 if not results else 0.0
-        sub = {k: (1.0 if not results else 0.0) for k in sub}
+        claims = [r for r in results if not is_complete_claim(r)]
+        detection = 1.0 if not claims else 0.0
+        sub = {k: (1.0 if not claims else 0.0) for k in sub}
 
-    # Task level: a risk is predicted only by a result that matched a finding.
-    # The loose variant also counts results counted as false positives (inside
-    # the fix files, or anywhere when the task names no fix files).
+    # Task level: a risk is predicted only by a result that matched a finding, and it
+    # predicts the finding's risk type.
+    # The loose variant also counts the rule family of every matched result and of
+    # the results counted as false positives (unmatched inside the scope).
     matched_results = [res for _, res in matched.values()]
-    predicted = {risk_of(r.get("ruleId", "")) for r in matched_results} - {None}
-    loose = {risk_of(r.get("ruleId", "")) for r in matched_results + [results[u["index"]] for u in unmatched]} - {None}
+    predicted = {f["risk_type"] for f in findings if f["id"] in matched}
+    loose = predicted | ({risk_of(r.get("ruleId", "")) for r in matched_results
+                          + [results[u["index"]] for u in unmatched]} - {None})
     cats = {}
     for f in findings:
         cat = category_of(f["rule_id"])
@@ -499,8 +698,9 @@ def grade(sarif_path: Path, truth: dict) -> tuple[dict, dict]:
 
     summary = _summarise(detection, tp, fp, fn, len(trap_hits), sub, w, findings, len(outside))
     summary.update(flat_task_level(tl))
-    detail = {"per_finding": per_finding, "unmatched_results": unmatched, "trap_hits": trap_hits,
-              "outside_scope_results": outside, "task_level": tl,
+    detail = {"grader_version": GRADER_VERSION, "per_finding": per_finding, "unmatched_results": unmatched,
+              "trap_hits": trap_hits, "outside_scope_results": outside, "complete_claims": complete_claims,
+              "scope": scope_mode, "task_level": tl,
               "measurements": {"detection": summary["detection"], **{k: summary[k] for k in MEASUREMENTS}},
               "measurements_on_detected": {k: (round(sum(v) / len(v), 4) if v else None)
                                            for k, v in on_detected.items()},
@@ -509,75 +709,99 @@ def grade(sarif_path: Path, truth: dict) -> tuple[dict, dict]:
 
 
 def is_trap(entry: dict) -> bool:
-    return entry.get("kind", "hard_negative_trap") == "hard_negative_trap" and bool(entry.get("trap_rule_prefixes"))
+    return entry.get("kind", "hard_negative_trap") == "hard_negative_trap" and \
+        bool(entry.get("trap_rule_prefixes") or entry.get("trap_rule_ids"))
 
 
 def grade_negative(results: list, truth: dict, w: dict, tol: int) -> tuple[dict, dict]:
-    """A minimal-contrast negative (near-fix rule plus the negative's own traps).
+    """A minimal-contrast negative.
 
-    The negative fails on a result in one of two buckets:
+    The negative fails on a result in one of three buckets (checked in this order,
+    each result counted once):
 
     - ``near_fix``: its OWASP prefix is a contrast prefix and it lands within
       ``line_tolerance`` of ``fixed_locations``;
     - ``trap``: it hits a ``hard_negative_trap`` entry of ``negative_analyses``
-      (prefix in ``trap_rule_prefixes``, within tolerance of the trap lines).
+      (its rule id is one of the trap's ``trap_rule_ids``, or, when the trap has
+      none, its prefix is in ``trap_rule_prefixes``; within tolerance of the trap);
+    - ``in_scope`` (v3.2): its OWASP prefix is a contrast prefix and it lies
+      anywhere in the scope (``scope_of``: the scanner roots minus the excluded
+      paths, else ``fix_changed_files``).
 
-    A result in both buckets is counted once, under ``near_fix``. Every other
-    result is ``fp_outside_scope``, including one elsewhere in
-    ``fix_changed_files``. No CWE agreement is needed to fail.
-
-    A result that names one of the negative's complete ``controls`` (contrast
-    prefix, ``controlStatus`` "complete", within tolerance of the control's
-    ``at``) is neither: it is ``complete_control_recognised`` and feeds the
-    ``neg.controls`` sub-score, which is reported but not part of the reward.
+    A result whose ``controlStatus`` is "complete" says a control closes the path
+    and is never a failure. When it is a contrast-prefix result within tolerance
+    of one of the negative's complete ``controls``, it is
+    ``complete_control_recognised`` and feeds the ``neg.controls`` sub-score,
+    which is reported but not part of the reward; any other is listed under
+    ``complete_claims``. Every remaining result is ``fp_outside_scope``. No CWE
+    agreement is needed to fail. An empty SARIF scores 1.0.
     """
     contrast = truth.get("contrast_rule_ids") or []
     prefixes = {rule_prefix(r) for r in contrast}
     fixed = truth.get("fixed_locations") or []
-    traps = [t for t in truth.get("negative_analyses") or [] if is_trap(t)]
-    scope_files = set(truth.get("fix_changed_files") or [])
+    traps = [t for t in truth.get("negative_analyses") or [] if isinstance(t, dict) and is_trap(t)]
+    fix_files = set(truth.get("fix_changed_files") or [])
+    scope_mode, in_scope_at = scope_of(truth)
     controls = complete_controls(truth)
     ctrl_best = [0.0] * len(controls)
     ctrl_by = [None] * len(controls)
-    near_fix, trap_hits, outside, loose, recognised = [], [], [], set(), []
+    near_fix, trap_hits, in_scope, outside, loose, recognised, complete_claims = [], [], [], [], set(), [], []
     for idx, res in enumerate(results):
         rule = res.get("ruleId", "")
         primary = primary_of(res)
         entry = {"index": idx, "ruleId": rule, "location": primary}
         props = res.get("properties") or {}
-        named = [c for c, ctrl in enumerate(controls) if near(*primary, ctrl["at"], tol)]
-        if named and rule_prefix(rule) in prefixes and props.get("controlStatus") == "complete":
-            score = 0.75 + 0.25 * (props.get("residualRisk") == truth.get("residual_risk"))
-            for c in named:
-                if score > ctrl_best[c]:
-                    ctrl_best[c], ctrl_by[c] = score, idx
-            recognised.append({**entry, "controls": [controls[c].get("name") for c in named]})
+        if is_complete_claim(res):
+            named = [c for c, ctrl in enumerate(controls) if near(*primary, ctrl["at"], tol)]
+            if named and rule_prefix(rule) in prefixes:
+                score = 0.75 + 0.25 * (props.get("residualRisk") == truth.get("residual_risk"))
+                for c in named:
+                    if score > ctrl_best[c]:
+                        ctrl_best[c], ctrl_by[c] = score, idx
+                recognised.append({**entry, "controls": [controls[c].get("name") for c in named]})
+            else:
+                complete_claims.append(entry)
             continue
         is_near = any(near(*primary, loc, tol) for loc in fixed)
-        if risk_of(rule) and (is_near or primary[0] in scope_files):
+        if risk_of(rule) and (is_near or primary[0] in fix_files):
             loose.add(risk_of(rule))
         if is_near and rule_prefix(rule) in prefixes:
             near_fix.append(entry)
             continue
-        hit = [t["id"] for t in traps if rule_prefix(rule) in t["trap_rule_prefixes"] and near(*primary, t, tol)]
+        hit = [t["id"] for t in traps if hits_trap(rule, primary, t, tol)]
         if hit:
             trap_hits.append({**entry, "traps": hit})
+        elif rule_prefix(rule) in prefixes and in_scope_at(primary[0]):
+            in_scope.append(entry)
         else:
             outside.append(entry)
-    failing = near_fix + trap_hits
-    bucket = ("near_fix" if near_fix else "") + ("+" if near_fix and trap_hits else "") + ("trap" if trap_hits else "")
+    failing = near_fix + trap_hits + in_scope
+    bucket = "+".join(name for name, hits in (("near_fix", near_fix), ("trap", trap_hits), ("in_scope", in_scope))
+                      if hits)
     clean = 0.0 if failing else 1.0
     sub = {k: clean for k in MEASUREMENTS}
     predicted = {risk_of(e["ruleId"]) for e in failing} - {None}
-    flagged = {rule_prefix(e["ruleId"]) for e in failing}
-    cats = {category_of(r): (False, rule_prefix(r) in flagged) for r in contrast}
-    tl = task_level(truth_risk_types(truth), predicted, cats, loose)
+    # A6: a failing result is a false positive of the category it claims (its own rule
+    # id), not of the contrast category that shares its prefix. A rule id that names
+    # no known category falls back to the contrast categories of its prefix.
+    flagged = set()
+    for e in failing:
+        cat = category_of(e["ruleId"])
+        if cat in KNOWN_CATEGORIES:
+            flagged.add(cat)
+        else:
+            flagged |= {category_of(r) for r in contrast if rule_prefix(r) == rule_prefix(e["ruleId"])}
+    cats = {category_of(r): (False, False) for r in contrast}
+    cats.update({c: (False, True) for c in flagged})
+    tl = task_level(truth_risk_types(truth), predicted, cats, loose | predicted)
     summary = _summarise(clean, 0, len(failing), 0, len(trap_hits), sub, w, [], len(outside))
     summary.update(flat_task_level(tl))
-    summary.update({"neg.fail.near_fix": int(bool(near_fix)), "neg.fail.trap": int(bool(trap_hits))})
-    detail = {"negative": True, "contrast_rule_ids": contrast, "failure_bucket": bucket or None,
-              "results_near_fixed_code": near_fix, "trap_hits": trap_hits,
-              "outside_scope_results": outside, "task_level": tl}
+    summary.update({"neg.fail.near_fix": int(bool(near_fix)), "neg.fail.trap": int(bool(trap_hits)),
+                    "neg.fail.in_scope": int(bool(in_scope))})
+    detail = {"grader_version": GRADER_VERSION, "negative": True, "contrast_rule_ids": contrast,
+              "failure_bucket": bucket or None, "scope": scope_mode,
+              "results_near_fixed_code": near_fix, "trap_hits": trap_hits, "results_in_scope": in_scope,
+              "complete_claims": complete_claims, "outside_scope_results": outside, "task_level": tl}
     if controls:
         summary["neg.controls"] = round(sum(ctrl_best) / len(controls), 4)
         summary["neg.complete_control_recognised"] = len(recognised)
@@ -617,7 +841,7 @@ def grade_twin(results: list, truth: dict, w: dict, tol: int) -> tuple[dict, dic
     tl = task_level(truth_risk_types(truth), predicted, {})
     summary = _summarise(clean, 0, len(near_fix), 0, 0, sub, w, [], len(outside))
     summary.update(flat_task_level(tl))
-    detail = {"twin": True, "results_near_fixed_code": near_fix, "outside_scope_results": outside,
+    detail = {"grader_version": GRADER_VERSION, "twin": True, "results_near_fixed_code": near_fix, "outside_scope_results": outside,
               "task_level": tl}
     return summary, detail
 
@@ -909,6 +1133,10 @@ def check_truth(truth: dict, repo=None, manifest=None) -> list[str]:
         v = matching.get(key)
         if not isinstance(v, int) or isinstance(v, bool) or v < 0:
             problems.append(f"matching.{key} must be an integer >= 0, got {v!r}")
+    for key in ("scanner_roots", "excluded_paths"):
+        v = matching.get(key)
+        if v is not None and not (isinstance(v, list) and all(isinstance(x, str) and x for x in v)):
+            problems.append(f"matching.{key} must be a list of repo-relative paths, got {v!r}")
     tol = matching.get("line_tolerance") if isinstance(matching.get("line_tolerance"), int) else 0
     require_cwe = bool(matching.get("require_cwe", False))
     weights = truth.get("scoring_weights")
@@ -977,8 +1205,14 @@ def check_truth(truth: dict, repo=None, manifest=None) -> list[str]:
     for i, entry in enumerate(truth.get("negative_analyses") or []):
         if isinstance(entry, dict) and "file" in entry:
             problems += _location_problems(entry, f"negative_analyses[{i}] ({entry.get('id', '?')})")
-        if isinstance(entry, dict) and is_trap(entry) and not isinstance(entry.get("trap_rule_prefixes"), list):
-            problems.append(f"negative_analyses[{i}]: trap_rule_prefixes must be a list")
+        if isinstance(entry, dict) and is_trap(entry):
+            if "trap_rule_prefixes" in entry and not isinstance(entry["trap_rule_prefixes"], list):
+                problems.append(f"negative_analyses[{i}]: trap_rule_prefixes must be a list")
+            ids = entry.get("trap_rule_ids")
+            if ids is not None and not (isinstance(ids, list) and all(isinstance(r, str) for r in ids)):
+                problems.append(f"negative_analyses[{i}]: trap_rule_ids must be a list of rule ids")
+            if not isinstance(entry.get("trap_rule_prefixes"), list) and not isinstance(ids, list):
+                problems.append(f"negative_analyses[{i}]: trap_rule_prefixes must be a list")
     if truth.get("variant_role") == "negative" and "contrast_rule_ids" in truth and not truth.get("fixed_locations"):
         problems.append("negative with contrast_rule_ids has no fixed_locations")
 

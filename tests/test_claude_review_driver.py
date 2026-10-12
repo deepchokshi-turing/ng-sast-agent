@@ -341,6 +341,8 @@ def _assert_key_only_in_the_key_file(run, result):
         assert KEY not in json.dumps(call["argv"]) and not call["env_has_key"]
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="macOS adds __CF_USER_TEXT_ENCODING to every process's "
+                    "environment, so the CLI environment allow-list check fails on the host, not in the code")
 def test_whole_run_stock_mode(tmp_path, repo, net):
     findings = [finding("src/app/tools.py", 5), finding("src/app/llm.py", 2, category="sensitive_data_logging",
                                                         severity="MEDIUM"),

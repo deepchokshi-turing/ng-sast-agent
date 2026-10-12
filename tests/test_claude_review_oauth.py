@@ -247,7 +247,6 @@ def test_refused_token_is_a_clear_error_without_the_token(tmp_path, oauth_token)
     ({"fail_upload": True}, "could not upload /opt/sast/secret/claude-oauth-token.upload"),
     ({"protect_exit": 1}, "could not protect the key file"),
     ({"prepare_exit": 1}, "could not prepare the key directory"),
-    ({"driver_exit": 124, "write_document": False}, "ran out of time"),
     ({"driver_exit": 4, "write_document": False}, "without a readable result"),
 ])
 def test_a_failure_with_a_token_removes_it(tmp_path, oauth_token, failure, message):
@@ -256,6 +255,17 @@ def test_a_failure_with_a_token_removes_it(tmp_path, oauth_token, failure, messa
     with pytest.raises(ScannerError, match=message) as raised:
         asyncio.run(go())
     assert OAUTH_TOKEN not in str(raised.value)
+    assert_secret_nowhere(tmp_path, sandbox, context)
+
+
+def test_a_timeout_with_a_token_is_a_tool_outcome_and_removes_it(tmp_path, oauth_token):
+    sandbox = FakeSandbox(secret=OAUTH_TOKEN, driver_stderr=f"Traceback ... {OAUTH_TOKEN}", driver_exit=124,
+                          write_document=False)
+    _, context, go = run_agent(tmp_path, sandbox)
+    asyncio.run(go())
+    outcome = context.metadata["tool_outcome"]
+    assert outcome["reason"] == "deadline" and "ran out of time" in outcome["message"]
+    assert OAUTH_TOKEN not in outcome["message"]
     assert_secret_nowhere(tmp_path, sandbox, context)
 
 

@@ -193,14 +193,14 @@ def api_key(monkeypatch):
         monkeypatch.delenv(name, raising=False)
 
 
-def run_agent(tmp_path, sandbox, **options):
+def run_agent(tmp_path, sandbox, instruction="instruction text", **options):
     options.setdefault("model", MODEL)
     agent = ClaudeReviewAgent(logs_dir=tmp_path, model_name="openai/gpt-5", **options)
     context = AgentContext()
 
     async def go():
         await agent.setup(sandbox)
-        await agent.run("instruction text", sandbox, context)
+        await agent.run(instruction, sandbox, context)
 
     return agent, context, go
 
@@ -470,7 +470,7 @@ def test_a_failure_while_writing_the_key_leaves_nothing(tmp_path, api_key, failu
     ("model_unavailable", "retired or misspelt"),
     ("cli_failed", "did not produce a usable review"),
     ("filter_call_failed", "per-finding filter call failed"),
-    ("files_reviewed_zero", "reviewed no file"),
+    ("cli_settings", "did not apply the agent's tool restrictions"),
 ])
 def test_driver_errors_become_scanner_errors_and_remove_the_key(tmp_path, api_key, code, words):
     document = driver_document(status="error", error={"code": code, "message": f"details of {code}"})
@@ -484,11 +484,38 @@ def test_driver_errors_become_scanner_errors_and_remove_the_key(tmp_path, api_ke
     assert_key_nowhere(tmp_path, sandbox, context)
 
 
-def test_driver_timeout_is_an_error_and_removes_the_key(tmp_path, api_key):
+@pytest.mark.parametrize("code, reason, words", [
+    ("deadline", "deadline", "ran out of time"),
+    ("timeout", "deadline", "ran out of time"),
+    ("review_incomplete", "review_incomplete", "said the review is incomplete"),
+    ("files_reviewed_zero", "files_reviewed_zero", "reviewed no file"),
+    ("cli_limit", "cli_limit", "--max-turns or --max-budget-usd"),
+    ("prompt_too_long", "prompt_too_long", "too long even without the diff"),
+    ("bad_findings", "bad_review_output", "not JSON objects"),
+])
+def test_review_outcomes_are_scored_not_errors(tmp_path, api_key, code, reason, words):
+    """The review did not finish: a normal return with no SARIF, so the verifier scores it 0 (A5)."""
+    document = driver_document(status="error", error={"code": code, "message": f"details of {code}"})
+    sandbox = FakeSandbox(document=document, driver_exit=3)
+    _, context, go = run_agent(tmp_path, sandbox)
+    asyncio.run(go())
+    meta = context.metadata
+    assert meta["status"] == "tool_outcome" and meta["sarif_written"] is False
+    assert meta["tool_outcome"]["reason"] == reason
+    assert words in meta["tool_outcome"]["message"] and f"[{code}]" in meta["tool_outcome"]["message"]
+    assert meta["claude_review"]["driver_error"]["code"] == code
+    assert "/app/output/findings.sarif" not in sandbox.files
+    assert "/logs/artifacts/sast/metadata.json" in sandbox.files
+    assert_key_nowhere(tmp_path, sandbox, context)
+
+
+def test_driver_timeout_is_a_tool_outcome_and_removes_the_key(tmp_path, api_key):
     sandbox = FakeSandbox(driver_exit=124, write_document=False)
     _, context, go = run_agent(tmp_path, sandbox)
-    with pytest.raises(ScannerError, match="ran out of time"):
-        asyncio.run(go())
+    asyncio.run(go())
+    assert context.metadata["tool_outcome"]["reason"] == "deadline"
+    assert "ran out of time" in context.metadata["tool_outcome"]["message"]
+    assert "/app/output/findings.sarif" not in sandbox.files
     assert_key_nowhere(tmp_path, sandbox, context)
 
 
@@ -575,7 +602,7 @@ def test_bad_locations_and_out_of_scope_findings_are_dropped_and_counted(tmp_pat
 def test_scoped_mode_prefers_valid_model_cwes(tmp_path, api_key):
     kept = [
         finding("src/calc_agent/llm.py", 2, category="prompt_logging", cwe=["CWE-532", "CWE-200"]),
-        finding("src/calc_agent/agent.py", 8, category="eval_injection", cwe=["CWE-99999", "nonsense"]),  # fallback
+        finding("src/calc_agent/agent.py", 8, category="eval_injection", cwe=["CWE-0", "nonsense"]),  # fallback
         finding("src/calc_agent/maintenance.py", 8, category="whatever", cwe=["CWE-78", "CWE-532"]),    # ambiguous
         finding("src/calc_agent/maintenance.py", 5, category="x", cwe=[78]),
     ]
@@ -584,7 +611,7 @@ def test_scoped_mode_prefers_valid_model_cwes(tmp_path, api_key):
     asyncio.run(go())
     meta = context.metadata
     assert meta["cwe_source"] == {"model": 3, "table_fallback": 1}
-    assert meta["cwes_rejected"] == ["CWE-99999", "nonsense"]
+    assert meta["cwes_rejected"] == ["CWE-0", "nonsense"] and meta["cwes_rejected_count"] == 2
     assert meta["results_by_cwe_decision"]["ambiguous"] == 1
     assert meta["results_cwe_ambiguous"][0][2:] == ["src/calc_agent/maintenance.py", 8]
     rules = {(r["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
@@ -689,7 +716,9 @@ def test_scoped_assessment_earns_path_controls_and_recommendations(tmp_path, api
     _, _, go = run_agent(tmp_path, sandbox, mode="scoped")
     asyncio.run(go())
     reward = grade_sarif(TASK, sarif_of(sandbox))
-    assert reward["path"] == 1.0 and reward["controls"] == 1.0 and reward["recommendations"] == 1.0
+    # Grader v3.2 path credit: both steps are covered, but the sample truth's middle step (the same line 8 as the
+    # sink, role root_cause) is reported as "sink", so the role term is partial.
+    assert reward["path"] == 0.7333 and reward["controls"] == 1.0 and reward["recommendations"] == 1.0
 
 
 def test_scoped_mode_takes_the_models_rule_id(tmp_path, api_key):

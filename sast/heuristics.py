@@ -34,7 +34,8 @@ VERSION = "heuristics-1"
 
 CONTROL_STATUS = "none"
 
-#: The task's recommendation catalogue (instruction.md), in its order.
+#: The code copy of the REC-* catalogue ("Recommendation catalogue" table) of the output
+#: contract in each task's ``instruction.md``, in its order.
 CATALOGUE = (
     "REC-AUTHZ-BEFORE-RETRIEVAL",
     "REC-MINIMIZE-CONTEXT",

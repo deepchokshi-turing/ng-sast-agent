@@ -258,6 +258,8 @@ def test_setup_refuses_a_changed_upstream_file(tmp_path, served_pins, capsys):
     assert "prompts.py has sha256" in capsys.readouterr().out
 
 
+@pytest.mark.skipif(platform.libc_ver()[0] != "glibc",
+                    reason="install() checks for glibc Linux before the Python prefix, so off glibc that error wins")
 def test_build_requires_the_images_own_python(tmp_path, monkeypatch):
     monkeypatch.setattr(install, "choose_python", lambda explicit: ("/usr/bin/python3", (3, 11)))
     with pytest.raises(install.InstallError, match="must be built from the CPython under /opt/sast/python/"):

@@ -65,7 +65,9 @@ def test_other_results_at_the_fix_still_fail_the_negative(tmp_path, res):
 def test_complete_control_far_from_the_control_is_not_recognised(tmp_path):
     score, detail = run(sarif(result("LLM03.EA.FUNCTIONALITY", TOOL, 200, controlStatus="complete")),
                         neg_with_control(), tmp_path)
-    assert score["neg.controls"] == 0.0 and score["fp_outside_scope"] == 1 and score["reward"] == 1.0
+    # v3.2: a "complete" result is never a failure; it is a complete claim, not fp_outside_scope.
+    assert score["neg.controls"] == 0.0 and score["reward"] == 1.0
+    assert score["fp_outside_scope"] == 0 and [c["index"] for c in detail["complete_claims"]] == [0]
 
 
 def test_complete_control_needs_a_contrast_prefix(tmp_path):
@@ -86,7 +88,7 @@ def test_negative_without_controls_has_no_control_keys(tmp_path):
     score, detail = run(sarif(result("LLM03.EA.FUNCTIONALITY", TOOL, 22, controlStatus="complete")), negative(),
                         tmp_path)
     assert "neg.controls" not in score and "complete_controls" not in detail
-    assert score["reward"] == 0.0  # unchanged v3 rule without labelled controls
+    assert score["reward"] == 1.0  # v3.2: a "complete" result is never a failure (0.0 before v3.2)
 
 
 def test_missing_sarif_reports_zero_control_credit(tmp_path):
@@ -320,7 +322,7 @@ def test_snippet_ids_tool_is_idempotent_and_keeps_the_style(tmp_path):
 
 # ---- the real dataset ------------------------------------------------------------------------
 
-REAL = sorted(p for p in HARBOR.glob("task_*") if (p / "tests" / "ground_truth.json").is_file()) \
+REAL = sorted(p for p in HARBOR.iterdir() if (p / "tests" / "ground_truth.json").is_file()) \
     if HARBOR.is_dir() else []
 needs_dataset = pytest.mark.skipif(not REAL, reason="harbor-tasks is not checked out next to ng-sast-agent")
 

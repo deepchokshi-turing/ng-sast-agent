@@ -12,7 +12,7 @@ tool inside the task sandbox, scans `/app/repo`, and writes
 | Semgrep OSS 1.179.0 | `sast.semgrep.agent:SemgrepAgent` | ready |
 | CodeQL 2.27.1 (research use only) | `sast.codeql.agent:CodeQLAgent` | ready, run with Harbor on the 0.5.0 image (see [CodeQL agent](#codeql-agent)) |
 | SonarQube (server you host) | `sast.sonarqube.agent:SonarQubeAgent` | ready, run with Harbor against SonarQube Community Build 26.9 (see [SonarQube agent](#sonarqube-agent)) |
-| Claude Code security review (anthropics/claude-code-security-review at 0c6a49f, calls a model) | `sast.claude_review.agent:ClaudeReviewAgent` | unit-tested with fakes, not yet run against the real API (see [Claude Code security review agent](#claude-code-security-review-agent)) |
+| Claude Code security review (anthropics/claude-code-security-review at 0c6a49f, calls a model) | `sast.claude_review.agent:ClaudeReviewAgent` | run against the real model on 10 dataset tasks with a subscription token (`auth=oauth`: the CLI review, then the upstream filter's regex rules only, no API preflight), once per task, in stock and scoped mode. Not yet run with an API key, so the upstream per-finding Claude filter, the API preflight and `cli_auth` have run against fakes only (see [Claude Code security review agent](#claude-code-security-review-agent)) |
 
 ## Register on ng-eval-platform
 
@@ -204,7 +204,7 @@ The leak scan also requires `task_id` in task.toml to equal the task folder name
     storage, and XXE aren't mapped.
   - Unmapped CWEs (XSS, crypto, CSRF, ...) are outside the five ruleIds and are
     not reported; they're still counted in the metadata.
-  - No CWE maps to `LLM03.EA.AUTONOMY`, so no CWE-mapped agent can report it. Missing authorisation (CWE-862, and CWE-285, 284 and 863) maps to `LLM02.SID.HIGH`. A finding labelled `LLM03.EA.AUTONOMY` (for example ec8a82 F1) therefore scores 0 for Semgrep, CodeQL, SonarQube and the Claude review in stock mode by construction. A correct report at the right lines lands in the LLM02 family and cannot match. This is a property of the frozen map, not a miss by the tool. The Claude review in scoped mode names the ruleId itself, as the task instruction asks, so it can report Autonomy. The map was deliberately not changed for this: CWE-862, 863, 285 and 284 are also the usual CWEs for retrieval without authorisation, which spec section 3 lists under disclosure, and changing the map after seeing results would be tuning.
+  - No CWE maps to `LLM03.EA.AUTONOMY`, so no CWE-mapped agent ever emits that ruleId. Missing authorisation (CWE-862, and CWE-285, 284 and 863) maps to `LLM02.SID.HIGH`. Whether such a result can still match an Autonomy finding is decided by the grader, not by this map, and it is not a zero by construction. The grader matches a result to a finding of its own risk family (LLM02 or LLM03) within the line tolerance; since v3.2 (audit A1) it also matches across families when the CWE sets intersect and no finding of the result's own family accepts the location, with detection credit and no rule credit (`task_format/grade.py`). So a result whose CWE the finding also lists can match at the right lines: an LLM03 result such as CWE-749 (FUNCTIONALITY) on an Autonomy finding of the same family, or an LLM02 result from CWE-862 on one whose CWEs include 862. A correct report whose CWE the finding does not list cannot. The Claude review in scoped mode names the ruleId itself, as the task instruction asks, so it can report Autonomy. The map was deliberately not changed for this: CWE-862, 863, 285 and 284 are also the usual CWEs for retrieval without authorisation, which spec section 3 lists under disclosure, and changing the map after seeing results would be tuning.
   - Findings merged into one result (same file, line and family) keep the family they were merged under, and the combined CWEs only choose LLM02 HIGH or MEDIUM (`cwe_map.family_rule`). Before, the rule was recomputed from the combined list, and a generic CWE next to a `NOT_DISCLOSURE_CWES` entry (for example CodeQL's bind-socket {200} and clear-text-logging {359, 532, 312} on one line) gave no rule and crashed the SARIF writer (PR #4 review, item 1). No recorded result changes.
 - **LLM02 severity (cwe-map-3).** The CWE still picks the family. An LLM02
   result is `LLM02.SID.HIGH` when any of its CWEs is CWE-201, 918, 319, 532 or
@@ -251,13 +251,7 @@ The leak scan also requires `task_id` in task.toml to equal the task folder name
   with 5 merged files. Rule ids are set to what Semgrep would have reported, so
   results are unchanged: `tools/check_merged_rules.sh` compared all 6,191
   findings on the rules repo's own test corpus and they were identical.
-- **Failures are errors, not zeroes.** An install failure, any Semgrep exit
-  other than 0, unreadable output, out-of-memory, or a scan over its budget
-  raises `ScannerError`. Semgrep writes `"results": []` even when it fails
-  (exit 2, 7, ...), so the exit code decides, not the file. Harbor
-  then skips the verifier and the platform shows the trial as errored, so it can
-  be re-run. The scan budget is the agent timeout minus 120 s, because Harbor
-  grades a trial that hits its own timeout as 0.
+- **A failed scan is never a clean one.** Semgrep writes `"results": []` even when it fails (exit 2, 7, ...), so the exit code decides, not the file. An install failure, unreadable output or a configuration exit code (4, 5, 7, 8: our own rules or options) is an infrastructure failure and raises `ScannerError`: Harbor skips the verifier and the trial shows as errored, so it can be re-run. Semgrep failing on the repository (any other non-zero exit, out of memory) or a scan over its budget is a tool outcome: no SARIF, a normal return, and the verifier scores the trial 0 (see [Failure policy](#failure-policy-infrastructure-errors-and-tool-outcomes)). The scan budget is the agent timeout minus 120 s, so the agent, not Harbor, ends a scan that runs long and records why.
 - **Unknown `--ak` keys are recorded, not rejected.** Harbor validates options
   once per job, so one stray key would fail every trial.
 
@@ -274,6 +268,25 @@ The leak scan also requires `task_id` in task.toml to equal the task folder name
 
 The Semgrep version and the rules are pinned in
 [sast/semgrep/pins.py](sast/semgrep/pins.py) and are not options.
+
+## Failure policy: infrastructure errors and tool outcomes
+
+Harbor 0.23 records `AgentTimeoutError` and `NonZeroAgentExitCodeError` and still runs the verifier; any other exception skips it, so the trial shows as errored and can be re-run. Every agent splits its failures the same way (`sast/errors.py`):
+
+- **Infrastructure failure, `ScannerError`**: the tool could not be installed, the sandbox, Docker or Harbor misbehaved, a credential is missing or refused, the Anthropic API or the SonarQube server could not be reached, the agent's own output could not be read. Nothing was learnt about the tool. The agent raises, the verifier does not run, and `status` is `error` in the metadata.
+- **Tool outcome, `ToolOutcome`**: the tool did not deliver on this repository. The scan budget or review deadline ran out (`deadline`), the tool was killed (`tool_killed`) or crashed on the code (`tool_crashed`), analysed none of the in-scope code (`tool_saw_nothing`), the review said it was incomplete (`review_incomplete`) or reviewed no file (`files_reviewed_zero`), the Claude CLI hit its turn or budget limit (`cli_limit`), and a few more listed in `sast/errors.py`. The agent writes **no SARIF**, records `status: tool_outcome` and `tool_outcome: {reason, message}` (and `sarif_written: false`) in the metadata, keeps its logs and artifacts, and returns normally. Harbor then runs the verifier, and the grader scores a missing SARIF 0 on a positive and on a negative task alike, so an unfinished scan never earns the credit of a clean one.
+
+The scan budget is Harbor's agent timeout minus 120 s, so the agent, not Harbor, ends a scan that runs long: the trial is scored exactly as after Harbor's own timeout (0), but with the reason and the logs kept.
+
+### What the SARIF's `runs[0].properties` records
+
+Every agent writes `runs[0].properties.sastAgent`: an account of what it dropped or re-mapped between the tool's output and the results, for reports to show next to the scores. The grader never reads it, and it does not change which results are written. Each entry is `{"count": n, "items": [...]}` with at most 20 items (the full lists are in the run metadata).
+
+- `dropped.unmappedCwe`: findings left out because no CWE maps to a task ruleId (`[tool rule, CWEs, file, line]`).
+- `dropped.ambiguousCwe`: findings whose CWEs point to more than one ruleId family.
+- `dropped.outOfScope`: findings outside the scanner roots or under an excluded path.
+- `dropped.badLocation`: findings with no usable location (outside the repository, no line, a line outside the file).
+- Claude review only: `dropped.categoryNotInMap` (stock categories the category map does not know, with counts), `remapped` (findings whose ruleId the harness derived from the category or CWE table rather than the model's own `rule_id`: category, CWEs, CWE source, ruleId, `file:line`), `upstreamFilterExclusions` (each finding the upstream filter excluded: stage, reason, category, `file:line`), and `mode`, `filterMode`, `categoryMap`, `scanInstructionsSource` and `filterExclusionsDropped`.
 
 ## What the platform keeps from a trial
 
@@ -293,7 +306,7 @@ as the headline for SAST, **detection pooled across tasks**:
 
 - Every report (`report.py` and `eval_report.py`) states what the results were graded under: agent version, CWE map, heuristics, Claude category map, and the task set's git commit and whether its work tree is dirty (when `--tasks` is a git work tree). Different versions within or across jobs are listed as warnings.
 - A measurement is shown as "not supported by this tool" only when the tool matched at least one finding and no graded result carries the field. With no matched result it is "n/a (no results)".
-- For Claude review jobs the report shows the mode (stock or scoped), the auth and the results label. Stock-mode scores depend on the frozen category map (`ccsr-category-map-1`): categories outside it are dropped before grading, and the report counts them.
+- For Claude review jobs the report shows the mode (stock or scoped), the auth and the results label. Stock-mode scores depend on the frozen category map (`ccsr-category-map-2`, whose table is unchanged from `-1`): categories outside it are dropped before grading, and the report counts them.
 - Reading `reward.json` files directly, the task name comes from the trial's `result.json`, or from the folder name without Harbor's `__<suffix>`.
 
 - precision, recall and F1 from the verifier's tp/fp/fn. Precision (and so F1)
@@ -329,12 +342,7 @@ the expected scan time plus 120 s.
   whole repo and matches by ±10 lines and OWASP prefix.
 - On full repos, extra findings lower F1. A zero-finding (fixed-twin) task scores
   1.0 only if the SARIF is completely empty.
-- The grader matches greedily: each result, in file order, takes the first
-  unmatched finding near it. A partial-credit result (say `LLM02.SID.MEDIUM`
-  one line above) can therefore take a finding that a full-credit result
-  further down would have matched, and the full-credit one becomes a false
-  positive. Agents merge results of one family on one line, so this needs two
-  results on different lines. It was seen in a crafted case only, not in a run.
+- The grader matches results to findings one to one by an optimal assignment that maximises the task reward (`assign` in `task_format/grade.py`), not greedily in file order, so a partial-credit result no longer takes a finding from a full-credit one and the order of the results does not matter.
 - On a negative task, a result near the fix marks every contrast category with
   the same risk prefix as detected (`cat.<category>.detected`), the same
   prefix-level match positives use. A `LLM03.EA.PERMISSIONS` result near a
@@ -416,22 +424,18 @@ as for the Semgrep agent.
 
 ### Failure policy
 
-These fail the trial with `ScannerError`, so it is recorded as errored and never
-graded as "found nothing".
+None of these is ever graded as "found nothing". Infrastructure failures raise `ScannerError`, so the trial is recorded as errored and can be re-run:
 
 - No Python file in the scope, or none of the scan roots exists.
-- `database create` or `database analyze` exits non-zero, runs out of time
-  (124) or is killed (137). The error text quotes CodeQL's real error lines
-  only: its "A fatal error occurred" line, a line tagged `[ERROR]`, and the
-  extractor's Python exception line as the cause. A line that merely contains
-  the word, such as "0 errors", is never picked.
-- A missing or unreadable SARIF file, or a run CodeQL marks with
-  `executionSuccessful: false`.
-- The `py/summary/lines-of-code` metric is 0. CodeQL then extracted nothing and
-  still exits 0, which was checked on a repository with no Python in scope.
-- The metric is missing from the SARIF. The suite always reports it, so its
-  absence means the run cannot show that any code was analysed.
-- An extraction notification at error level that names an in-scope file.
+- A missing or unreadable SARIF file.
+- The `py/summary/lines-of-code` metric is missing from the SARIF. The suite always reports it, so its absence means the wrong suite ran and the run cannot show that any code was analysed.
+
+CodeQL failing on the repository is a tool outcome (`tool_outcome` in the metadata): no SARIF is written, the agent returns normally and the verifier scores the trial 0, on a positive and a negative task alike:
+
+- `database create` or `database analyze` exits non-zero (`tool_crashed`), runs out of the scan budget (124, `deadline`) or is killed (137, `tool_killed`). The message quotes CodeQL's real error lines only: its "A fatal error occurred" line, a line tagged `[ERROR]`, and the extractor's Python exception line as the cause. A line that merely contains the word, such as "0 errors", is never picked.
+- A run CodeQL marks with `executionSuccessful: false` (`tool_crashed`).
+- The `py/summary/lines-of-code` metric is 0 (`tool_saw_nothing`). CodeQL then extracted nothing and still exits 0, which was checked on a repository with no Python in scope.
+- An extraction notification at error level that names an in-scope file (`tool_crashed`).
 
 **Extraction problems, and why only error level fails.** Every run's
 `toolExecutionNotifications` are read. Notes and level "none" are telemetry and
@@ -648,11 +652,7 @@ all.
      and deletes the project. The delete gets its own short time slice, also
      when the deadline has passed. A delete that fails does not fail the run,
      and the metadata says the project was left.
-   - **A scan that looked at nothing is an error.** The agent counts the `.py`
-     files in the task's scope before scanning. After the collection it
-     raises `ScannerError` when SonarQube analysed 0 files, when the scope has
-     Python files but `ncloc_language_distribution` has no Python, or when the
-     Python quality profile has no active rule (`activeRuleCount` 0). The
+   - **A scan that looked at nothing is never a clean scan.** The agent counts the `.py` files in the task's scope before scanning. After the collection, SonarQube having analysed 0 files, or no Python although the scope has Python files (`ncloc_language_distribution`), is a tool outcome (`tool_saw_nothing`: no SARIF, scored 0). A Python quality profile with no active rule (`activeRuleCount` 0), no profile at all, or measures that could not be read are the server's setup and raise `ScannerError`. The
      background task's `warnings` and any "Unable to parse file" lines of the
      scanner output go into the metadata (`ce_task.warnings`,
      `files_not_parsed`).
@@ -662,12 +662,7 @@ all.
      `VULNERABILITY` is skipped and counted (`issues_not_vulnerability`).
    - The CWEs are mapped with the same table as Semgrep (`cwe-map-5`), with
      the rule below.
-3. **Failures are errors**: a server that is down, a refused token (HTTP 401)
-   or missing permission (403), a scanner error, a background task that ends
-   `FAILED` or `CANCELED`, a rule lookup error, an incomplete page, an
-   analysis of nothing, or running out of budget raises `ScannerError`. The
-   project is deleted on every exit path once the scanner has started,
-   including a timeout and a budget that runs out between steps.
+3. **Failures**: a server that is down, a refused token (HTTP 401) or missing permission (403), a sonar-scanner error that names the server or the network, a rule lookup error or an incomplete page raises `ScannerError` (errored, re-run). Running out of budget (`deadline`), sonar-scanner failing on the code with no sign of a server problem (`tool_crashed`), a background task that ends `FAILED` or `CANCELED` (`tool_crashed`) or is still pending at the deadline (`deadline`), and an analysis of nothing (`tool_saw_nothing`) are tool outcomes: no SARIF, scored 0. The project is deleted on every exit path once the scanner has started, including a timeout and a budget that runs out between steps.
 
 #### How a rule's CWE set is mapped
 
@@ -942,7 +937,7 @@ Every option is `--ak key=value` or the host variable `CLAUDE_REVIEW_<KEY>`
 |---|---|---|
 | `model` | upstream default, `claude-opus-4-1-20250805` (may be retired, see above) | model for the review and, unless `filter_model` is set, the filter. Harbor's `-m` is recorded and not used |
 | `filter_model` | `model` | model for the per-finding filter |
-| `mode` | `stock` | `stock`: upstream prompts and filter unchanged. `scoped`: adds the benchmark's LLM02/LLM03 scope and a pointer to `security_manifest.json` through the upstream custom instructions, asks for a CWE list, the path, control status, residual risk and catalogue recommendation ids per finding, and uses the upstream filter text without exclusions 7 ("lack of hardening") and 14 ("user content in AI prompts is not a vulnerability") |
+| `mode` | `stock` | `stock`: upstream prompts and filter unchanged. `scoped`: builds custom scan instructions from the task's own output contract (the Scope table, the field vocabularies and the Recommendation catalogue of the instruction Harbor passes to the agent), tells the reviewer to read `security_manifest.json` first, asks for a `rule_id`, CWE list, path, control status, residual risk and catalogue recommendation ids per finding, and uses the upstream filter text without hard exclusions 7 ("lack of hardening") and 14 ("user content in AI prompts is not a vulnerability"). See [Scoped mode](#scoped-mode) |
 | `auth` | `auto` | `api_key` (`ANTHROPIC_API_KEY`), `oauth` (`CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`), or `auto`: the API key when it is set, else the token |
 | `filter` | `claude` with an API key, `hard_rules` with a token | `claude`: the upstream regex rules plus the per-finding API check (needs an API key). `hard_rules`: the regex rules only |
 | `max_turns` | none | Claude Code `--max-turns` |
@@ -973,7 +968,8 @@ Every option is `--ak key=value` or the host variable `CLAUDE_REVIEW_<KEY>`
      skipped (`"preflight": "skipped_oauth"` in the metadata).
    - builds the pull request (a file whose diff holds `@generated` is left
      out, as upstream does, and so are binary files) and the upstream prompt.
-   - runs the CLI in `/app/repo` with the upstream command line plus `-p`,
+   - copies the in-scope files (same relative paths) and `security_manifest.json` into a scratch folder, `<work dir>/scope`, and runs the CLI there, so the review cannot open an out-of-scope file, and a `Read` rule denies `/app/repo` itself. Finding and path files under the scratch folder are made relative again, so they name the repository's own paths, and the filter reads finding files from the copy too. Every `tool_use` of the CLI's stream-json is kept (tool name and only its `file_path`, `path`, `pattern` or `glob`, scrubbed), and a call outside the copy, or at a file that is not in scope, is flagged.
+   - runs the CLI with the upstream command line plus `-p`,
      `--output-format stream-json --verbose` (the last line is the same result
      object as upstream's `json` output), `--settings` and `--setting-sources
      user` (the repository's own `.claude` settings are not loaded),
@@ -992,28 +988,25 @@ Every option is `--ak key=value` or the host variable `CLAUDE_REVIEW_<KEY>`
    - writes one JSON result, scrubbed of the key.
 3. The agent maps the kept findings and writes the SARIF.
 
-**Failures are errors, never a clean scan.** The upstream code treats several
-failures as "no findings". The agent raises `ScannerError` instead when the key
-is missing, the API cannot be reached or refuses the key, the model is not
-available, the CLI would use another model or credential, a CLI result is not
-JSON, says `is_error` or a subtype other than `success` (including
-`error_max_turns`), holds no findings JSON, says `review_completed` false or
-`files_reviewed` 0, when the filter cannot reach the API (upstream silently
-falls back to the regex rules), when any per-finding filter call fails
-(upstream keeps that finding at confidence 10), and when the time runs out.
+**Failures are never a clean scan.** The upstream code treats several failures as "no findings". The agent does not. Infrastructure failures raise `ScannerError` (errored, re-run): the key is missing, the API cannot be reached or refuses the key, the model is not available, the CLI would use another model, credential or tool set, every CLI attempt failed (`is_error`, a subtype other than `success`, no findings JSON), the filter cannot reach the API (upstream silently falls back to the regex rules), or a per-finding filter call fails (upstream keeps that finding at confidence 10). A review that did not deliver is a tool outcome (no SARIF, scored 0, `tool_outcome` in the metadata): the time ran out (`deadline`), the model said `review_completed` false (`review_incomplete`) or `files_reviewed` 0 (`files_reviewed_zero`), the CLI stopped at `--max-turns` or `--max-budget-usd` (`cli_limit`), the prompt is too long even without the diff (`prompt_too_long`), the model's findings are not JSON objects (`bad_review_output`), or more than 5,000 files are in scope (`too_many_files`).
+
+### Scoped mode
+
+Every task's `instruction.md` carries the output contract: the Scope table of the five ruleIds and their definitions, the SARIF fields with the path roles and the `controlStatus` and `residualRisk` values, and the Recommendation catalogue. Harbor passes that text to the agent's `run`. In scoped mode the agent reads the contract from it (`sast/claude_review/contract.py`) and builds the custom scan instructions at run time: a fixed preamble that tells the reviewer to read `security_manifest.json` first and to add six JSON fields to each upstream finding (`rule_id`, `cwe`, `path` with file, line and role per step, `control_status`, `residual_risk`, `recommendation_ids`), with the role and value vocabularies taken from the contract, then the task's own Scope table and Recommendation catalogue. Only when the instruction carries no contract (a placeholder, for example) does it fall back to the bundled `scoped_scan_instructions.txt`, written from the same contract. `scan_instructions_source` and `scan_instructions_sha256` in the metadata say which text was used. A test checks that the generated text shares no six-word run with any ground truth.
+
+The scoped filter text, `scoped_filter_instructions.txt`, is the upstream default without 2 of its 16 hard exclusions: 7 ("A lack of hardening measures") and 14 ("Including user-controlled content in AI system prompts is not a vulnerability"), because both rule out risks the task scores. Scoped runs therefore keep findings the stock filter would drop. This is recorded per run in `filter_exclusions_dropped` (and in the SARIF's `filterExclusionsDropped`). The text is read only by the Claude filter stage, so with a subscription token (hard-rule filter) it has no effect, which `filter_exclusions_dropped_apply` says.
+
+Scoped results are harness-instructed and use a loosened filter, so report them next to stock results, never as stock upstream.
 
 ### Mapping
 
 - **CWE, stock mode**: the review gives a free-text `category` and no CWE. A
   frozen table (`sast/claude_review/category_map.py`, version
-  `ccsr-category-map-1`) maps the normalised category to one CWE, for example
+  `ccsr-category-map-2`; the table is the same as in `-1`) maps the normalised category to one CWE, for example
   `sql_injection` to CWE-89, `command_injection` to CWE-78 and
   `sensitive_data_logging` to CWE-532. A category that is not in the table is
   counted in `unmapped_by_category` and not reported.
-- **CWE, scoped mode**: the model's own `cwe` list is used when at least one
-  entry is a well-formed id on the agent's allow-list, else the table. Rejected
-  values are counted in `cwes_rejected`, and each finding's `cweSource` says
-  which was used.
+- **CWE, scoped mode**: the model's own `cwe` list is used when at least one entry is a well-formed CWE id (`CWE-<n>`, or a spelling such as `cwe 89` or `89`), else the table. Any well-formed id is accepted (`ccsr-category-map-2`; `-1` had an allow-list that rejected ids the ground truth accepts, such as CWE-184 and CWE-1289): the model's `rule_id` decides the family in scoped mode, so an unusual CWE cannot move a finding. Malformed values are counted in `cwes_rejected` and `cwes_rejected_count`, and each finding's `cweSource` says which source was used.
 - **RuleId, stock mode**: the CWEs go through `cwe_map.decide_unordered` and `task_rule`, like CodeQL and SonarQube results, so the ruleId follows the same frozen CWE table as every scanner. `LLM03.EA.AUTONOMY` has no CWE and is never reported in stock mode.
 - **RuleId, scoped mode**: the model's own `rule_id` when it is one of the five task ruleIds, which is what the task instruction asks every scanner to report. Then the CWEs do not decide the ruleId, an ambiguous or unmapped CWE set does not drop the finding, and Autonomy can be reported. Without a valid `rule_id` the CWEs decide as in stock mode. `rule_source` and `rule_ids_rejected` in the metadata count both.
 - **Stock-mode caveat**: stock scores depend on the frozen category map, because a category outside it is dropped (`unmapped_by_category`). The map is not extended with names seen in runs. Quote stock numbers with that caveat, next to scoped numbers.
@@ -1046,10 +1039,11 @@ reason. At the top level: `model`, `filter_model`, `mode`, `filter_mode`, `auth`
 names the model the review used. The driver's full result is kept as the
 artifact `claude_review.json`.
 
+Also under `claude_review`: `scan_instructions_source` (`task_instruction` when the scoped text was built from the instruction's output contract, `bundled` for the fallback file, null in stock mode) with `scan_instructions_sha256`, `contract` (the rule ids, REC ids, roles and values read from the instruction) and `contract_ids_not_accepted` (any of them the normaliser does not accept; empty lists when the two agree), `filter_exclusions_dropped` (the two upstream hard exclusions the scoped filter text leaves out, with their upstream numbers and text; empty in stock mode) and `filter_exclusions_dropped_apply` (whether they matter: only the Claude filter reads that text), `scope_copy` (the scratch folder and how many files it holds), `paths_relativised`, `tool_uses_count`, `tool_uses` (the first 500; all of them are in `claude_review.json` under `cli.tool_uses`), and `tool_uses_outside_scope` with its count.
+
 ### Cost, time and caveats
 
-- No run against the real API has been made with this agent yet, so these are
-  estimates. Claude Code's own system prompt is about 15,000 tokens, read again
+- The agent has run against the real model on 10 dataset tasks with a subscription token only, which reports no per-call API cost, so the figures here are still estimates and the API-key path (per-finding filter calls, preflight) has not been costed. Claude Code's own system prompt is about 15,000 tokens, read again
   (mostly from cache) on every turn. A review of a small repository with an
   Opus-class model takes a few minutes to about 15 minutes and roughly $0.50 to
   $5, and each finding that reaches the filter costs one more call that holds

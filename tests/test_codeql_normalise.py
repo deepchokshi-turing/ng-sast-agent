@@ -245,7 +245,9 @@ EXPECTED = {
     "smoke_eval": {"reward": 0.0, "tp": 0, "fp": 0, "fn": 1, "results": 0},
     # CodeQL's py/code-injection with its own path from the HTTP request to eval():
     # detection 0.35 + classification 0.05 + path 0.30, no controls or recommendations.
-    "smoke_web_eval": {"reward": 0.7, "tp": 1, "fp": 0, "fn": 0, "results": 1},
+    # Grader v3.2 scores path roles: CodeQL names only the first (source) and last (sink) step, so its path
+    # earns partial credit (0.3056), not 1.0.
+    "smoke_web_eval": {"reward": 0.4917, "tp": 1, "fp": 0, "fn": 0, "results": 1},
     # A clean twin with nothing reported passes.
     "task_3920a8_negative": {"reward": 1.0, "tp": 0, "fp": 0, "fn": 0, "results": 0},
     "task_4da5ab_negative": {"reward": 1.0, "tp": 0, "fp": 0, "fn": 0, "results": 0},
@@ -285,8 +287,9 @@ def test_grader_gives_path_credit_only_for_a_real_path(tmp_path):
     doc, _, _ = agent_sarif("smoke_web_eval", recorded("smoke_web_eval"))
     (tmp_path / "with").mkdir()
     score = grade("smoke_web_eval", doc, tmp_path / "with")
-    assert (score["tp"], score["fp"], score["fn"], score["path"]) == (1, 0, 0, 1.0)
-    assert score["reward"] == 0.7
+    # v3.2: coverage is full but only the source and sink roles are named, so path credit is partial.
+    assert (score["tp"], score["fp"], score["fn"], score["path"]) == (1, 0, 0, 0.3056)
+    assert score["reward"] == 0.4917
     for result in doc["runs"][0]["results"]:
         result.pop("codeFlows")
     (tmp_path / "without").mkdir()

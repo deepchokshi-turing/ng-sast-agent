@@ -21,7 +21,7 @@ For every task folder (one holding task.toml or environment/):
 4. environment/Dockerfile may copy only ``repo/`` into the image. ``COPY
    --from=<stage>`` (files from another image) is allowed. Any other COPY or ADD
    source, for example ``tests/`` or ``.``, is a problem.
-5. task.toml and instruction.md are searched for the same banned words. They
+5. task.toml and instruction.md are searched for the same banned words (instruction.md may name the five task ruleIds of the output contract). They
    are the task files the harness and the scanner can read besides
    environment/.
 6. For twins (paired through VARIANTS.json, or by the folder names
@@ -104,6 +104,8 @@ from pathlib import Path
 BANNED = ["cve-", "ghsa-", "vulnerab", "exploit", "patch", "fixed", "insecure", "bypass", "traversal", "ssrf",
           "injection", "malicious", "LLM02", "LLM03", "CWE-"]
 BANNED_RE = re.compile("|".join(re.escape(w) for w in BANNED), re.IGNORECASE)
+#: The task ruleIds of the output contract, the only banned-looking tokens instruction.md may hold.
+CONTRACT_RULE_RE = re.compile(r"`?LLM02\.SID\.(?:MEDIUM|HIGH)`?|`?LLM03\.EA\.(?:FUNCTIONALITY|PERMISSIONS|AUTONOMY)`?")
 EVALUATOR_ONLY = [re.compile(p) for p in (r"^ground_truth.*\.json$", r"^repro_test.*\.py$", r"^provenance.*\.json$")]
 TWIN_RE = re.compile(r"^(task_.+)_(positive|negative)$")
 #: The scanner-visible view written by tools/export_views.py, and the only keys it may have (spec 5.2 task fields
@@ -171,6 +173,10 @@ def visible_file_hits(task: Path) -> list[str]:
         if not f.is_file():
             continue
         for n, line in enumerate(f.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+            if name == "instruction.md":
+                # The shared output contract must name the task ruleIds. They are the same public
+                # vocabulary in every task, so only they are allowed here.
+                line = CONTRACT_RULE_RE.sub("", line)
             m = BANNED_RE.search(line)
             if m:
                 hits.append(f"banned word '{m.group(0)}' at {name}:{n}")

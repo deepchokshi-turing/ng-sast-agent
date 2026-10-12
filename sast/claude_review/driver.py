@@ -16,9 +16,16 @@ agent's docs):
 2. ``prompts.get_security_audit_prompt`` builds the prompt. In ``scoped`` mode
    the agent's custom scan instructions go through the upstream
    ``custom_scan_instructions`` argument.
-3. The Claude Code CLI runs the review in /app/repo with the upstream command
-   line plus ``-p`` and our own settings (see ``cli_argv`` and
-   ``cli_settings``). The prompt goes on stdin.
+3. The Claude Code CLI runs the review with the upstream command line plus
+   ``-p`` and our own settings (see ``cli_argv`` and ``cli_settings``). The
+   prompt goes on stdin. With a ``scope_dir`` in the request (the agent always
+   sends one) the CLI runs in that directory, which holds a copy of only the
+   in-scope files, at the same relative paths, plus security_manifest.json
+   (``make_scope_copy``), and a Read rule denies the real repository: the
+   review cannot open an out-of-scope file, and its finding paths stay valid.
+   Every ``tool_use`` of the CLI's stream-json (tool name and path or pattern
+   only) is kept, and any one outside the scope is flagged
+   (``tool_use_records``).
 4. ``findings_filter.FindingsFilter`` runs the upstream hard rules and the
    per-finding Claude API check, with the key passed in-process.
 
@@ -60,6 +67,7 @@ import json
 import os
 import queue
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -119,6 +127,17 @@ AUTH_FAILURE_MARKERS = ("invalid api key", "please run /login", "not logged in",
 
 #: CLI result subtypes that a retry cannot fix.
 FATAL_SUBTYPES = ("error_max_turns", "error_max_budget_usd")
+
+#: The application manifest the review is told to read first. Copied into the
+#: scope directory even when it is outside the scanner roots.
+MANIFEST_FILE = "security_manifest.json"
+#: ``tool_use`` input fields that name a path or a pattern. Nothing else of the
+#: input is kept (a Task prompt or a Grep regex can quote the code).
+TOOL_PATH_FIELDS = ("file_path", "notebook_path", "path", "pattern", "glob")
+#: Fields among them that are file system paths (checked against the scope).
+TOOL_FS_FIELDS = ("file_path", "notebook_path", "path")
+#: Records kept per review; more are counted only.
+MAX_TOOL_USES = 5000
 
 
 class DriverError(Exception):
@@ -228,16 +247,138 @@ def synthesise_pr(repo, files):
     return pr_data, diff, record
 
 
+# ---------------------------------------------------------------- the scope
+
+
+def make_scope_copy(repo, files, scope_dir):
+    """A fresh ``scope_dir`` holding a copy of each in-scope file (same relative
+    path) and of security_manifest.json. Symbolic links and anything that is not
+    a regular file are left out. Returns the record for the result document."""
+    if os.path.lexists(scope_dir):
+        shutil.rmtree(scope_dir)
+    os.makedirs(scope_dir)
+    os.chmod(scope_dir, 0o700)
+    copied, skipped = [], []
+    wanted = list(files)
+    if MANIFEST_FILE not in wanted:
+        wanted.append(MANIFEST_FILE)
+    for path in wanted:
+        source = os.path.join(repo, path)
+        target = os.path.normpath(os.path.join(scope_dir, path))
+        if not target.startswith(os.path.normpath(scope_dir) + os.sep):
+            skipped.append(path)
+            continue
+        if os.path.islink(source) or not os.path.isfile(source):
+            if path != MANIFEST_FILE or os.path.lexists(source):
+                skipped.append(path)
+            continue
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        shutil.copyfile(source, target)
+        copied.append(path)
+    return {"dir": scope_dir, "files": len(copied), "manifest": MANIFEST_FILE in copied,
+            "manifest_outside_roots": MANIFEST_FILE in copied and MANIFEST_FILE not in files,
+            "skipped": skipped[:200]}
+
+
+def relative_to(path, base):
+    """``path`` relative to ``base`` when it is inside it, else ``path`` unchanged."""
+    if not isinstance(path, str) or not base:
+        return path
+    prefix = base.rstrip("/") + "/"
+    return path[len(prefix):] if path.startswith(prefix) else path
+
+
+def relativise_review(review, base):
+    """Finding and path step files under ``base`` (the scope copy) made relative
+    to it, so they name the repository's own relative paths. Returns the count."""
+    changed = 0
+    for finding in review.get("findings") or []:
+        if not isinstance(finding, dict):
+            continue
+        items = [finding] + [s for s in (finding.get("path") if isinstance(finding.get("path"), list) else [])
+                             if isinstance(s, dict)]
+        for item in items:
+            new = relative_to(item.get("file"), base)
+            if new != item.get("file"):
+                item["file"] = new
+                changed += 1
+    return changed
+
+
+def tool_use_messages(stdout):
+    """(name, input) of every ``tool_use`` block in the CLI's stream-json, in order."""
+    for line in (stdout or "").splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            message = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(message, dict) or message.get("type") != "assistant":
+            continue
+        content = (message.get("message") or {}).get("content") if isinstance(message.get("message"), dict) else None
+        for block in content if isinstance(content, list) else []:
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                yield str(block.get("name") or ""), block.get("input") if isinstance(block.get("input"), dict) else {}
+
+
+def outside_scope(value, base, allowed):
+    """Why the path ``value`` (relative to ``base``, the directory the CLI runs
+    in, or absolute) is outside the scope, else None. ``allowed`` holds the
+    repository-relative files the review may read."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    value = value.strip()
+    full = os.path.normpath(value if value.startswith("/") else os.path.join(base, value))
+    root = os.path.normpath(base)
+    if full != root and not full.startswith(root + os.sep):
+        return "outside the review directory"
+    rel = os.path.relpath(full, root).replace(os.sep, "/")
+    if rel == "." or rel in allowed or any(f.startswith(rel + "/") for f in allowed):
+        return None
+    return "not an in-scope file"
+
+
+def tool_use_records(stdout, base, allowed, secret, attempt):
+    """(records, out of scope) for one CLI run's tool calls. A record keeps the
+    tool name and only the path or pattern fields of its input, scrubbed and
+    cut to 300 characters."""
+    records, flagged = [], []
+    for name, raw in tool_use_messages(stdout):
+        entry = {"attempt": attempt, "tool": name}
+        for field in TOOL_PATH_FIELDS:
+            if field in raw and raw[field] is not None:
+                entry[field] = tail(scrub(str(raw[field]), secret), 300)
+        reasons = []
+        for field in TOOL_FS_FIELDS:
+            why = outside_scope(entry.get(field), base, allowed)
+            if why:
+                reasons.append("{} {}".format(field, why))
+        pattern = entry.get("pattern")
+        if name == "Glob" and isinstance(pattern, str) and pattern.startswith("/"):
+            why = outside_scope(pattern.split("*")[0].rstrip("/") or "/", base, allowed)
+            if why == "outside the review directory":
+                reasons.append("pattern " + why)
+        if reasons:
+            entry["outside_scope"] = "; ".join(reasons)
+            flagged.append(entry)
+        records.append(entry)
+    return records, flagged
+
+
 # ---------------------------------------------------------------- the CLI
 
 
-def cli_settings(keyfile, home, cli_auth):
+def cli_settings(keyfile, home, cli_auth, deny_dirs=()):
     """The CLI's user settings. No secret in here: the helper only names the file.
-    Only ``cli_auth`` "api_key_helper" gets a helper (never "oauth")."""
+    Only ``cli_auth`` "api_key_helper" gets a helper (never "oauth").
+    ``deny_dirs`` are further directories the review must not read (the real
+    repository when the review runs in a scope copy, the agent's own output)."""
     deny = list(DENIED_TOOLS)
     # The key's folder and the CLI's own home are outside the repository, and
     # print mode denies reads there anyway. These rules say so explicitly.
-    for folder in (os.path.dirname(keyfile), home):
+    for folder in (os.path.dirname(keyfile), home) + tuple(deny_dirs):
         deny.append("Read(/{}/**)".format(folder.rstrip("/")))
     # With a subscription token the token is in the CLI's own environment (/proc/<pid>/environ).
     deny.append("Read(//proc/**)")
@@ -512,7 +653,8 @@ def judge_attempt(code, stdout, parse_json):
 
 
 def run_review(argv, prompt_for, cwd, env, attempts, cli_deadline, parse_json, sleep=time.sleep,
-               min_attempt_sec=MIN_ATTEMPT_SEC, check_init_for=None, record=None, refused=None, secret=None):
+               min_attempt_sec=MIN_ATTEMPT_SEC, check_init_for=None, record=None, refused=None, secret=None,
+               allowed=None):
     """Run the CLI until it gives a usable review. Returns (review, record).
 
     ``prompt_for(include_diff)`` builds the prompt. ``check_init_for(init)``
@@ -521,10 +663,14 @@ def run_review(argv, prompt_for, cwd, env, attempts, cli_deadline, parse_json, s
     was refused raises it at once instead of retrying. ``secret`` is scrubbed
     from the CLI's whole output before any of it is kept. Raises DriverError when
     no attempt gives a usable review. ``record`` (filled as it goes, so it is
-    complete after a failure too) is returned with the review.
+    complete after a failure too) is returned with the review. It keeps every
+    ``tool_use`` of every attempt (``tool_uses``) and flags the ones outside
+    ``allowed``, the repository-relative files of the scope
+    (``tool_uses_outside_scope``).
     """
     record = {} if record is None else record
-    record.update({"attempts": [], "diff_omitted": False})
+    record.update({"attempts": [], "diff_omitted": False, "tool_uses": [], "tool_uses_count": 0,
+                   "tool_uses_outside_scope": []})
     include_diff = True
     prompt = prompt_for(True)
     record["prompt_sha256"] = sha256_text(prompt)
@@ -538,6 +684,11 @@ def run_review(argv, prompt_for, cwd, env, attempts, cli_deadline, parse_json, s
                               .format(len(record["attempts"]), last_reason))
         code, out, err, seconds, init, abort = run_cli_once(argv, prompt, cwd, env, left, check_init_for)
         out, err = scrub(out, secret), scrub(err, secret)
+        if allowed is not None:
+            uses, flagged = tool_use_records(out, cwd, allowed, secret, len(record["attempts"]) + 1)
+            record["tool_uses_count"] += len(uses)
+            record["tool_uses"] += uses[:max(0, MAX_TOOL_USES - len(record["tool_uses"]))]
+            record["tool_uses_outside_scope"] += flagged
         if init is not None:
             record["init"] = init_summary(init)
         if abort:
@@ -576,7 +727,7 @@ def run_review(argv, prompt_for, cwd, env, attempts, cli_deadline, parse_json, s
             raise DriverError("cli_limit", last_reason)
         if judged["outcome"] == "prompt_too_long":
             if not include_diff:
-                raise DriverError("cli_failed", "the prompt is too long even without the diff")
+                raise DriverError("prompt_too_long", "the prompt is too long even without the diff")
             # Upstream's second pass: the file list only (github_action_audit.py:591-595).
             include_diff = False
             record["diff_omitted"] = True
@@ -896,8 +1047,9 @@ def write_private(path, text):
     os.chmod(path, 0o600)
 
 
-def execute(request, key, keyfile, document, started):
-    """The review itself. Fills ``document`` as it goes, raises DriverError."""
+def execute(request, key, keyfile, document, started, private_dirs=()):
+    """The review itself. Fills ``document`` as it goes, raises DriverError.
+    ``private_dirs`` (the request's and the result's folders) are denied to the CLI."""
     budget = float(request["budget_sec"])
     deadline = started + budget - RESERVE_SEC
     cli_deadline = started + budget * float(request.get("cli_share") or 0.6)
@@ -921,8 +1073,16 @@ def execute(request, key, keyfile, document, started):
     # Also removes a CLAUDE_CODE_OAUTH_TOKEN the process may have inherited: the token comes from the file.
     document["environment_removed"] = scrub_environment(keep=())
     # Upstream reads these at import time (constants.py, github_action_audit.py).
+    scope_dir = request.get("scope_dir")
+    if scope_dir:
+        scope_abs, repo_abs = os.path.abspath(scope_dir), os.path.abspath(repo)
+        if (not os.path.isabs(scope_dir) or scope_abs in ("/", repo_abs)
+                or (repo_abs + os.sep).startswith(scope_abs + os.sep) or scope_abs.startswith(repo_abs + os.sep)):
+            raise DriverError("bad_request", "scope_dir {!r} must be an absolute directory apart from the "
+                              "repository".format(scope_dir))
     os.environ["CLAUDE_MODEL"] = model
-    os.environ["REPO_PATH"] = repo
+    # The filter reads a finding's file from REPO_PATH: the scope copy, when there is one.
+    os.environ["REPO_PATH"] = scope_dir or repo
     os.environ["ENABLE_CLAUDE_FILTERING"] = "true" if filter_mode == "claude" else "false"
     sys.path.insert(0, request["ccsr_dir"])
     if oauth:
@@ -961,8 +1121,16 @@ def execute(request, key, keyfile, document, started):
         return prompts.get_security_audit_prompt(pr_data, diff, include_diff=include_diff,
                                                  custom_scan_instructions=scan_instructions)
 
-    # 3. The CLI.
-    settings = cli_settings(keyfile, home, cli_auth)
+    # 3. The CLI, in the scope copy when there is one.
+    allowed = set(files) | {MANIFEST_FILE}
+    cli_cwd = scope_dir or repo
+    # Never a folder that holds the review's own directory (a test may put everything in one).
+    deny_dirs = tuple(d for d in private_dirs
+                      if d and not (os.path.abspath(cli_cwd) + os.sep).startswith(os.path.abspath(d) + os.sep))
+    if scope_dir:
+        document["scope_copy"] = make_scope_copy(repo, files, scope_dir)
+        deny_dirs = (repo,) + deny_dirs
+    settings = cli_settings(keyfile, home, cli_auth, deny_dirs)
     settings_file = os.path.join(home, ".claude", "settings.json")
     write_private(settings_file, json.dumps(settings, indent=2))
     document["cli_settings"] = settings
@@ -973,14 +1141,16 @@ def execute(request, key, keyfile, document, started):
     argv = cli_argv(claude, model, settings_file, request.get("max_turns"), request.get("max_budget_usd"))
     document["cli_argv"] = argv
     cli_record = document["cli"] = {}
-    review, _ = run_review(argv, prompt_for, repo, env, int(request.get("cli_attempts") or 3),
+    review, _ = run_review(argv, prompt_for, cli_cwd, env, int(request.get("cli_attempts") or 3),
                                     min(cli_deadline, deadline), json_parser.parse_json_with_fallbacks,
                                     min_attempt_sec=float(request.get("min_attempt_sec") or MIN_ATTEMPT_SEC),
                                     check_init_for=lambda init: check_init(init, model, cli_auth),
                                     record=cli_record,
                                     refused=("cli_oauth_refused", "Claude Code refused the subscription token. Run "
                                              "`claude setup-token` again and set CLAUDE_CODE_OAUTH_TOKEN")
-                                    if oauth else None, secret=key)
+                                    if oauth else None, secret=key, allowed=allowed)
+    if scope_dir:
+        document["paths_relativised"] = relativise_review(review, scope_dir)
     document["review"] = review
     document["review_summary"] = check_review(review, len(pr_data["files"]))
 
@@ -1020,7 +1190,9 @@ def main(argv=None):
             raise DriverError("no_key", "cannot read the credential file: {}".format(exc))
         if not key:
             raise DriverError("no_key", "the credential file is empty")
-        execute(request, key, args.keyfile, document, started)
+        execute(request, key, args.keyfile, document, started,
+                private_dirs=(os.path.dirname(os.path.abspath(args.request)),
+                              os.path.dirname(os.path.abspath(args.out))))
         document["status"] = "ok"
         code = 0
     except DriverError as exc:

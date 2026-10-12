@@ -32,8 +32,9 @@ OAUTH_TOKEN = "sk-ant-oat01-TESTOAUTH-9876543210zyxwvutsrqponmlkjihgfedcba-QRSTU
 #: wrapper's "result" may be given as "review" (a dict, dumped to text). Output
 #: is stream-json: an init message first (its fields can be overridden with
 #: "init": {...}, or left out with "no_init": true), then the result. An entry
-#: may also say "sleep": seconds (after the init). Runs past the end reuse the
-#: last entry.
+#: may also say "sleep": seconds (after the init), and "tool_uses": a list of
+#: {"name": ..., "input": {...}} written as assistant tool_use messages before the
+#: result. Runs past the end reuse the last entry.
 #: Every run appends one JSON line to claude.log.
 FAKE_CLAUDE = r'''#!{python}
 import hashlib, json, os, subprocess, sys, time
@@ -58,7 +59,9 @@ log = {"argv": sys.argv, "cwd": os.getcwd(), "home": os.environ.get("HOME"),
        "env_oauth_token": os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"),
        "env_names": sorted(os.environ), "settings": settings, "settings_mode": mode, "helper_key": helper_key,
        "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(), "prompt_has_diff": "PR DIFF CONTENT:" in prompt,
-       "prompt": prompt}
+       "prompt": prompt,
+       "cwd_files": sorted(os.path.relpath(os.path.join(d, f), os.getcwd()) for d, _, fs in os.walk(os.getcwd())
+                           for f in fs)}
 with open(os.path.join(here, "claude.log"), "a") as f:
     f.write(json.dumps(log) + "\n")
 if not step.get("no_init"):
@@ -73,6 +76,9 @@ if not step.get("no_init"):
     sys.stdout.write(json.dumps(init) + "\n")
     sys.stdout.flush()
 time.sleep(step.get("sleep", 0))
+for use in step.get("tool_uses", []):
+    block = {"type": "tool_use", "id": "toolu_1", "name": use["name"], "input": use.get("input", {})}
+    sys.stdout.write(json.dumps({"type": "assistant", "message": {"content": [block]}}) + "\n")
 if "wrapper" in step:
     wrapper = dict(step["wrapper"])
     if "review" in wrapper:

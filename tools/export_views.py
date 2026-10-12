@@ -81,7 +81,10 @@ LABEL_FIELDS = ("variant_role", "risk_types_present", "findings", "negative_anal
 #: Keys that are in both views by design (identifiers and build facts recorded in provenance).
 SHARED_KEYS = frozenset({"schema_version", "task_id", "repository_id", "family_id", "variant_id",
                          "related_variant_ids", "source_origin", "package_versions",
-                         "entrypoint", "build_command", "test_command"})
+                         "entrypoint", "build_command", "test_command",
+                         # The scan scope is scanner-visible in task.toml and copied into the ground truth's
+                         # matching block for the grader (v3.2), so it is in both views by design.
+                         "scanner_roots", "excluded_paths"})
 MIN_VALUE_LEN = 6
 #: An evaluator string counts as label content when it is prose (at least PROSE_WORDS words), an id with a label
 #: shape (rule id, CWE, recommendation id, advisory, CVE), or a single identifier-like token (not only letters) of

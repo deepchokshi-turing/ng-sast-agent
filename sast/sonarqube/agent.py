@@ -44,7 +44,7 @@ from typing import Any, ClassVar
 from harbor.environments.base import BaseEnvironment, ExecResult
 
 from ..base import REPO_DIR, ScannerAgent
-from ..errors import ScannerError
+from ..errors import ScannerError, ToolOutcome
 from ..findings import Finding
 from ..scope import in_scope, repo_path, task_scope
 from ..task_config import TaskSettings
@@ -53,6 +53,15 @@ from .normalise import normalise, sonar_types
 from .options import SonarQubeOptions
 
 _HERE = Path(__file__).parent
+
+#: fetch.py exit codes (fetch.py EXIT_TASK, EXIT_TIMEOUT) that are tool outcomes:
+#: the server's analysis of this repository failed, or the scan budget ran out.
+FETCH_EXIT_OUTCOME = {4: "tool_crashed", 5: "deadline"}
+#: sonar-scanner output that points at the server or the network, not at the code:
+#: a non-zero exit with one of these is an infrastructure failure (lowercase).
+SCANNER_INFRA_MARKERS = ("not authorized", "unauthorized", "insufficient privileges", "http 401", "http 403",
+                         "failed to query server", "connection refused", "unknownhostexception", "connectexception",
+                         "sockettimeoutexception", "sslhandshakeexception", "unable to reach")
 
 #: Always excluded, like the Semgrep agent: compiled bytecode is a build output.
 ALWAYS_EXCLUDE_GLOBS = ("**/__pycache__/**", "**/*.pyc", "**/*.pyo")
@@ -358,7 +367,7 @@ class SonarQubeAgent(ScannerAgent):
 
         def need(seconds: float, what: str) -> None:
             if left() < seconds:
-                raise ScannerError(f"the scan budget ({int(budget_sec)} s) ran out before {what}")
+                raise ToolOutcome("deadline", f"the scan budget ({int(budget_sec)} s) ran out before {what}")
 
         # 1. The server is up and takes the token.
         need(MIN_STEP_SEC, "checking the SonarQube server")
@@ -405,14 +414,17 @@ class SonarQubeAgent(ScannerAgent):
             )
             scanner_started = True
             result = await self._run_logged(environment, "command-2", command, token, env=env, cwd=REPO_DIR,
-                                            timeout_sec=exec_timeout(seconds), what="sonar-scanner")
+                                            timeout_sec=exec_timeout(seconds), what="sonar-scanner", tool_step=True)
             await self._keep_scanner_log(environment, result, f"{work}/out/sonar-scanner.log")
             sonar["scanner_exit_code"] = result.return_code
             sonar["files_not_parsed"] = parse_failures(f"{result.stdout}\n{result.stderr}")
             if result.return_code != 0:
-                raise ScannerError("sonar-scanner exited {}: {} (full log: agent/command-2/stdout.txt)".format(
-                    result.return_code,
-                    _last_error(f"{result.stdout}\n{result.stderr}", "no ERROR line in its output")))
+                output = f"{result.stdout}\n{result.stderr}"
+                message = "sonar-scanner exited {}: {} (full log: agent/command-2/stdout.txt)".format(
+                    result.return_code, _last_error(output, "no ERROR line in its output"))
+                if any(marker in output.lower() for marker in SCANNER_INFRA_MARKERS):
+                    raise ScannerError(message)
+                raise ToolOutcome("tool_crashed", message)
 
             # 4. Wait for the server, read what it analysed and found, delete the project.
             need(FETCH_DELETE_RESERVE_SEC + MIN_STEP_SEC + KILL_AFTER_SEC + EXEC_SLACK_SEC, "collecting the results")
@@ -425,7 +437,7 @@ class SonarQubeAgent(ScannerAgent):
             )
             result = await self._run_logged(environment, "command-3", bounded(command, seconds), token, env=env,
                                             timeout_sec=exec_timeout(seconds),
-                                            what="collecting the SonarQube results")
+                                            what="collecting the SonarQube results", tool_step=True)
             document = await self._read_document(environment, json_out)
             if document is not None:
                 sonar["deleted"] = bool(document.get("deleted"))
@@ -442,8 +454,11 @@ class SonarQubeAgent(ScannerAgent):
                             "hotspot_rules_error"):
                     sonar[key] = document.get(key)
             if result.return_code != 0:
-                raise ScannerError("collecting the SonarQube results failed (exit {}): {}".format(
-                    result.return_code, _last_error(result.stdout or result.stderr or "", "no output")))
+                message = "collecting the SonarQube results failed (exit {}): {}".format(
+                    result.return_code, _last_error(result.stdout or result.stderr or "", "no output"))
+                if result.return_code in FETCH_EXIT_OUTCOME:
+                    raise ToolOutcome(FETCH_EXIT_OUTCOME[result.return_code], message)
+                raise ScannerError(message)
             if document is None:
                 raise ScannerError(f"{json_out} is missing or unreadable after a successful collect")
 
@@ -451,7 +466,12 @@ class SonarQubeAgent(ScannerAgent):
             summary, problems = analysis_check(document, python_files)
             sonar["analysis"] = summary
             if problems:
-                raise ScannerError("SonarQube did not analyse the code: " + "; ".join(problems))
+                message = "SonarQube did not analyse the code: " + "; ".join(problems)
+                # A missing profile or unread measures is the server's setup; analysing
+                # no file or no Python of a scope that has some is the tool on this code.
+                if any("quality profile" in p or "were not read" in p for p in problems):
+                    raise ScannerError(message)
+                raise ToolOutcome("tool_saw_nothing", message)
         except BaseException:
             if scanner_started and not sonar.get("deleted"):
                 await self._delete_project(environment, fetch, project_key, env, sonar)
@@ -462,8 +482,7 @@ class SonarQubeAgent(ScannerAgent):
         except ValueError as exc:
             raise ScannerError(str(exc)) from exc
         meta.update(counts)
-        kept = [f for f in findings if in_scope(f.file, roots, excludes)]
-        meta["findings_out_of_scope"] = len(findings) - len(kept)
+        kept = self._keep_in_scope(findings, roots, excludes, meta)
         sonar["findings_by_sonar_type"] = sonar_types(kept)
         return kept
 
@@ -486,13 +505,17 @@ class SonarQubeAgent(ScannerAgent):
         timeout_sec: float,
         what: str,
         cwd: str | None = None,
+        tool_step: bool = False,
     ) -> ExecResult:
         """One exec, logged with the token scrubbed. The token is in neither the command nor the env."""
         if token in command or any(token in value for value in env.values()):  # a programming error
             raise ScannerError("refusing to run a command whose command line or env contains SONAR_TOKEN")
         started = time.monotonic()
         try:
-            result = await self._exec(environment, command, timeout_sec=timeout_sec, what=what, cwd=cwd, env=env)
+            result = await self._exec(environment, command, timeout_sec=timeout_sec, what=what, cwd=cwd, env=env,
+                                      tool_step=tool_step)
+        except ToolOutcome as exc:
+            raise exc.with_message(_scrub(str(exc), token)) from None
         except ScannerError as exc:
             raise ScannerError(_scrub(str(exc), token)) from None
         clean = ExecResult(stdout=_scrub(result.stdout, token), stderr=_scrub(result.stderr, token),

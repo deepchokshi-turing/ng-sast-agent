@@ -37,6 +37,11 @@ What each field is built from:
   ``recommendations``), taken from the first finding of the merged group that
   has each. Pattern and taint scanners never set them.
 
+- ``runs[0].properties`` (never scored): what the agent dropped or re-mapped
+  on the way from the tool's output to these results (counts and short lists),
+  so a report can show it next to the scores. See
+  ``ScannerAgent.sarif_run_properties``.
+
 The grader (v3) matches results to ground-truth findings one to one by an
 optimal assignment that maximises the task reward (``task_format/grade.py``,
 ``assign``), so the order of the results does not change which finding a
@@ -88,15 +93,15 @@ def _family(f: Finding) -> str | None:
     return cwe_map.rule_for(f.cwes)
 
 
-def _group(findings: list[Finding]) -> tuple[dict[tuple[str, int, str], dict[str, Any]], Counter[str], int]:
-    """Findings merged by (file, line, ruleId family), with unmapped ones counted."""
+def _group(findings: list[Finding]) -> tuple[dict[tuple[str, int, str], dict[str, Any]], list[Finding], int]:
+    """Findings merged by (file, line, ruleId family), and the unmapped ones left out."""
     groups: dict[tuple[str, int, str], dict[str, Any]] = {}
-    dropped_by_cwe: Counter[str] = Counter()
+    unmapped: list[Finding] = []
     mapped = 0
     for f in sorted(findings, key=lambda f: (f.file, f.start_line, f.tool_rule_id)):
         family = _family(f)
         if family is None:
-            dropped_by_cwe[f.cwes[0] if f.cwes else "none"] += 1
+            unmapped.append(f)
             continue
         mapped += 1
         key = (f.file, f.start_line, family)
@@ -142,7 +147,7 @@ def _group(findings: list[Finding]) -> tuple[dict[tuple[str, int, str], dict[str
         # From the group's family, never from the combined CWEs alone: a generic
         # CWE next to a NOT_DISCLOSURE one gives no family (cwe-map-5).
         group["rule"] = group["task_rule"] or cwe_map.family_rule(family, group["cwes"])
-    return groups, dropped_by_cwe, mapped
+    return groups, unmapped, mapped
 
 
 def emitted_rules(findings: list[Finding]) -> list[str | None]:
@@ -152,9 +157,31 @@ def emitted_rules(findings: list[Finding]) -> list[str | None]:
     return [by_id.get(id(f)) for f in findings]
 
 
-def build(findings: list[Finding], *, tool_name: str, tool_version: str) -> tuple[dict[str, Any], dict[str, Any]]:
-    """(sarif, stats). Findings with no mapped CWE are left out and counted."""
-    groups, dropped_by_cwe, mapped = _group(findings)
+def unmapped_findings(findings: list[Finding]) -> list[Finding]:
+    """The findings ``build`` leaves out because no CWE maps them to a task ruleId."""
+    return _group(findings)[1]
+
+
+def unmapped_rows(unmapped: list[Finding]) -> list[list[Any]]:
+    """[tool rule id, CWEs, file, line] of each finding left out for want of a mapped CWE."""
+    return [[f.tool_rule_id, list(f.cwes), f.file, f.start_line] for f in unmapped]
+
+
+def build(
+    findings: list[Finding],
+    *,
+    tool_name: str,
+    tool_version: str,
+    run_properties: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """(sarif, stats). Findings with no mapped CWE are left out and counted.
+
+    ``run_properties`` go to ``runs[0].properties`` as they are: the agent's
+    account of what it dropped or re-mapped (``ScannerAgent.sarif_run_properties``).
+    The grader never reads them, and they change nothing about the results.
+    """
+    groups, unmapped, mapped = _group(findings)
+    dropped_by_cwe: Counter[str] = Counter(f.cwes[0] if f.cwes else "none" for f in unmapped)
 
     results = []
     for (file, start, _family), g in sorted(groups.items(), key=lambda kv: (kv[0][0], kv[0][1], kv[1]["rule"])):
@@ -208,10 +235,13 @@ def build(findings: list[Finding], *, tool_name: str, tool_version: str) -> tupl
             "results": results,
         }],
     }
+    if run_properties:
+        sarif["runs"][0]["properties"] = run_properties
     stats = {
         "findings_mapped": mapped,
         "findings_unmapped": sum(dropped_by_cwe.values()),
         "unmapped_by_cwe": dict(sorted(dropped_by_cwe.items())),
+        "unmapped_findings": unmapped_rows(unmapped)[:200],
         "results_emitted": len(results),
         "results_by_rule": dict(sorted(Counter(r["ruleId"] for r in results).items())),
     }

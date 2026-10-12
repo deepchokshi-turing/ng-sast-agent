@@ -1,4 +1,4 @@
-"""Free-text review category -> CWE, version ``ccsr-category-map-1``. Frozen.
+"""Free-text review category -> CWE, version ``ccsr-category-map-2``. Frozen.
 
 The upstream review reports a free snake_case ``category`` per finding (the
 prompt's example is ``sql_injection``) and no CWE. In ``stock`` mode the agent
@@ -15,20 +15,25 @@ task labels. Whether a CWE is in scope is decided afterwards by
 ``cwe_map`` leaves unmapped on purpose.
 
 In ``scoped`` mode the model is asked for a CWE list per finding. Those CWEs
-are used when at least one passes :func:`valid_cwes` (the format and
-:data:`ALLOWED_CWES`); otherwise the category is looked up here as in stock
-mode. Which source was used is recorded per finding (``cweSource``).
+are used when at least one is well formed (:func:`valid_cwes`: ``CWE-<n>``, or
+a spelling of it such as ``cwe 89`` or ``89``); otherwise the category is
+looked up here as in stock mode. Which source was used is recorded per finding
+(``cweSource``). Any well-formed id is accepted: in scoped mode the model's
+``rule_id`` decides the risk family, so a CWE outside ``sast.cwe_map`` cannot
+move a finding to another family, and the grader accepts CWE ids (CWE-184,
+CWE-1289, ...) that an allow-list would reject. Only malformed values are
+rejected and counted.
 
-Changing anything here is a new version.
+Changing anything here is a new version. ``ccsr-category-map-2`` dropped the
+scoped mode's CWE allow-list (``ccsr-category-map-1`` accepted only the ids of
+``cwe_map`` plus a fixed list); the category table is unchanged.
 """
 
 from __future__ import annotations
 
 import re
 
-from .. import cwe_map
-
-VERSION = "ccsr-category-map-1"
+VERSION = "ccsr-category-map-2"
 
 #: normalised category -> CWE.
 CATEGORY_CWE: dict[str, str] = {
@@ -134,24 +139,8 @@ CATEGORY_CWE: dict[str, str] = {
     "prompt_injection": "CWE-1427",
 }
 
-#: CWE ids a scoped finding may name, besides every CWE of ``cwe_map.CWE_MAP``
-#: (added at lookup time). A real id the model gives that is not listed is
-#: dropped and counted, as is anything that is not ``CWE-<number>``.
-EXTRA_ALLOWED_CWES = frozenset({
-    "CWE-20", "CWE-74", "CWE-79", "CWE-90", "CWE-98", "CWE-116", "CWE-117", "CWE-209", "CWE-269", "CWE-287",
-    "CWE-295", "CWE-306", "CWE-307", "CWE-311", "CWE-312", "CWE-319", "CWE-327", "CWE-328", "CWE-330",
-    "CWE-345", "CWE-347", "CWE-352", "CWE-384", "CWE-400", "CWE-434", "CWE-441", "CWE-522", "CWE-523",
-    "CWE-525", "CWE-526", "CWE-539", "CWE-548", "CWE-552", "CWE-601", "CWE-602", "CWE-611", "CWE-620",
-    "CWE-640", "CWE-641", "CWE-693", "CWE-697", "CWE-703", "CWE-770", "CWE-776", "CWE-798", "CWE-807",
-    "CWE-915", "CWE-922", "CWE-1021", "CWE-1039", "CWE-1236", "CWE-1333", "CWE-1426", "CWE-1427",
-})
-
 _CWE_RE = re.compile(r"^CWE-([1-9][0-9]{0,4})$")
 _SEPARATORS = re.compile(r"[^a-z0-9]+")
-
-
-def allowed_cwes() -> frozenset[str]:
-    return frozenset(cwe_map.CWE_MAP) | EXTRA_ALLOWED_CWES | frozenset(CATEGORY_CWE.values())
 
 
 def normalise(category: object) -> str:
@@ -179,14 +168,13 @@ def _one(value: object) -> str | None:
 
 
 def valid_cwes(raw: object) -> tuple[tuple[str, ...], list[str]]:
-    """(accepted CWEs in the model's order without duplicates, rejected values as text)."""
+    """(well-formed CWEs in the model's order without duplicates, malformed values as text)."""
     values = raw if isinstance(raw, (list, tuple)) else ([] if raw is None else [raw])
-    allowed = allowed_cwes()
     accepted: list[str] = []
     rejected: list[str] = []
     for value in values:
         cwe = _one(value)
-        if cwe is None or cwe not in allowed:
+        if cwe is None:
             rejected.append(str(value)[:40])
         elif cwe not in accepted:
             accepted.append(cwe)

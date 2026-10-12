@@ -25,6 +25,18 @@ Configuration, read on the host:
   ``cli_share``, ``cli_attempts``, ``cli_auth``, ``scan_roots``, ``exclude``.
   See options.py.
 
+Scoped mode builds its custom scan instructions from the task's own output
+contract, the instruction text Harbor passes to ``run`` (``contract.py``), and
+falls back to the bundled ``scoped_scan_instructions.txt`` only when the
+instruction carries no contract. The review runs in a copy of the in-scope
+files (``driver.make_scope_copy``), and every tool call of the CLI is kept.
+
+A review that did not finish (deadline, ``review_completed`` false, no file
+reviewed, the CLI's turn or budget limit, a prompt too long) is a tool outcome
+(``sast.errors.ToolOutcome``): no SARIF, a normal return, scored 0. A missing or
+refused credential, an unreachable API or a CLI that would not use the agent's
+settings is an infrastructure failure (``ScannerError``).
+
 The credential is handled like SonarQube's token: it is uploaded as a file into
 a mode 700 directory under the work dir, copied under umask 077 into a mode 600
 file, read by the driver and deleted when the review ends, also after a
@@ -48,21 +60,39 @@ from typing import Any, ClassVar
 from harbor.environments.base import BaseEnvironment, ExecResult
 from harbor.models.trial.result import AgentInfo, ModelInfo
 
-from ..base import REPO_DIR, TIMEOUT_MARGIN_SEC, ScannerAgent
-from ..errors import ScannerError
+from .. import sarif
+from ..base import REPO_DIR, TIMEOUT_MARGIN_SEC, ScannerAgent, run_entry
+from ..errors import ScannerError, ToolOutcome
 from ..findings import Finding
 from ..scope import in_scope, repo_path, task_scope
 from ..task_config import TaskSettings
-from . import category_map, pins
+from . import category_map, contract, pins
 from .normalise import normalise
 from .options import ClaudeReviewOptions
 
 _HERE = Path(__file__).parent
 
-#: The scoped mode's texts. Built once from the task's public instruction (the
-#: scope table) and the upstream defaults, never from a task.
+#: The scoped mode's texts. The scan instructions are built at run time from the
+#: task's instruction (``contract.py``); this bundled copy, written from the same
+#: contract, is the fallback for an instruction that carries none. The filter
+#: text is the upstream default minus two hard exclusions (FILTER_EXCLUSIONS_DROPPED).
 SCAN_INSTRUCTIONS_FILE = _HERE / "scoped_scan_instructions.txt"
 FILTER_INSTRUCTIONS_FILE = _HERE / "scoped_filter_instructions.txt"
+#: The upstream filter's hard exclusions (claude_api_client.py, numbered as there)
+#: that the scoped filter text leaves out, so scoped runs keep findings the stock
+#: filter would drop. They are in the Claude API filter's prompt only, so they
+#: matter only when that filter runs (filter mode "claude").
+FILTER_EXCLUSIONS_DROPPED = (
+    {"upstream_number": 7, "text": "A lack of hardening measures. Code is not expected to implement all security "
+                                   "best practices, just avoid obvious vulnerabilities."},
+    {"upstream_number": 14, "text": "Including user-controlled content in AI system prompts is not a "
+                                    "vulnerability. In general, the inclusion of user input in an AI prompt is "
+                                    "not a vulnerability."},
+)
+#: The CLI runs in this copy of the in-scope files, under the work dir.
+SCOPE_DIR = "scope"
+#: Tool call records kept in the run metadata (all of them are in claude_review.json).
+MAX_TOOL_USES_META = 500
 
 KEY_ENV = "ANTHROPIC_API_KEY"
 OAUTH_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
@@ -111,6 +141,20 @@ ERROR_HINTS = {
     "oauth_filter": "the Claude filter needs an API key, and this run has a subscription token only",
     "cli_settings": "Claude Code did not apply the agent's tool restrictions",
     "cli_init_missing": "Claude Code did not say which model and tools it used",
+    "prompt_too_long": "the review prompt is too long even without the diff",
+    "bad_findings": "the model's findings are not JSON objects",
+}
+
+#: driver error code -> the tool outcome it is (``sast.errors``). Every other code
+#: is an infrastructure failure and stays a ScannerError.
+OUTCOME_CODES = {
+    "deadline": "deadline",
+    "timeout": "deadline",
+    "review_incomplete": "review_incomplete",
+    "files_reviewed_zero": "files_reviewed_zero",
+    "cli_limit": "cli_limit",
+    "prompt_too_long": "prompt_too_long",
+    "bad_findings": "bad_review_output",
 }
 
 
@@ -276,11 +320,26 @@ class ClaudeReviewAgent(ScannerAgent):
                 "upstreamCommit": pins.CCSR_COMMIT, "claudeCodeVersion": pins.CLAUDE_CODE_VERSION,
                 "categoryMap": category_map.VERSION}
 
-    def instructions(self) -> tuple[str | None, str | None]:
-        """(scan instructions, filter instructions) for the mode. None in stock mode."""
+    def instructions(self, task_instruction: str | None = None) -> tuple[str | None, str | None]:
+        """(scan instructions, filter instructions) for the mode. None in stock mode.
+        ``task_instruction`` defaults to the instruction ``run`` was given."""
         if self.review_options.mode != "scoped":
             return None, None
-        return SCAN_INSTRUCTIONS_FILE.read_text(encoding="utf-8"), FILTER_INSTRUCTIONS_FILE.read_text(encoding="utf-8")
+        text, _source, _contract = self.scan_instructions_for(task_instruction)
+        return text, FILTER_INSTRUCTIONS_FILE.read_text(encoding="utf-8")
+
+    def scan_instructions_for(
+        self, task_instruction: str | None = None
+    ) -> tuple[str, str, contract.Contract | None]:
+        """(scoped scan instructions, their source, the contract). The source is
+        "task_instruction" when the instruction carries the output contract, else
+        "bundled" (``scoped_scan_instructions.txt``)."""
+        if task_instruction is None:
+            task_instruction = getattr(self, "_instruction", None)
+        parsed = contract.parse(task_instruction)
+        if parsed is not None:
+            return contract.scan_instructions(parsed), "task_instruction", parsed
+        return SCAN_INSTRUCTIONS_FILE.read_text(encoding="utf-8"), "bundled", None
 
     # ------------------------------------------------------------ install
 
@@ -367,12 +426,23 @@ class ClaudeReviewAgent(ScannerAgent):
         if not files:
             raise ScannerError("no file is in scope: nothing to review")
         if len(files) > MAX_FILES:
-            raise ScannerError(f"{len(files)} files are in scope, more than the {MAX_FILES} this agent reviews")
+            raise ToolOutcome("too_many_files",
+                              f"{len(files)} files are in scope, more than the {MAX_FILES} this agent reviews")
 
         # 2. The request: everything but the credential.
         scan_text, filter_text = self.instructions()
         review["scan_instructions_sha256"] = _sha256(scan_text) if scan_text else None
         review["filter_instructions_sha256"] = _sha256(filter_text) if filter_text else None
+        review["scan_instructions_source"] = None
+        review["filter_exclusions_dropped"] = []
+        if options.mode == "scoped":
+            _, source, parsed = self.scan_instructions_for()
+            review["scan_instructions_source"] = source
+            review["contract"] = parsed.describe() if parsed else None
+            review["contract_ids_not_accepted"] = self._contract_gaps(parsed)
+            review["filter_exclusions_dropped"] = [dict(e) for e in FILTER_EXCLUSIONS_DROPPED]
+            # The dropped exclusions are in the Claude filter's prompt; the hard-rule filter never reads it.
+            review["filter_exclusions_dropped_apply"] = filter_mode == "claude"
         key_dir = f"{work}/{KEY_DIR}"
         key_file = f"{key_dir}/{CREDENTIAL_FILE[auth]}"
         out_file = f"{work}/{DRIVER_OUT}"
@@ -397,6 +467,7 @@ class ClaudeReviewAgent(ScannerAgent):
             "scan_instructions": scan_text,
             "filter_instructions": filter_text,
             "home": f"{work}/{CLI_HOME}",
+            "scope_dir": f"{work}/{SCOPE_DIR}",
             "ccsr_dir": install.get("ccsr_dir") or f"{pins.INSTALL_DIR}/ccsr",
             "claude": install.get("claude") or f"{pins.INSTALL_DIR}/bin/claude",
         }
@@ -421,6 +492,55 @@ class ClaudeReviewAgent(ScannerAgent):
                                      roots=roots, excludes=excludes)
         meta.update(counts)
         return findings
+
+    @staticmethod
+    def _contract_gaps(parsed: contract.Contract | None) -> dict[str, list[str]]:
+        """Ids and values the contract names that the normaliser does not accept
+        (empty lists when the two agree, as they should)."""
+        if parsed is None:
+            return {}
+        from .. import cwe_map, heuristics
+        from ..findings import CONTROL_STATUSES, PATH_ROLES, RISK_LEVELS
+        return {
+            "rule_ids": [r for r, _ in parsed.rules if r not in cwe_map.TASK_RULES],
+            "recommendation_ids": [r for r, _ in parsed.recommendations if r not in heuristics.CATALOGUE],
+            "roles": [r for r in parsed.roles if r not in PATH_ROLES],
+            "control_statuses": [v for v in parsed.control_statuses if v not in CONTROL_STATUSES],
+            "residual_risks": [v for v in parsed.residual_risks if v not in RISK_LEVELS],
+        }
+
+    def sarif_run_properties(self, meta: dict[str, Any], findings: list[Finding]) -> dict[str, Any]:
+        """The base account, with the Claude review's own drops and re-mapping:
+        findings outside the scope or at a bad location, categories the category
+        map does not know, findings whose ruleId the harness derived from the
+        category or CWE (not the model's own rule_id), and the upstream filter's
+        exclusions (stage, reason, file:line)."""
+        props = super().sarif_run_properties(meta, findings)
+        agent = props["sastAgent"]
+        dropped = agent["dropped"]
+        dropped["outOfScope"] = run_entry(meta.get("dropped_out_of_scope"), meta.get("dropped_out_of_scope_count"))
+        dropped["badLocation"] = run_entry(meta.get("dropped_bad_location"), meta.get("dropped_bad_location_count"))
+        by_category = meta.get("unmapped_by_category") or {}
+        dropped["categoryNotInMap"] = run_entry([[k, v] for k, v in by_category.items()],
+                                                sum(v for v in by_category.values() if isinstance(v, int)))
+        remapped = []
+        for f, rule in zip(findings, sarif.emitted_rules(findings)):
+            if rule and not f.task_rule:
+                extra = dict(f.extra)
+                remapped.append({"category": extra.get("category"), "cwe": list(f.cwes),
+                                 "cweSource": extra.get("cweSource"), "ruleId": rule,
+                                 "location": f"{f.file}:{f.start_line}"})
+        agent["remapped"] = run_entry(remapped)
+        review = meta.get("claude_review") or {}
+        excluded = [{"stage": e.get("stage"), "reason": e.get("reason"), "category": e.get("category"),
+                     "location": f"{e.get('file')}:{e.get('line')}"} for e in review.get("excluded") or []]
+        agent["upstreamFilterExclusions"] = run_entry(excluded, review.get("findings_excluded", len(excluded)))
+        agent.update({"mode": self.review_options.mode, "filterMode": self.filter_mode(),
+                      "categoryMap": category_map.VERSION,
+                      "scanInstructionsSource": review.get("scan_instructions_source"),
+                      "filterExclusionsDropped": [e["upstream_number"] for e in review.get(
+                          "filter_exclusions_dropped") or []]})
+        return props
 
     async def _files_in_scope(self, environment: BaseEnvironment, roots: list[str], excludes: list[str]) -> list[str]:
         """Every regular file under the roots, minus the excludes and .git, sorted."""
@@ -455,7 +575,7 @@ class ClaudeReviewAgent(ScannerAgent):
         )
         result = await self._run_logged(environment, "command-1", command, key, env=env,
                                         timeout_sec=exec_timeout(seconds), what="the Claude Code security review",
-                                        cwd=REPO_DIR, secret_name=secret_name)
+                                        cwd=REPO_DIR, secret_name=secret_name, tool_step=True)
         review["driver_exit_code"] = result.return_code
         review["driver_result"] = _result_line(result.stdout or "", "DRIVER_RESULT")
         document = await self._read_output(environment, out_file, key)
@@ -470,8 +590,11 @@ class ClaudeReviewAgent(ScannerAgent):
             code = (error or {}).get("code") if isinstance(error, dict) else None
             message = (error or {}).get("message") if isinstance(error, dict) else str(error)
             hint = ERROR_HINTS.get(code or "", "the review failed")
-            raise ScannerError(_scrub(f"Claude Code security review: {hint} [{code or 'exit ' + str(result.return_code)}]"
-                                      f": {message}", key))
+            text = _scrub(f"Claude Code security review: {hint} [{code or 'exit ' + str(result.return_code)}]"
+                          f": {message}", key)
+            if code in OUTCOME_CODES:
+                raise ToolOutcome(OUTCOME_CODES[code], text)
+            raise ScannerError(text)
         return document
 
     @staticmethod
@@ -533,6 +656,13 @@ class ClaudeReviewAgent(ScannerAgent):
             "filter_calls": len(record("filter").get("calls") or []),
             "pr": {k: v for k, v in record("pr").items() if k != "line_counts"},
             "request_options": record("request_options"),
+            # The CLI ran in a copy of the in-scope files; every tool call it made, and those outside the scope.
+            "scope_copy": document.get("scope_copy"),
+            "paths_relativised": document.get("paths_relativised"),
+            "tool_uses_count": cli.get("tool_uses_count"),
+            "tool_uses": (cli.get("tool_uses") or [])[:MAX_TOOL_USES_META],
+            "tool_uses_outside_scope": cli.get("tool_uses_outside_scope") or [],
+            "tool_uses_outside_scope_count": len(cli.get("tool_uses_outside_scope") or []),
         })
 
     def artifact_files(self) -> dict[str, str]:
@@ -555,6 +685,7 @@ class ClaudeReviewAgent(ScannerAgent):
         what: str,
         cwd: str | None = None,
         secret_name: str = KEY_ENV,
+        tool_step: bool = False,
     ) -> ExecResult:
         """One exec, logged with the credential scrubbed. It is in neither the command nor the env."""
         if key in command or any(key in value for value in env.values()) or \
@@ -563,7 +694,9 @@ class ClaudeReviewAgent(ScannerAgent):
         started = time.monotonic()
         try:
             result = await self._exec(environment, command, timeout_sec=timeout_sec, what=what, cwd=cwd, env=env,
-                                      scrub=lambda text: _scrub(text, key))
+                                      scrub=lambda text: _scrub(text, key), tool_step=tool_step)
+        except ToolOutcome as exc:
+            raise exc.with_message(_scrub(str(exc), key)) from None
         except ScannerError as exc:
             raise ScannerError(_scrub(str(exc), key)) from None
         clean = ExecResult(stdout=_scrub(result.stdout, key), stderr=_scrub(result.stderr, key),

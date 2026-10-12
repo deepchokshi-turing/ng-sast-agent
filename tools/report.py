@@ -61,6 +61,19 @@ these views:
   label. Stock-mode scores depend on the frozen category-to-CWE map, since
   categories outside it are dropped, and the report says how many were.
 
+- **Baselines and strict view** (external audit A4, A5, F-B1): what a fixed
+  answer earns on measurements 3 and 4 (controls ``none``/``high`` and the most
+  common required recommendation id on every finding), and what an empty SARIF
+  earns per role, both scored by ``task_format/grade.py`` itself; measurements
+  2 to 4 over matched findings only; and a strict view that counts every
+  unfinished trial (errored, no SARIF, grader error, ``tool_outcome``) as a
+  miss on positives and a failure on negatives.
+- **Category means** leave out the categories a tool cannot emit (its ruleIds
+  come from the CWE map, which never gives LLM03.EA.AUTONOMY) and read "too few
+  tasks" when a category in them has fewer than 5 tasks on either side.
+- **Harness effects**: findings the harness or the reviewer's filter removed or
+  re-mapped before grading (SARIF run properties, else agent metadata).
+
 A task's role (positive or negative) and family come from, in order: the
 private variant map (``--variants``, default ``<tasks>/VARIANTS.json``, of the
 form ``{"<task dir>": {"family": "...", "role": "positive"|"negative"}}``, an
@@ -86,15 +99,20 @@ as having no result.
 
 Precision is n/a when there is no result to take it over (tp + fp = 0).
 
-Uses only the standard library.
+Uses only the standard library (and, when present, task_format/grade.py and sast/cwe_map.py,
+loaded read-only for the baselines and the categories a tool can emit).
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib.util
+import inspect
 import json
+import re
 import subprocess
 import sys
+import tempfile
 from collections import Counter
 from pathlib import Path
 
@@ -111,9 +129,62 @@ SUPPORT_FIELDS = {"path": ("codeFlows",), "controls": ("controlStatus", "residua
                   "recommendations": ("recommendations",)}
 #: Versions every report states: field -> the SARIF driver property that also records it.
 VERSION_FIELDS = {"agent_version": None, "cwe_map": "cweMap", "heuristics": "heuristics",
-                  "category_map": "categoryMap"}
+                  "category_map": "categoryMap", "grader_version": None}
 VERSION_LABELS = {"agent_version": "agent version", "cwe_map": "CWE map", "heuristics": "heuristics",
-                  "category_map": "Claude category map"}
+                  "category_map": "Claude category map", "grader_version": "grader version"}
+#: A category mean (OWASP score) is only shown when every category in it has this many tasks on each side.
+MIN_CATEGORY_TASKS = 5
+#: Tools whose ruleId is decided by the frozen CWE map (sast/cwe_map.py), not by the tool. A Claude review
+#: in stock mode is one too (its category goes through a CWE).
+CWE_MAP_TOOLS = ("semgrep", "codeql", "sonarqube")
+CLAUDE_TOOL = "claude-code-security-review"
+#: The constant control answer of the measurement 3 baseline.
+FIXED_CONTROLS = {"controlStatus": "none", "residualRisk": "high"}
+
+ROOT = Path(__file__).resolve().parents[1]
+GRADE_FILE = ROOT / "task_format" / "grade.py"
+CWE_MAP_FILE = ROOT / "sast" / "cwe_map.py"
+_MODULES: dict = {}
+
+
+def _module(name: str, path: Path):
+    """A repo module loaded from its file (as tools/snippet_ids.py loads grade.py), or None."""
+    if name not in _MODULES:
+        mod = None
+        try:
+            spec = importlib.util.spec_from_file_location(name, path)
+            if spec is not None and spec.loader is not None:
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+        except Exception:  # noqa: BLE001  (a broken or missing module only hides the baselines)
+            mod = None
+        _MODULES[name] = mod
+    return _MODULES[name]
+
+
+def grader():
+    """task_format/grade.py, the grader the tasks ship, or None when it cannot be loaded."""
+    return _module("_report_grade", GRADE_FILE)
+
+
+#: Parameter names the grader's functions may use, by the value they stand for.
+_ALIASES = {"result": ("res", "result", "r"), "finding": ("f", "finding"),
+            "ptol": ("ptol", "path_tol", "path_line_tolerance", "tol"), "truth": ("truth", "gt", "ground_truth"),
+            "sarif_path": ("sarif_path", "sarif", "sarif_file")}
+
+
+def _call(fn, **known):
+    """Call a grader function by its parameter names, so a renamed or added optional parameter does not
+    break the report. Raises TypeError when a required parameter is unknown."""
+    args = []
+    for name, param in inspect.signature(fn).parameters.items():
+        value = next((known[k] for k, names in _ALIASES.items() if name in names and k in known), inspect._empty)
+        if value is inspect._empty:
+            if param.default is inspect._empty:
+                raise TypeError(f"unknown required parameter {name}")
+            break
+        args.append(value)
+    return fn(*args)
 
 
 # ---- inputs ------------------------------------------------------------------------------
@@ -146,8 +217,12 @@ def load_variants(path: Path | None) -> dict:
         role = entry.get("role")
         out[str(name)] = {"family": str(entry.get("family") or name),
                           "role": role if role in ROLES else ""}
-        if entry.get("former_name"):
-            former[str(entry["former_name"])] = {**out[str(name)], "current_name": str(name)}
+        # former_names lists every earlier name (the role-free task_<hex> ids, and the
+        # task_<family>_<role> names before them); former_name is the most recent one.
+        olds = [entry.get("former_name")] + list(entry.get("former_names") or [])
+        for old in olds:
+            if old:
+                former[str(old)] = {**out[str(name)], "current_name": str(name)}
     for old, entry in former.items():
         out.setdefault(old, entry)
     return out
@@ -195,9 +270,9 @@ def family_and_role(task: str, truth: dict | None, variants: dict, rewards: dict
     return (entry or {}).get("family") or name, "", "unknown"
 
 
-def ground_truth(trial: dict, tasks_dir: Path | None, variants: dict | None = None) -> dict | None:
-    """The task's ground truth from <tasks>/<task name>, else from the folder a former
-    name was renamed to, else from the task path recorded in the trial."""
+def task_folders(trial: dict, tasks_dir: Path | None, variants: dict | None = None) -> list[Path]:
+    """Where the task's folder may be: <tasks>/<task name>, the folder a former name was renamed to,
+    and the task path recorded in the trial."""
     candidates = []
     if tasks_dir is not None:
         name = str(trial.get("task_name") or "").split("/")[-1]
@@ -209,7 +284,13 @@ def ground_truth(trial: dict, tasks_dir: Path | None, variants: dict | None = No
     path = ((trial.get("config") or {}).get("task") or {}).get("path")
     if path:
         candidates.append(Path(path))
-    for task in candidates:
+    return candidates
+
+
+def ground_truth(trial: dict, tasks_dir: Path | None, variants: dict | None = None) -> dict | None:
+    """The task's ground truth from <tasks>/<task name>, else from the folder a former
+    name was renamed to, else from the task path recorded in the trial."""
+    for task in task_folders(trial, tasks_dir, variants):
         try:
             gt = task / "tests" / "ground_truth.json"
             if gt.is_file():
@@ -219,26 +300,65 @@ def ground_truth(trial: dict, tasks_dir: Path | None, variants: dict | None = No
     return None
 
 
+_FAMILY_TOML = re.compile(r'^\s*family_id\s*=\s*"([^"]+)"', re.M)
+
+
+def task_family_id(trial: dict, tasks_dir: Path | None, variants: dict | None = None) -> str | None:
+    """The task's own ``family_id`` (task_metadata.json, else task.toml), or None. It is the
+    scanner-visible family key, unlike the private variant map's family name."""
+    for task in task_folders(trial, tasks_dir, variants):
+        meta = read_json_file(task / "task_metadata.json")
+        if isinstance(meta, dict) and meta.get("family_id"):
+            return str(meta["family_id"])
+        try:
+            match = _FAMILY_TOML.search((task / "task.toml").read_text(encoding="utf-8"))
+        except OSError:
+            match = None
+        if match:
+            return match.group(1)
+    return None
+
+
+def _max_matching(edges: list[set]) -> int:
+    """Size of a maximum matching of findings (list index) to results (the set members)."""
+    owner: dict = {}
+
+    def augment(i: int, seen: set) -> bool:
+        for j in edges[i]:
+            if j in seen:
+                continue
+            seen.add(j)
+            if j not in owner or augment(owner[j], seen):
+                owner[j] = i
+                return True
+        return False
+    return sum(augment(i, set()) for i in range(len(edges)))
+
+
 def ground_truth_hits(rows: list, truth: dict) -> tuple[int, int, int]:
-    """(gt findings, with a finding near them, with a near finding of an acceptable or primary CWE)."""
+    """(gt findings, findings with a result near them, findings with a near result of an acceptable or
+    primary CWE). A result counts for at most one finding: the counts are the sizes of a maximum
+    matching of findings to the results near them, so one result within tolerance of two findings
+    is one hit, not two."""
     findings = truth.get("findings") or []
     tol = (truth.get("matching") or {}).get("line_tolerance", 10)
-    near_any = near_cwe = 0
+    near_edges, cwe_edges = [], []
     for gt in findings:
         targets = [gt["primary_location"], *(gt.get("alternative_primary_locations") or [])]
         acceptable = set(gt.get("acceptable_cwes") or [])
         if gt.get("primary_cwe"):
             acceptable.add(gt["primary_cwe"])
-        hit = hit_cwe = False
-        for _rule, cwes, file, start, end, _emitted in rows:
+        near_set, cwe_set = set(), set()
+        for k, (_rule, cwes, file, start, end, _emitted) in enumerate(rows):
             for t in targets:
                 t_end = t.get("end_line", t["start_line"])
                 if file == t["file"] and start <= t_end + tol and end >= t["start_line"] - tol:
-                    hit = True
-                    hit_cwe = hit_cwe or bool(acceptable & set(cwes))
-        near_any += hit
-        near_cwe += hit_cwe
-    return len(findings), near_any, near_cwe
+                    near_set.add(k)
+                    if acceptable & set(cwes):
+                        cwe_set.add(k)
+        near_edges.append(near_set)
+        cwe_edges.append(cwe_set)
+    return len(findings), _max_matching(near_edges), _max_matching(cwe_edges)
 
 
 def trial_results(job: Path) -> list[tuple[Path, dict]]:
@@ -329,6 +449,8 @@ def base_row(task: str, rewards: dict, status: str = "ok", error: str = "", trut
         "sarif_missing": bool(rewards.get("sarif_missing")) or bool(rewards.get("grader_error")),
         "neg_fail_near_fix": rewards.get("neg.fail.near_fix"),
         "neg_fail_trap": rewards.get("neg.fail.trap"),
+        # grader v3.2: a contrast-family result anywhere in the scanned scope fails a negative.
+        "neg_fail_in_scope": rewards.get("neg.fail.in_scope"),
         **labels_from(rewards),
         "sarif_fields": None,
         "error": error,
@@ -363,8 +485,56 @@ def rows_for(job: Path, tasks_dir: Path | None, variants: dict | None = None) ->
             "sarif_fields": sarif_fields(result_file.parent),
             "run_info": run_info(meta, result_file.parent),
         })
+        row.update(trial_extras(meta, result_file.parent, truth, task_family_id(
+            {**trial, "task_name": row["task"]}, tasks_dir, variants)))
+        if row.get("grader_version") and isinstance(row.get("run_info"), dict):
+            row["run_info"]["grader_version"] = row["grader_version"]
         out.append(row)
     return out
+
+
+def matched_scores(trial_dir: Path) -> list | None:
+    """The measurement scores of every matched finding (verifier/grading_detail.json), or None."""
+    detail = read_json_file(trial_dir / "verifier" / "grading_detail.json")
+    if not isinstance(detail, dict):
+        return None
+    return [dict(f.get("scores") or {}) for f in detail.get("per_finding") or []
+            if isinstance(f, dict) and f.get("matched")]
+
+
+def detail_info(trial_dir: Path) -> dict:
+    """From grading_detail.json (grader v3.2): the grader version, the results that claimed a complete
+    control (neither failing a negative nor counted as a false positive), and the matched findings
+    credited across risk families through the CWE. Missing fields read as None."""
+    detail = read_json_file(trial_dir / "verifier" / "grading_detail.json")
+    if not isinstance(detail, dict):
+        return {"grader_version": None, "complete_claims": None, "cross_family": None}
+    per = [f for f in detail.get("per_finding") or [] if isinstance(f, dict) and f.get("matched")]
+    claims = detail.get("complete_claims")
+    return {"grader_version": str(detail["grader_version"]) if detail.get("grader_version") else None,
+            "complete_claims": len(claims) if isinstance(claims, list) else None,
+            "cross_family": sum(1 for f in per if f.get("cross_family")) if any("cross_family" in f for f in per)
+            else (0 if per and "grader_version" in detail else None)}
+
+
+def trial_extras(meta: dict, trial_dir: Path, truth: dict | None, family_id: str | None) -> dict:
+    """Fields every row carries on top of base_row. ``_truth`` (the ground truth, for the baselines)
+    starts with an underscore, so it is left out of every file the reports write."""
+    outcome = meta.get("tool_outcome")
+    info = detail_info(trial_dir)
+    return {
+        **info,
+        "tool_outcome": (outcome if isinstance(outcome, str) else json.dumps(outcome)) if outcome else None,
+        "family_id": family_id,
+        "matched_scores": matched_scores(trial_dir),
+        "harness": harness_effects(meta, trial_dir),
+        "_truth": truth,
+    }
+
+
+def public_row(row: dict) -> dict:
+    """A row without its private fields (the ground truth), as the reports write it."""
+    return {k: v for k, v in row.items() if not str(k).startswith("_")}
 
 
 def _trial_metadata(reward_file: Path) -> dict:
@@ -403,6 +573,10 @@ def rows_from_reward_files(files: list[Path], tasks_dir: Path | None = None, var
         row["has_truth"] = truth is not None
         row["sarif_fields"] = sarif_fields(trial_dir)
         row["run_info"] = run_info(meta, trial_dir)
+        row.update(trial_extras(meta, trial_dir, truth, task_family_id(
+            {**trial, "task_name": task}, tasks_dir, variants) if tasks_dir is not None else None))
+        if row.get("grader_version") and isinstance(row.get("run_info"), dict):
+            row["run_info"]["grader_version"] = row["grader_version"]
         rows.append(row)
     return rows
 
@@ -472,6 +646,87 @@ def run_info(meta: dict | None, trial_dir: Path | None = None) -> dict:
     return info
 
 
+#: What the harness or the reviewer's false-alarm filter removed or changed before grading, by the
+#: field that records it: (label, keys in the SARIF run properties, keys in the agent metadata).
+HARNESS_FIELDS = (
+    ("filter_excluded", "excluded by the false-alarm filter",
+     ("findings_excluded", "filter_excluded", "excluded"), ("claude_review.findings_excluded",)),
+    ("unmapped_category", "dropped, category not in the category map",
+     ("unmapped_by_category", "findings_unmapped_category"), ("unmapped_by_category",)),
+    ("remapped", "re-mapped to another rule or risk type",
+     ("findings_remapped", "remapped", "remapped_by_category", "re_mapped"), ("findings_remapped",)),
+    ("unmapped_cwe", "dropped, no rule for its CWE",
+     ("findings_unmapped", "unmapped_by_cwe"), ()),
+    ("ambiguous_cwe", "dropped, CWEs in two risk families",
+     ("results_cwe_ambiguous", "findings_ambiguous"), ("results_cwe_ambiguous",)),
+    ("bad_location", "dropped, location not usable",
+     ("dropped_bad_location_count", "dropped_bad_location"), ("dropped_bad_location_count",)),
+    ("out_of_scope", "dropped, outside the scanned files",
+     ("dropped_out_of_scope_count", "dropped_out_of_scope"), ("dropped_out_of_scope_count",)),
+)
+HARNESS_WORDS = ("excluded", "dropped", "unmapped", "remapped", "re_mapped", "filtered")
+
+
+def _count(value) -> int | None:
+    """A count from an int, a list (its length) or a dict of counts (their sum)."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, list):
+        return len(value)
+    if isinstance(value, dict):
+        nums = [v for v in value.values() if isinstance(v, int) and not isinstance(v, bool)]
+        return sum(nums) if nums or not value else None
+    return None
+
+
+def sarif_run_properties(trial_dir: Path) -> dict:
+    """The merged ``runs[].properties`` of the graded SARIF, or {}."""
+    for candidate in (trial_dir / "agent" / "findings.sarif", trial_dir / SAST_ARTIFACTS / "findings.sarif"):
+        data = read_json_file(candidate)
+        if not isinstance(data, dict):
+            continue
+        out: dict = {}
+        for run in data.get("runs") or []:
+            props = (run or {}).get("properties") if isinstance(run, dict) else None
+            if isinstance(props, dict):
+                out.update(props)
+        return out
+    return {}
+
+
+def harness_effects(meta: dict | None, trial_dir: Path | None = None) -> dict:
+    """{label: count} of findings the harness or the reviewer's filter removed or changed before
+    grading, from the SARIF run properties first, else the agent metadata. Unknown run-property keys
+    that name a drop, exclusion or re-mapping are kept under their own name. Empty when nothing is
+    recorded."""
+    meta = meta or {}
+    props = sarif_run_properties(trial_dir) if trial_dir is not None else {}
+    review = meta.get("claude_review") if isinstance(meta.get("claude_review"), dict) else {}
+    out: dict = {}
+    used = set()
+    for _key, label, prop_keys, meta_keys in HARNESS_FIELDS:
+        value = None
+        for k in prop_keys:
+            if k in props:
+                used.add(k)
+                value = _count(props[k]) if value is None else value
+        if value is None:
+            for k in meta_keys:
+                source = review if k.startswith("claude_review.") else meta
+                v = source.get(k.split(".", 1)[1] if k.startswith("claude_review.") else k)
+                if v is not None and _count(v) is not None:
+                    value = _count(v)
+                    break
+        if value is not None:
+            out[label] = value
+    for k, v in props.items():
+        if k not in used and any(w in k.lower() for w in HARNESS_WORDS) and _count(v) is not None:
+            out[k] = _count(v)
+    return out
+
+
 def _git(folder: str, *args: str) -> str | None:
     try:
         proc = subprocess.run(["git", "-C", folder, *args], capture_output=True, text=True, timeout=30)
@@ -530,36 +785,107 @@ def by_role(rows: list[dict], role: str) -> list[dict]:
     return [r for r in usable(rows) if r.get("role") == role]
 
 
-def category_table(rows: list[dict]) -> dict:
+def category_of(rule_id: str) -> str:
+    """OWASP-style category as the grader names it: LLM02.SID (severity dropped), LLM03.EA.<SUBTYPE>."""
+    parts = (rule_id or "").split(".")
+    if parts[0] == "LLM02":
+        return ".".join(parts[:2])
+    if parts[0] == "LLM03":
+        return ".".join(parts[:3])
+    return rule_id or ""
+
+
+def cwe_map_rules() -> set:
+    """The task ruleIds the frozen CWE map can give a result (sast/cwe_map.py, read only). An LLM02
+    family entry can come out as HIGH or MEDIUM. Without the module, every rule but AUTONOMY."""
+    mod = _module("_report_cwe_map", CWE_MAP_FILE)
+    table = getattr(mod, "CWE_MAP", None) if mod is not None else None
+    if not isinstance(table, dict):
+        return set(TAXONOMY) - {"LLM03.EA.AUTONOMY"}
+    rules = {v[0] if isinstance(v, (tuple, list)) else v for v in table.values()}
+    if any(str(r).startswith("LLM02.") for r in rules):
+        rules |= {"LLM02.SID.HIGH", "LLM02.SID.MEDIUM"}
+    return {str(r) for r in rules}
+
+
+def rule_source(row: dict) -> str | None:
+    """"cwe_map" when the trial's ruleIds come from the CWE map (Semgrep, CodeQL, SonarQube, a stock
+    Claude review), "tool" when the tool names them itself (a scoped Claude review), None if unknown."""
+    tool = str(row.get("tool") or "")
+    if tool in CWE_MAP_TOOLS:
+        return "cwe_map"
+    if tool == CLAUDE_TOOL:
+        mode = str((((row.get("run_info") or {}).get("claude") or {}).get("mode")) or "")
+        return {"stock": "cwe_map", "scoped": "tool"}.get(mode)
+    return None
+
+
+def cannot_emit_categories(rows: list[dict]) -> list[str]:
+    """Taxonomy categories the tool cannot report at all: when every trial's ruleIds come from the
+    CWE map, the categories no mapped CWE reaches (LLM03.EA.AUTONOMY under cwe-map-5)."""
+    sources = {rule_source(r) for r in rows if r.get("tool")}
+    if sources != {"cwe_map"}:
+        return []
+    reachable = {category_of(r) for r in cwe_map_rules()}
+    return sorted({category_of(r) for r in TAXONOMY} - reachable)
+
+
+def category_table(rows: list[dict], cannot_emit: list[str] | None = None) -> dict:
+    """Per category TP, FN, TN, FP, rates and the Youden score, and the means over categories.
+
+    Categories the tool cannot emit (``cannot_emit``, by default from :func:`cannot_emit_categories`)
+    stay in the table, marked, and are left out of the means. The means are kept in the data but
+    ``suppressed`` is set when no category is left or any category in them has fewer than
+    MIN_CATEGORY_TASKS tasks on either side: the reports then print "too few tasks" instead."""
+    cannot = set(cannot_emit_categories(rows) if cannot_emit is None else cannot_emit)
     cats: dict[str, dict] = {}
     for r in usable(rows):
         for cat, flags in r["categories"].items():
             c = cats.setdefault(cat, {"TP": 0, "FN": 0, "TN": 0, "FP": 0})
             truth, det = flags.get("truth", 0), flags.get("detected", 0)
             c[{(1, 1): "TP", (1, 0): "FN", (0, 1): "FP", (0, 0): "TN"}[(truth, det)]] += 1
-    for c in cats.values():
+    for k, c in cats.items():
         c["positives"] = c["TP"] + c["FN"]
         c["negatives"] = c["FP"] + c["TN"]
         c["TPR"] = ratio(c["TP"], c["positives"])
         c["FPR"] = ratio(c["FP"], c["negatives"])
         c["youden"] = c["TPR"] - c["FPR"] if c["TPR"] is not None and c["FPR"] is not None else None
-    # Means over the categories that have both sides, so the score is the mean of the per-category scores.
-    scored = [c for c in cats.values() if c["youden"] is not None]
+        c["cannot_emit"] = k in cannot
+    # Means over the categories that have both sides and that the tool can emit, so the score is the
+    # mean of the per-category scores.
+    scored = {k: c for k, c in cats.items() if c["youden"] is not None and not c["cannot_emit"]}
     tp = sum(c["TP"] for c in cats.values())
     fp = sum(c["FP"] for c in cats.values())
     fn = sum(c["FN"] for c in cats.values())
-    mean_tpr = sum(c["TPR"] for c in scored) / len(scored) if scored else None
-    mean_fpr = sum(c["FPR"] for c in scored) / len(scored) if scored else None
+    mean_tpr = sum(c["TPR"] for c in scored.values()) / len(scored) if scored else None
+    mean_fpr = sum(c["FPR"] for c in scored.values()) / len(scored) if scored else None
     precision = ratio(tp, tp + fp)
     f1 = (2 * precision * mean_tpr / (precision + mean_tpr)
           if precision is not None and mean_tpr is not None and precision + mean_tpr else None)
+    too_few = sorted(k for k, c in scored.items()
+                     if c["positives"] < MIN_CATEGORY_TASKS or c["negatives"] < MIN_CATEGORY_TASKS)
     overall = {
         "categories": len(scored), "mean_TPR": mean_tpr, "mean_FPR": mean_fpr,
         "score": mean_tpr - mean_fpr if mean_tpr is not None and mean_fpr is not None else None,
         "precision_pooled": precision, "recall_pooled": ratio(tp, tp + fn), "F1": f1,
         "categories_one_sided": sorted(k for k, c in cats.items() if c["youden"] is None),
+        "excluded_cannot_emit": sorted(k for k in cats if k in cannot),
+        "cannot_emit": sorted(cannot),
+        "min_tasks_per_side": MIN_CATEGORY_TASKS,
+        "too_few_tasks": too_few,
+        "suppressed": bool(too_few) or not scored,
     }
     return {"per_category": dict(sorted(cats.items())), "overall": overall}
+
+
+TOO_FEW = "too few tasks"
+
+
+def macro_text(overall: dict, key: str) -> str:
+    """A category mean as the reports print it: "too few tasks" when suppressed, else the value."""
+    if overall.get("suppressed"):
+        return TOO_FEW
+    return fmt(overall.get(key)) or "n/a"
 
 
 def risk_table(rows: list[dict], pred: str = "pred") -> dict:
@@ -685,9 +1011,172 @@ def reward_by_role(rows: list[dict]) -> dict:
                      "not_scored": sum(1 for r in not_scored(rows) if r.get("role") == role)}
     negs = by_role(rows, "negative")
     out["negative"]["failed"] = sum(1 for r in negs if r["reward"] < 1.0)
+    # Any result at all on the fixed app, counted or not (results away from the fixed code cost nothing).
+    out["negative"]["any_result"] = sum(1 for r in negs if has_result(r))
     out["negative"]["failed_near_fix"] = sum(1 for r in negs if r.get("neg_fail_near_fix"))
     out["negative"]["failed_trap"] = sum(1 for r in negs if r.get("neg_fail_trap"))
+    out["negative"]["failed_in_scope"] = sum(1 for r in negs if r.get("neg_fail_in_scope"))
     out["unknown_role"] = sum(1 for r in rows if r.get("role") not in ROLES)
+    return out
+
+
+def has_result(row: dict) -> bool:
+    """Whether the trial wrote any result, from the agent's count, else the SARIF, else the grader."""
+    n = _emitted(row)
+    if n is None:
+        n = (row.get("tp") or 0) + (row.get("fp") or 0) + (row.get("fp_out") or 0)
+    return n > 0
+
+
+# ---- strict view and baselines ---------------------------------------------------------------
+
+def unfinished(row: dict) -> bool:
+    """A trial the strict view counts as a miss (positive) or a failure (negative): it errored, its
+    agent reported an error, it had no SARIF, the grader crashed, or the agent recorded a
+    ``tool_outcome`` (it ended without a usable answer). A trial graded under an old role is not one."""
+    if row.get("role") not in ROLES or row.get("status") == "graded_as_old_role":
+        return False
+    return not is_scored(row) or bool(row.get("tool_outcome"))
+
+
+def strict_view(rows: list[dict]) -> dict:
+    """The scored-only numbers recomputed with every unfinished trial in: a positive scores 0 and
+    finds nothing, a negative fails and scores 0."""
+    out: dict = {}
+    for role in ROLES:
+        done = [r for r in by_role(rows, role) if not r.get("tool_outcome")]
+        missed = [r for r in rows if r.get("role") == role and unfinished(r)]
+        n = len(done) + len(missed)
+        entry = {"tasks": n, "unfinished": len(missed),
+                 "reasons": dict(Counter((f"tool_outcome {r['tool_outcome']}" if r.get("tool_outcome")
+                                          else r["status"]) for r in missed)),
+                 "mean_reward": sum(r["reward"] for r in done) / n if n else None}
+        if role == "positive":
+            gt = sum(r["gt"] or 0 for r in done) + sum(r["gt"] or 0 for r in missed)
+            tp = sum(r["tp"] or 0 for r in done)
+            entry.update({"tp": tp, "gt": gt, "gt_unknown": sum(1 for r in missed if r["gt"] is None),
+                          "recall": tp / gt if gt else None})
+        else:
+            entry["failed"] = sum(1 for r in done if r["reward"] < 1.0) + len(missed)
+        out[role] = entry
+    out["differs"] = any(out[role]["unfinished"] for role in ROLES)
+    return out
+
+
+def _findings(truth: dict | None) -> list:
+    return [f for f in (truth or {}).get("findings") or [] if isinstance(f, dict)]
+
+
+def common_recommendation(truths: list) -> str | None:
+    """The recommendation id named most often in ``required_any_of`` over the findings (ties: the first
+    by name), or None."""
+    counts: Counter = Counter()
+    for truth in truths:
+        for f in _findings(truth):
+            spec = f.get("recommendations") if isinstance(f.get("recommendations"), dict) else {}
+            counts.update({r for r in spec.get("required_any_of") or [] if isinstance(r, str)})
+    if not counts:
+        return None
+    top = max(counts.values())
+    return sorted(k for k, v in counts.items() if v == top)[0]
+
+
+def _fixed_scores(truth: dict, rec_id: str | None) -> dict | None:
+    """What one fixed answer earns on each finding of a positive, scored by the grader's own functions:
+    controls ``none``/``high`` and recommendations ``[rec_id]``. Per finding and per task (the
+    grader's per-task mean over the task's findings). None when the grader cannot score it."""
+    g = grader()
+    findings = _findings(truth)
+    if g is None or not findings:
+        return None
+    matching = truth.get("matching") or {}
+    ptol = matching.get("path_line_tolerance", matching.get("line_tolerance", 10))
+    per: dict = {"controls": [], "recommendations": []}
+    try:
+        for f in findings:
+            base = {"ruleId": f.get("rule_id", ""), "locations": []}
+            res = {**base, "properties": dict(FIXED_CONTROLS)}
+            if hasattr(g, "score_controls"):
+                ctrl = _call(g.score_controls, result=res, finding=f, ptol=ptol, truth=truth)
+                ctrl = ctrl[0] if isinstance(ctrl, (tuple, list)) else ctrl
+            else:
+                ctrl = _call(g.score_match, result=res, finding=f, ptol=ptol, truth=truth)["controls"]
+            per["controls"].append(float(ctrl))
+            if rec_id is not None:
+                rec = _call(g.score_recs, result={**base, "properties": {"recommendations": [rec_id]}},
+                            finding=f, ptol=ptol, truth=truth)
+                per["recommendations"].append(float(rec[0] if isinstance(rec, (tuple, list)) else rec))
+    except Exception:  # noqa: BLE001  (a ground truth the grader cannot read has no baseline)
+        return None
+    return {k: {"findings": v, "task": sum(v) / len(findings)} for k, v in per.items() if v}
+
+
+def fixed_answer_baselines(rows: list[dict], rec_id: str | None = None) -> dict:
+    """Measurement 3 and 4 baselines over the scored positives: every finding answered with controls
+    ``none``/``high``, and with the one most common required recommendation id. ``per_app`` is
+    comparable with the measurement means (a mean over the positives), ``per_finding`` with the
+    matched-findings means."""
+    positives = [r for r in by_role(rows, "positive") if r.get("_truth")]
+    if rec_id is None:
+        rec_id = common_recommendation([r["_truth"] for r in positives])
+    out: dict = {"controls_answer": dict(FIXED_CONTROLS), "recommendation_id": rec_id}
+    scored = [sc for sc in (_fixed_scores(r["_truth"], rec_id) for r in positives) if sc]
+    for key in ("controls", "recommendations"):
+        tasks = [sc[key] for sc in scored if key in sc]
+        per_finding = [v for t in tasks for v in t["findings"]]
+        out[key] = {"tasks": len(tasks), "findings": len(per_finding),
+                    "per_app": sum(t["task"] for t in tasks) / len(tasks) if tasks else None,
+                    "per_finding": sum(per_finding) / len(per_finding) if per_finding else None}
+    return out
+
+
+EMPTY_SARIF = {"version": "2.1.0", "runs": [{"tool": {"driver": {"name": "empty-report-baseline"}}, "results": []}]}
+_EMPTY_CACHE: dict = {}
+
+
+def empty_sarif_reward(truth: dict) -> float | None:
+    """The reward the grader gives an empty SARIF on this ground truth, or None when it cannot grade."""
+    g = grader()
+    if g is None or not isinstance(truth, dict):
+        return None
+    key = json.dumps(truth, sort_keys=True, default=str)
+    if key not in _EMPTY_CACHE:
+        value = None
+        try:
+            with tempfile.TemporaryDirectory() as folder:
+                path = Path(folder) / "findings.sarif"
+                path.write_text(json.dumps(EMPTY_SARIF), encoding="utf-8")
+                summary = _call(g.grade, sarif_path=path, truth=truth)
+                summary = summary[0] if isinstance(summary, tuple) else summary
+                value = float(summary["reward"])
+        except Exception:  # noqa: BLE001
+            value = None
+        _EMPTY_CACHE[key] = value
+    return _EMPTY_CACHE[key]
+
+
+def empty_sarif_baseline(rows: list[dict]) -> dict:
+    """The mean reward an empty SARIF earns on the trials' tasks (each task once), per role and over
+    all of them, graded by the current grader."""
+    tasks: dict = {}
+    for r in rows:
+        if r.get("role") in ROLES and r.get("_truth") and r["task"] not in tasks:
+            tasks[r["task"]] = (r["role"], empty_sarif_reward(r["_truth"]))
+    out: dict = {}
+    for role in (*ROLES, "all"):
+        values = [v for rl, v in tasks.values() if v is not None and role in (rl, "all")]
+        out[role] = {"tasks": len(values), "mean_reward": sum(values) / len(values) if values else None}
+    return out
+
+
+def matched_means(rows: list[dict]) -> dict:
+    """Measurements 2 to 4 over the matched findings only (the per-finding scores in
+    grading_detail.json), next to the means over every positive, where a missed finding scores 0."""
+    scores = [sc for r in by_role(rows, "positive") for sc in (r.get("matched_scores") or [])]
+    out: dict = {"findings": len(scores)}
+    for m in SUPPORT_FIELDS:
+        values = [sc[m] for sc in scores if isinstance(sc.get(m), (int, float))]
+        out[m] = sum(values) / len(values) if values else None
     return out
 
 
@@ -834,7 +1323,17 @@ HARBOR_MEAN_WARNING = ("Harbor's job-level means (result.json) average positives
                        "instead.")
 
 
-def summarise(rows: list[dict], tasks_dir: Path | None = None) -> dict:
+def harness_totals(rows: list[dict]) -> dict:
+    """The harness and filter effects summed over the trials: {label: count}."""
+    total: Counter = Counter()
+    for r in rows:
+        total.update(r.get("harness") or {})
+    return dict(total)
+
+
+def summarise(rows: list[dict], tasks_dir: Path | None = None, rec_id: str | None = None) -> dict:
+    """``rec_id``: the recommendation id of the measurement 4 baseline, by default the most common
+    required one over these trials' ground truths."""
     scored = usable(rows)
     emitted = emitted_by_tool(rows)
     negatives = by_role(rows, "negative")
@@ -855,6 +1354,11 @@ def summarise(rows: list[dict], tasks_dir: Path | None = None) -> dict:
         "risk_types_loose": risk_table(rows, "pred_loose"),
         "measurements_positive_tasks": measurement_means(rows),
         "measurement_support": measurement_support(rows),
+        "measurements_matched_only": matched_means(rows),
+        "fixed_answer_baselines": fixed_answer_baselines(rows, rec_id),
+        "empty_sarif_baseline": empty_sarif_baseline(rows),
+        "strict": strict_view(rows),
+        "harness_effects": harness_totals(rows),
         "taxonomy_coverage": taxonomy_coverage(rows),
         "versions": run_versions(rows),
         "task_set": task_set_state(tasks_dir),
@@ -959,32 +1463,58 @@ def render(rows: list[dict], summary: dict, table=text_table) -> str:
             gt_meta = sum(r["gt"] or 0 for r in with_meta)
             out.append(f"  location recall (any security finding, any OWASP side): "
                        f"{sum(r['near'] for r in with_meta)}/{gt_meta}")
-            out.append(f"  location + acceptable-CWE recall: {sum(r['near_cwe'] for r in with_meta)}/{gt_meta}")
+            out.append(f"  location + acceptable-CWE recall: {sum(r['near_cwe'] for r in with_meta)}/{gt_meta}"
+                       " (each result counts for at most one finding)")
     clean, zero = summary["zero_finding_tasks_clean"]
     if zero:
-        out.append(f"negatives clean (fp == 0): {clean}/{zero}")
+        out.append(f"negatives clean (fp == 0): {clean}/{zero}, negatives with any result in scope: "
+                   f"{summary['reward_by_role']['negative'].get('any_result', 0)}/{zero}")
     roles = summary["reward_by_role"]
     pos, neg = roles["positive"], roles["negative"]
     if pos["tasks"]:
         out.append(f"mean task reward, positives only ({pos['tasks']} tasks): {fmt(pos['mean_reward'])}")
     if neg["tasks"]:
         out.append(f"mean task reward, negatives only ({neg['tasks']} tasks): {fmt(neg['mean_reward'])}  "
-                   f"(failed {neg['failed']}: near the fix {neg['failed_near_fix']}, on a trap {neg['failed_trap']})")
+                   f"(failed {neg['failed']}: near the fix {neg['failed_near_fix']}, on a trap {neg['failed_trap']}, "
+                   f"anywhere in scope {neg.get('failed_in_scope', 0)})")
+    strict = summary.get("strict") or {}
+    if strict.get("differs"):
+        sp, sn = strict["positive"], strict["negative"]
+        out.append(f"strict view (errored, no SARIF, grader error or tool_outcome counted as a miss on positives "
+                   f"and a failure on negatives): recall {fmt(sp.get('recall')) or 'n/a'} ({sp.get('tp', 0)}/"
+                   f"{sp.get('gt', 0)}), mean reward positives {fmt(sp['mean_reward']) or 'n/a'} over "
+                   f"{sp['tasks']}, negatives failed {sn.get('failed', 0)}/{sn['tasks']}, mean reward negatives "
+                   f"{fmt(sn['mean_reward']) or 'n/a'}")
+    empty = summary.get("empty_sarif_baseline") or {}
+    if any((empty.get(k) or {}).get("tasks") for k in ROLES):
+        out.append("empty SARIF baseline (current grader): " + ", ".join(
+            f"{label} {fmt(empty[k]['mean_reward']) or 'n/a'} over {empty[k]['tasks']}"
+            for k, label in (("positive", "positives"), ("negative", "negatives"), ("all", "all tasks"))))
     out.append(f"warning: {summary['warning']}")
     out.append(f"fp_outside_scope total: {summary['fp_outside_scope']}")
+    harness = summary.get("harness_effects") or {}
+    if any(harness.values()):
+        out.append("removed or changed before grading (harness and filter effects, not scanner false alarms): "
+                   + ", ".join(f"{k} {v}" for k, v in harness.items()))
 
     cats = summary["categories"]
     if cats["per_category"]:
         out.append("\ncategories (OWASP Benchmark style, one test case per task and category; "
                    "TPR over the positives labelled with it, FPR over the negatives contrasted with it):")
-        out += table(["category", "TP", "FN", "TN", "FP", "TPR", "FPR", "youden"],
-                     [[k, c["TP"], c["FN"], c["TN"], c["FP"], c["TPR"], c["FPR"], c["youden"]]
+        out += table(["category", "n_pos", "n_neg", "TP", "FN", "TN", "FP", "TPR", "FPR", "youden", "note"],
+                     [[k, c["positives"], c["negatives"], c["TP"], c["FN"], c["TN"], c["FP"], c["TPR"], c["FPR"],
+                       c["youden"], "cannot emit, not in the mean" if c.get("cannot_emit") else ""]
                       for k, c in cats["per_category"].items()])
         o = cats["overall"]
-        na = {k: (fmt(v) or "n/a") for k, v in o.items() if k != "categories_one_sided"}
-        out.append(f"overall: mean TPR {na['mean_TPR']}  mean FPR {na['mean_FPR']}  "
-                   f"score {na['score']}  precision (pooled) {na['precision_pooled']}  "
-                   f"F1 {na['F1']}  over {o['categories']} categories")
+        out.append(f"overall: mean TPR {macro_text(o, 'mean_TPR')}  mean FPR {macro_text(o, 'mean_FPR')}  "
+                   f"score {macro_text(o, 'score')}  precision (pooled) {fmt(o['precision_pooled']) or 'n/a'}  "
+                   f"F1 {macro_text(o, 'F1')}  over {o['categories']} categories")
+        if o.get("suppressed") and o.get("too_few_tasks"):
+            out.append(f"  means not shown: fewer than {o['min_tasks_per_side']} positives or negatives in "
+                       + ", ".join(o["too_few_tasks"]))
+        if o.get("excluded_cannot_emit"):
+            out.append("  left out of the means, the tool cannot emit them (its ruleIds come from the CWE map): "
+                       + ", ".join(o["excluded_cannot_emit"]))
         if o["categories_one_sided"]:
             out.append("  left out of the means (no positives or no negatives): " + ", ".join(o["categories_one_sided"]))
     for key, title in (("risk_types", "task level, results matched to a finding or failing the negative"),
@@ -1003,6 +1533,17 @@ def render(rows: list[dict], summary: dict, table=text_table) -> str:
     if m["tasks"]:
         out.append(f"\nmeasurements, mean over {m['tasks']} scored positives (missed findings score 0):")
         out += table(list(MEASURES), [[measure_text(m, k) for k in MEASURES]])
+        matched = summary.get("measurements_matched_only") or {}
+        if matched.get("findings"):
+            out.append(f"on matched findings only ({matched['findings']}): " + "  ".join(
+                f"{k} {measure_text({**m, k: matched.get(k)}, k) or 'n/a'}" for k in SUPPORT_FIELDS))
+        base = summary.get("fixed_answer_baselines") or {}
+        for key, answer in (("controls", "controls none/high"),
+                            ("recommendations", f"recommendation {base.get('recommendation_id')}")):
+            b = base.get(key) or {}
+            if b.get("tasks"):
+                out.append(f"fixed answer baseline, {answer} for every finding: {key} {fmt(b['per_app'])} per "
+                           f"positive ({b['tasks']}), {fmt(b['per_finding'])} per finding ({b['findings']})")
     cov = summary["taxonomy_coverage"]
     if cov["known"] and cov["missing"]:
         out.append("\ntaxonomy categories with no ground-truth finding: " + ", ".join(cov["missing"]))
@@ -1037,10 +1578,11 @@ def main() -> None:
 
     if args.write:
         args.write.mkdir(parents=True, exist_ok=True)
-        (args.write / "report.json").write_text(json.dumps({"summary": summary, "trials": rows}, indent=2), encoding="utf-8")
+        (args.write / "report.json").write_text(json.dumps({"summary": summary, "trials": [public_row(r) for r in rows]},
+                                                           indent=2), encoding="utf-8")
         (args.write / "report.md").write_text("# SAST benchmark report\n\n" + render(rows, summary, md_table) + "\n", encoding="utf-8")
     if args.json:
-        json.dump(rows, sys.stdout, indent=2)
+        json.dump([public_row(r) for r in rows], sys.stdout, indent=2)
         print()
         return
     print(render(rows, summary))

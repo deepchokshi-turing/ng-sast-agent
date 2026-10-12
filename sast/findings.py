@@ -18,7 +18,7 @@ class TraceStep:
     role: str | None = None
 
 
-#: The step roles of the task's output profile (instruction.md).
+#: The step roles of the output contract (``properties.role`` in each task's instruction.md).
 PATH_ROLES = ("source", "root_cause", "context_assembly", "model_consumption", "model_decision", "control_point",
               "sink")
 CONTROL_STATUSES = ("none", "partial", "complete")
