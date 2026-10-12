@@ -21,10 +21,18 @@ For every task folder (one holding task.toml or environment/):
 4. environment/Dockerfile may copy only ``repo/`` into the image. ``COPY
    --from=<stage>`` (files from another image) is allowed. Any other COPY or ADD
    source, for example ``tests/`` or ``.``, is a problem.
-5. For twins ``task_<id>_positive`` / ``task_<id>_negative``: the environment/
-   trees may differ only in files listed in the positive ground truth's
+5. task.toml and instruction.md are searched for the same banned words. They
+   are the task files the harness and the scanner can read besides
+   environment/.
+6. For twins (paired through VARIANTS.json, or by the folder names
+   ``task_<id>_positive`` / ``task_<id>_negative`` when there is no map): the environment/
+   trees may differ only in files listed in the original positive's
    ``fix_changed_files`` (paths relative to environment/repo), and
-   security_manifest.json and fixtures/ must be byte-identical.
+   security_manifest.json and fixtures/ must be byte-identical. See
+   ``twin_pairs`` for how the original positive is chosen.
+7. Twin task.toml files are parsed and may differ only in ``task_id``,
+   ``variant_id`` and ``related_variant_ids``. Any other key that differs (a
+   package version, an architecture line, a tag) could tell the twins apart.
 
 Prints one line per task and exits 1 when any task has a problem.
 ``--write-qc`` sets ``qc.label_leak_scan`` to "pass" or "fail" in each task's
@@ -69,6 +77,7 @@ import re
 import subprocess
 import sys
 import tarfile
+import tomllib
 from pathlib import Path
 
 BANNED = ["cve-", "ghsa-", "vulnerab", "exploit", "patch", "fixed", "insecure", "bypass", "traversal", "ssrf",
@@ -76,6 +85,10 @@ BANNED = ["cve-", "ghsa-", "vulnerab", "exploit", "patch", "fixed", "insecure", 
 BANNED_RE = re.compile("|".join(re.escape(w) for w in BANNED), re.IGNORECASE)
 EVALUATOR_ONLY = [re.compile(p) for p in (r"^ground_truth.*\.json$", r"^repro_test.*\.py$", r"^provenance.*\.json$")]
 TWIN_RE = re.compile(r"^(task_.+)_(positive|negative)$")
+#: Files outside environment/ that the harness or the scanner can read.
+VISIBLE_TASK_FILES = ("task.toml", "instruction.md")
+#: The only task.toml keys that may differ between twins.
+TOML_TWIN_KEYS = {"task_id", "variant_id", "related_variant_ids"}
 SHINGLE = 6
 WORD_RE = re.compile(r"[a-z0-9_]+")
 
@@ -105,6 +118,47 @@ def banned_hits(files: dict[str, bytes]) -> list[str]:
             if m:
                 hits.append(f"banned word '{m.group(0)}' at environment/{rel}:{n}")
     return hits
+
+
+def visible_file_hits(task: Path) -> list[str]:
+    """Banned words in task.toml and instruction.md."""
+    hits = []
+    for name in VISIBLE_TASK_FILES:
+        f = task / name
+        if not f.is_file():
+            continue
+        for n, line in enumerate(f.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+            m = BANNED_RE.search(line)
+            if m:
+                hits.append(f"banned word '{m.group(0)}' at {name}:{n}")
+    return hits
+
+
+def _flatten(node: dict, prefix: str = "") -> dict[str, object]:
+    out = {}
+    for k, v in node.items():
+        if isinstance(v, dict):
+            out.update(_flatten(v, f"{prefix}{k}."))
+        else:
+            out[f"{prefix}{k}"] = v
+    return out
+
+
+def toml_twin_problems(a: Path, b: Path) -> list[str]:
+    """Keys other than task_id, variant_id and related_variant_ids that differ between twin task.toml files."""
+    fa, fb = a / "task.toml", b / "task.toml"
+    if not fa.is_file() and not fb.is_file():
+        return []
+    if not fa.is_file() or not fb.is_file():
+        return ["task.toml exists in only one twin"]
+    try:
+        ta = _flatten(tomllib.loads(fa.read_text(encoding="utf-8")))
+        tb = _flatten(tomllib.loads(fb.read_text(encoding="utf-8")))
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
+        return [f"cannot parse task.toml: {exc}"]
+    differing = sorted(k for k in set(ta) | set(tb)
+                       if ta.get(k) != tb.get(k) and k.rsplit(".", 1)[-1] not in TOML_TWIN_KEYS)
+    return [f"task.toml differs between twins in {k}" for k in differing]
 
 
 def evaluator_files(files: dict[str, bytes]) -> list[str]:
@@ -195,6 +249,7 @@ def dockerfile_problems(task: Path) -> list[str]:
 
 
 def twin_problems(pos: Path, neg: Path) -> list[str]:
+    """environment/ differences between the original positive ``pos`` and its twin."""
     a, b = env_files(pos), env_files(neg)
     try:
         gt = json.loads((pos / "tests" / "ground_truth.json").read_text(encoding="utf-8"))
@@ -224,6 +279,99 @@ def write_qc(task: Path, ok: bool) -> None:
     prov.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
 
 
+def _fix_files(task: Path) -> list[str]:
+    try:
+        gt = json.loads((task / "tests" / "ground_truth.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return list(gt.get("fix_changed_files") or [])
+
+
+def _code_state(task: Path) -> str | None:
+    try:
+        prov = json.loads((task / "validation" / "provenance.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return (prov.get("lineage") or {}).get("code_state")
+
+
+def original_positive(a: str, b: str, variants: dict, by_name: dict) -> str | None:
+    """Which twin of a pair holds the source-commit code (the side whose fix_changed_files apply).
+
+    1. The twin whose VARIANTS role is positive and whose ground truth lists a
+       non-empty ``fix_changed_files``, when only one twin qualifies.
+    2. When both qualify (a twin with the upstream fix relabelled as a
+       partial-control positive), the one whose ``former_name`` ends in
+       ``_positive``, if exactly one does.
+    3. Otherwise the one whose provenance ``lineage.code_state`` is
+       ``source_commit``, if exactly one is.
+    Returns None when the rules do not settle it.
+    """
+    cands = [x for x in (a, b) if variants[x].get("role") == "positive" and _fix_files(by_name[x])]
+    if len(cands) == 1:
+        return cands[0]
+    if len(cands) != 2:
+        return None
+    named = [x for x in cands if str(variants[x].get("former_name") or "").endswith("_positive")]
+    if len(named) == 1:
+        return named[0]
+    source = [x for x in cands if _code_state(by_name[x]) == "source_commit"]
+    return source[0] if len(source) == 1 else None
+
+
+def twin_pairs(root: Path, by_name: dict, problems: dict) -> list[tuple[str, str]]:
+    """(original positive, its twin) pairs.
+
+    With role-free task ids the pairing comes from the evaluator-only
+    ``VARIANTS.json`` next to the tasks ({id: {family, role, twin,
+    former_name}}, former_name optional), and ``original_positive`` picks the
+    side whose ``fix_changed_files`` define the allowed difference. A pair it
+    cannot settle is reported on both tasks. Without the map, folder names
+    ``task_<id>_positive`` / ``task_<id>_negative`` are paired.
+    """
+    pairs = []
+    variants_file = root / "VARIANTS.json"
+    if variants_file.is_file():
+        variants = json.loads(variants_file.read_text(encoding="utf-8"))
+        seen = set()
+        for name, v in variants.items():
+            if name not in by_name:
+                continue
+            twin = v.get("twin")
+            if not twin or twin not in by_name or twin not in variants:
+                problems[name].append(f"twin {twin} not found")
+                continue
+            if variants[twin].get("twin") != name:
+                problems[name].append(f"twin {twin} does not name {name} as its twin in VARIANTS.json")
+                continue
+            key = frozenset((name, twin))
+            if key in seen:
+                continue
+            seen.add(key)
+            orig = original_positive(name, twin, variants, by_name)
+            if orig is None:
+                msg = (f"cannot tell which of {name} and {twin} is the original positive (role positive with "
+                       "fix_changed_files, then former_name, then provenance lineage.code_state)")
+                problems[name].append(msg)
+                problems[twin].append(msg)
+                continue
+            pairs.append((orig, twin if orig == name else name))
+        for name in by_name:
+            if name not in variants:
+                problems[name].append("task missing from VARIANTS.json")
+        return pairs
+    for name in by_name:
+        m = TWIN_RE.match(name)
+        if not m:
+            continue
+        other = f"{m.group(1)}_{'negative' if m.group(2) == 'positive' else 'positive'}"
+        if other not in by_name:
+            problems[name].append(f"twin {other} not found")
+        elif m.group(2) == "positive":
+            pairs.append((name, other))
+    return pairs
+
+
 def scan(root: Path) -> dict[str, list[str]]:
     tasks = sorted(d for d in root.iterdir() if is_task(d))
     problems = {t.name: [] for t in tasks}
@@ -231,24 +379,13 @@ def scan(root: Path) -> dict[str, list[str]]:
         files = env_files(t)
         if not files:
             problems[t.name].append("no files under environment/")
-        problems[t.name] += banned_hits(files) + evaluator_files(files)
+        problems[t.name] += banned_hits(files) + visible_file_hits(t) + evaluator_files(files)
         problems[t.name] += overlap_problems(t, files) + dockerfile_problems(t)
     by_name = {t.name: t for t in tasks}
-    for name, t in by_name.items():
-        m = TWIN_RE.match(name)
-        if not m or m.group(2) != "positive":
-            continue
-        other = f"{m.group(1)}_negative"
-        if other not in by_name:
-            problems[name].append(f"twin {other} not found")
-            continue
-        for p in twin_problems(t, by_name[other]):
-            problems[name].append(p)
-            problems[other].append(p)
-    for name in by_name:
-        m = TWIN_RE.match(name)
-        if m and m.group(2) == "negative" and f"{m.group(1)}_positive" not in by_name:
-            problems[name].append(f"twin {m.group(1)}_positive not found")
+    for pos, neg in twin_pairs(root, by_name, problems):
+        for p in twin_problems(by_name[pos], by_name[neg]) + toml_twin_problems(by_name[pos], by_name[neg]):
+            problems[pos].append(p)
+            problems[neg].append(p)
     return problems
 
 

@@ -278,9 +278,10 @@ def assign(scores: dict, n_results: int, n_findings: int, w: dict, in_scope: int
     plus the weighted measurement scores divided by ``n_findings``, so the
     reward is a sum over the matched pairs and an assignment that maximises
     that sum maximises the reward. The one case where this is not exact is a
-    result that matches through a location outside ``fix_changed_files``, as no
-    task has one (check_truth flags none either). The sums are exact
-    fractions. Ties go to the matching that, reading the results in order,
+    result that matches through a location outside ``fix_changed_files``. It
+    gets the same detection credit here, a close approximation that applies
+    only to findings whose accepted locations (primary or alternative) lie
+    outside ``fix_changed_files``. The sums are exact fractions. Ties go to the matching that, reading the results in order,
     gives each result the earliest finding it can, and match rather than leave
     a result unmatched. This is the matching the old greedy pass made, so a
     ground truth where greedy was optimal is graded exactly as before.

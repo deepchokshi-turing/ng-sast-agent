@@ -295,21 +295,23 @@ def test_happy_path_token_only_in_a_file(tmp_path, server_env):
                                             "sonar-scanner.log"}
 
 
-def test_recorded_mapped_result_reaches_the_sarif(tmp_path, server_env):
-    """The real dc4b7a negative run: two python:S5332 issues (CWE-200, 319) become LLM02.SID.HIGH under cwe-map-4."""
+def test_recorded_s5332_is_not_disclosure_under_cwe_map_5(tmp_path, server_env):
+    """The real dc4b7a negative run: two python:S5332 issues (CWE-200, 319).
+
+    cwe-map-4 emitted both as LLM02.SID.HIGH, and the one at safe_requests.py:77
+    failed the negative next to the fix. cwe-map-5 treats clear-text transport
+    as not disclosure, so both are dropped and counted under CWE-319.
+    """
     sandbox = FakeSandbox(recorded="task_dc4b7a_negative")
     _, context, go = run_agent(tmp_path, sandbox)
     asyncio.run(go())
     meta = context.metadata
-    assert meta["status"] == "ok" and meta["cwe_map"] == "cwe-map-4"
-    assert meta["results_by_cwe_decision"] == {"none": 0, "unmapped": 0, "mapped": 2, "ambiguous": 0}
+    assert meta["status"] == "ok" and meta["cwe_map"] == "cwe-map-5"
+    assert meta["results_by_cwe_decision"] == {"none": 0, "unmapped": 2, "mapped": 0, "ambiguous": 0}
     results = json.loads(sandbox.files["/app/output/findings.sarif"])["runs"][0]["results"]
-    assert [(r["ruleId"], r["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
-             r["locations"][0]["physicalLocation"]["region"]["startLine"]) for r in results] == [
-        ("LLM02.SID.HIGH", "src/crewai_rag_web_mini/_compat/requests.py", 115),
-        ("LLM02.SID.HIGH", "src/crewai_rag_web_mini/security/safe_requests.py", 77),
-    ]
-    assert all(r["properties"]["cwe"] == ["CWE-200", "CWE-319"] and "codeFlows" not in r for r in results)
+    assert results == []
+    assert meta["unmapped_by_cwe"] == {"CWE-319": 2}
+    assert meta["results_emitted"] == 0
     assert meta["sonarqube"]["findings_by_sonar_type"] == {"VULNERABILITY": 2, "SECURITY_HOTSPOT": 0}
     assert_token_nowhere(tmp_path, sandbox, context)
 

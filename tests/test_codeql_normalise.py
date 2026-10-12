@@ -345,11 +345,14 @@ def test_codeql_tags_are_decided_as_an_unordered_set(rule_id, rule):
 
 
 def test_a_rule_whose_tags_span_two_families_is_dropped_and_counted():
-    findings, counts = normalise(_retargeted("py/path-injection", tags=["200", "22"]))
+    # Two specific CWEs (cwe-map-5: a generic CWE such as 200 would give way to 22).
+    findings, counts = normalise(_retargeted("py/path-injection", tags=["532", "22"]))
     assert findings == []
     assert counts["results_by_cwe_decision"] == {"none": 0, "unmapped": 0, "mapped": 0, "ambiguous": 1}
     assert counts["results_cwe_ambiguous"] == [
-        ["py/path-injection", ["CWE-22", "CWE-200"], "src/pydantic_ai_mini/_compat/httpx2.py", 146]]
+        ["py/path-injection", ["CWE-22", "CWE-532"], "src/pydantic_ai_mini/_compat/httpx2.py", 146]]
+    findings, counts = normalise(_retargeted("py/path-injection", tags=["200", "22"]))
+    assert counts["results_by_cwe_decision"]["mapped"] == 1 and sarif.emitted_rules(findings) == ["LLM03.EA.FUNCTIONALITY"]
 
 
 def test_tag_order_does_not_change_the_result():

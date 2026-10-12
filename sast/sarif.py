@@ -25,9 +25,11 @@ What each field is built from:
   ``recommendations``, never scores them. Reports show them as a separate
   heuristic track.
 
-The grader matches each ground-truth finding to the first result near it, in
-results order, so results are sorted (file, line, ruleId) to make that order
-deterministic.
+The grader (v3) matches results to ground-truth findings one to one by an
+optimal assignment that maximises the task reward (``task_format/grade.py``,
+``assign``), so the order of the results does not change which finding a
+result is credited to. Results are still sorted (file, line, ruleId) so the
+same scan always gives a byte-identical SARIF.
 """
 
 from __future__ import annotations

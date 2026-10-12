@@ -17,7 +17,8 @@ Security Hotspots. For each one:
   that is exactly that rule, and no ``rule_errors``. Anything else is an
   error, never "no CWE".
 - The facet is an unordered set, so the CWE decision is
-  ``cwe_map.decide_unordered`` (cwe-map-4): unmapped CWEs are ignored, mapped
+  ``cwe_map.decide_unordered`` (cwe-map-5, see its docstring for generic
+  CWEs): unmapped CWEs are ignored, mapped
   CWEs that all fall in one family give that family, mapped CWEs in more
   than one family make the result ambiguous, and it is dropped and counted.
   A result is passed on with the decided family's CWEs first, so

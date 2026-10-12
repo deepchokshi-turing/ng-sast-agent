@@ -3,8 +3,8 @@
 # library and harbor.
 [project]
 name = "sast-agents"
-version = "0.4.0"
-description = "Static-analysis scanners (no LLM) as Harbor agents"
+version = "0.5.0"
+description = "Security scanners as Harbor agents: Semgrep, CodeQL and SonarQube (no LLM) and the Claude Code security review (calls a model)"
 requires-python = ">=3.12"
 dependencies = []
 

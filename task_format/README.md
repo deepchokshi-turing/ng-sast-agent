@@ -63,7 +63,9 @@ and its own weighted measurement scores, so the reward is a sum over the pairs
 and the grader finds the best matching exactly with the Hungarian algorithm,
 using exact fractions. A result that matches through a location outside the
 fix files gets the same detection credit in that sum, which is a close
-approximation. No current task has such a location. When two matchings give
+approximation. It applies only to findings with an accepted location (primary
+or alternative) outside `fix_changed_files`, for example a linked disclosure
+finding whose primary location is where the data leaves. When two matchings give
 the same reward, the grader reads the results in file order and gives each one
 the earliest finding it can, and prefers matching a result to leaving it
 unmatched. That is what the earlier greedy pass did, so a SARIF that greedy
@@ -246,8 +248,17 @@ cannot, for example, see a fix-only name that both twins share). It
   appear in a text file under `environment/` (case and punctuation ignored),
 - checks that `environment/Dockerfile` copies only `repo/` into the image
   (`COPY --from` of another build stage is allowed),
-- checks that twin pairs differ only in the positive's `fix_changed_files` with
-  identical manifest and fixtures.
+- searches `task.toml` and `instruction.md` for the same words, since the
+  harness and the scanner can read them,
+- checks that twin pairs differ only in the original positive's
+  `fix_changed_files` with identical manifest and fixtures. With role-free ids
+  the pairs come from `VARIANTS.json`. The original positive is the twin whose
+  role is positive and whose ground truth lists `fix_changed_files`. When both
+  twins qualify (a twin with the upstream fix relabelled as a partial-control
+  positive), `former_name` decides, then `lineage.code_state` (`source_commit`)
+  in provenance, and a pair that is still open is reported,
+- checks that twin `task.toml` files differ only in `task_id`, `variant_id` and
+  `related_variant_ids`.
 
 It exits non-zero on any problem. `--write-qc` records "pass" or "fail" in
 `validation/provenance.json` under `qc.label_leak_scan`.

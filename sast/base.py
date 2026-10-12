@@ -4,7 +4,9 @@ A scanner agent has no model. It installs its tool inside the task sandbox
 (never on the worker, which has only Harbor), scans ``/app/repo``, and writes
 ``/app/output/findings.sarif`` for the task's verifier. Subclasses supply the
 install files and the scan; this class owns the lifecycle, the time limits, the
-logs the platform keeps, and the run metadata.
+logs the platform keeps, and the run metadata. The one model-backed agent
+(``sast.claude_review``) also overrides ``model_metadata`` and ``to_agent_info``
+so the run names the model it really called.
 
 Failure policy: anything that makes the result untrustworthy (install failed,
 scan crashed or ran out of time, unreadable output) raises ``ScannerError``, so
@@ -152,7 +154,7 @@ class ScannerAgent(BaseAgent):
             # MANIFEST.json of the tools image as the installer saw it: manifest
             # and tree digests, and whether this tool's files were rehashed.
             "image_manifest": (getattr(self, "_install", None) or {}).get("image_manifest"),
-            "model_ignored": self.model_name,
+            **self.model_metadata(),
             "options_ignored": sorted((getattr(self.options, "model_extra", None) or {}).keys()),
             "instruction_sha256": hashlib.sha256(instruction.encode("utf-8")).hexdigest(),
         }
@@ -170,6 +172,9 @@ class ScannerAgent(BaseAgent):
             meta["scan_seconds"] = round(time.monotonic() - started, 1)
 
             built, stats = sarif.build(findings, tool_name=self.tool_name, tool_version=self.tool_version())
+            extra_driver = self.sarif_driver_properties()
+            if extra_driver:
+                built["runs"][0]["tool"]["driver"].setdefault("properties", {}).update(extra_driver)
             meta.update(stats)
             meta["findings_security"] = len(findings)
             rows = [f.compact(rule) for f, rule in zip(findings, sarif.emitted_rules(findings))]
@@ -207,6 +212,17 @@ class ScannerAgent(BaseAgent):
             cpus=int(cpus) if cpus else settings.cpus,
             memory_mb=int(memory) if memory else settings.memory_mb,
         )
+
+    def model_metadata(self) -> dict[str, Any]:
+        """What the run metadata says about a model. A scanner calls none, so
+        Harbor's ``-m`` is recorded as ignored. A model-backed agent overrides
+        this (and ``to_agent_info``) to name the model it really used."""
+        return {"model_ignored": self.model_name}
+
+    def sarif_driver_properties(self) -> dict[str, Any]:
+        """Extra ``tool.driver.properties`` for the SARIF (for example the model
+        and mode of a model-backed agent). Never read by the grader."""
+        return {}
 
     def artifact_files(self) -> dict[str, str]:
         """Sandbox files to keep as trial artifacts: {artifact name: sandbox path}."""

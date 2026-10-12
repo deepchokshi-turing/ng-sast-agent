@@ -135,7 +135,7 @@ def test_happy_path_commands_logs_and_metadata(tmp_path):
     meta = context.metadata
     assert meta["status"] == "ok"
     assert meta["agent"] == "codeql-sast"
-    assert meta["agent_version"] == "0.4.0+codeql-2.27.1"
+    assert meta["agent_version"] == "0.5.0+codeql-2.27.1"
     assert meta["tool"] == "codeql" and meta["tool_version"] == "2.27.1"
     assert meta["scan"]["threads"] == 1 and meta["scan"]["ram_mb"] == 1536
     assert meta["scan"]["file_roots"] == ["pyproject.toml", "security_manifest.json"]

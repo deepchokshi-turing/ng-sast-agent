@@ -13,7 +13,7 @@
 # The tag is the agent version from pyproject.toml (it must equal
 # sast.__version__), so a task image always copies tools that match the agent
 # version that will check them. Task Dockerfiles pin the same tag, for example
-# ARG SAST_TOOLS_IMAGE=sast-tools:0.4.0.
+# ARG SAST_TOOLS_IMAGE=sast-tools:0.5.0.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -31,7 +31,11 @@ cp "$ROOT/images/sast-tools/Dockerfile" "$ROOT/images/sast-tools/fetch_archive.p
 PYTHONPATH="$ROOT" python3 -c "import json, sast.semgrep.pins as p; print(json.dumps(p.as_dict()))" > "$CONTEXT/pins.json"
 # The manifest writer and every tool's pins, for /opt/sast/MANIFEST.json.
 cp "$ROOT/sast/manifest.py" "$CONTEXT/sast_manifest.py"
-PYTHONPATH="$ROOT" python3 -c "import json, sast.semgrep.pins as s, sast.codeql.pins as c, sast.sonarqube.pins as q; print(json.dumps({'semgrep': s.as_dict(), 'codeql': c.as_dict(), 'sonar-scanner': q.as_dict()}))" > "$CONTEXT/manifest_pins.json"
+PYTHONPATH="$ROOT" python3 -c "import json, sast.semgrep.pins as s, sast.codeql.pins as c, sast.sonarqube.pins as q, sast.claude_review.pins as r; print(json.dumps({'semgrep': s.as_dict(), 'codeql': c.as_dict(), 'sonar-scanner': q.as_dict(), 'claude-review': r.as_dict()}))" > "$CONTEXT/manifest_pins.json"
+# The Claude Code security review part: its installer, pins and hash-pinned Python requirements.
+cp "$ROOT/sast/claude_review/install.py" "$CONTEXT/claude_review_install.py"
+cp "$ROOT/sast/claude_review/requirements.lock" "$CONTEXT/requirements.lock"
+PYTHONPATH="$ROOT" python3 -c "import json, sast.claude_review.pins as r; print(json.dumps(r.as_dict()))" > "$CONTEXT/claude_review_pins.json"
 
 # CodeQL and sonar-scanner pins, passed as build arguments. A missing sha256 stops here.
 PYTHONPATH="$ROOT" python3 - > "$CONTEXT/build-args.txt" <<'PY'

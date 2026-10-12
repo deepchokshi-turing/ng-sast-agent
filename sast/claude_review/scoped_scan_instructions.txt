@@ -1,0 +1,14 @@
+**GenAI Sensitive Information Disclosure (OWASP LLM02):**
+- Sensitive data (PII, PHI, financial data, credentials, confidential business data, privileged documents) reaching model-visible state (prompt, RAG results, memory, tool results, logs of prompts, completions or traces) without controls that preserve its authorisation boundary
+- The same data able to cross an authorisation or trust boundary (email, HTTP or webhook, tool arguments, external API, shared store, broadly readable logs, cross-tenant retrieval, external model provider)
+- Retrieval without user, tenant or document authorisation in the query, full records appended to prompts, and raw sensitive fields passed to the model
+
+**GenAI Excessive Agency (OWASP LLM03):**
+- Tools or tool operations beyond what the intended task requires (excessive functionality)
+- A tool's credential or authorisation scope that exceeds what its operation requires (excessive permissions)
+- A model decision that can trigger a high-impact action with no independent policy or approval gate (excessive autonomy)
+
+**Application context and output for this review:**
+- The file security_manifest.json at the repository root, when it exists, describes the application's intended task, its actors, trust boundaries, and what data, actions, purposes and recipients are authorised. Read it before reviewing and judge every potential issue against it. Data or capability that the manifest authorises is not a finding.
+- Report each finding at the code that must change to fix it, one finding per independently fixable weakness.
+- In addition to the fields of the required output schema, give every finding a field "cwe" holding a JSON list of the CWE IDs that best describe the weakness, most specific first, for example ["CWE-532"] or ["CWE-78", "CWE-77"]. Use real CWE IDs only.
