@@ -1,6 +1,6 @@
-"""Grader v3.2, the scoring changes made in response to the external audit:
+"""Grader v3.2 and v3.3, the scoring changes made in response to the external audits:
 
-- negatives fail on any contrast-family claim in scope that is not "complete" (F-B1, A7),
+- negatives fail on any risk claim (either family since v3.3) in scope that is not "complete" (F-B1, A7, D2),
 - positives count unmatched results anywhere in the scanner roots as false positives (F-M1),
 - a result may match a finding of the other risk family on CWE, with the linked-pair guard (A1),
 - the path score has order, role and precision terms (A3),
@@ -92,7 +92,7 @@ def test_negative_fails_on_a_contrast_claim_anywhere_in_scope(tmp_path, res, rew
     score, detail = run(sarif(res), with_roots(negative()), tmp_path)
     assert (score["reward"], detail["failure_bucket"], score["fp_outside_scope"]) == (reward, bucket, outside)
     assert score["neg.fail.in_scope"] == int(bucket == "in_scope")
-    assert detail["scope"] == "scanner_roots" and detail["grader_version"] == "v3.2"
+    assert detail["scope"] == "scanner_roots" and detail["grader_version"] == "v3.3"
 
 
 def test_auditor_probe_confident_false_alarm_away_from_the_fix(tmp_path):
@@ -133,7 +133,7 @@ def test_empty_sarif_is_clean_and_missing_sarif_is_zero_on_both_sides(tmp_path):
     for name, truth in (("c", neg), ("d", pos)):
         score, detail = run(None, truth, tmp_path / name)
         assert score["reward"] == 0.0 and score["sarif_missing"] == 1
-        assert detail["grader_version"] == "v3.2"
+        assert detail["grader_version"] == "v3.3"
     assert run(None, neg, tmp_path / "e")[0]["neg.fail.in_scope"] == 0
 
 
@@ -318,6 +318,9 @@ def sid_negative_with_trap(**trap_rules):
 ])
 def test_trap_rule_ids_fail_only_on_those_rules(tmp_path, rule, reward):
     t = sid_negative_with_trap(trap_rule_ids=["LLM03.EA.AUTONOMY"])
+    # v3.3: any risk claim in scope fails a negative, so keep the trap's file out of scope
+    # to see the trap rule alone (traps apply whatever the scope).
+    t["matching"]["excluded_paths"] = t["matching"]["excluded_paths"] + [TOOL]
     score, detail = run(sarif(result(rule, TOOL, 305)), t, tmp_path)
     assert score["reward"] == reward and score["neg.fail.trap"] == int(reward == 0.0)
     assert g.check_truth(t) == []
@@ -399,8 +402,8 @@ def test_absolute_uri_matches_through_the_grader(tmp_path):
 # ---- 8. version -----------------------------------------------------------------------------
 
 def test_version_string():
-    assert g.GRADER_VERSION == "v3.2"
-    assert "v3.2" in (ROOT / "task_format" / "grade.py").read_text(encoding="utf-8").split('"""')[1]
+    assert g.GRADER_VERSION == "v3.3"
+    assert "v3.3" in (ROOT / "task_format" / "grade.py").read_text(encoding="utf-8").split('"""')[1]
 
 
 # ---- the real dataset ----------------------------------------------------------------------------
@@ -456,3 +459,15 @@ def test_check_truth_accepts_and_validates_scope_fields():
     bad = with_roots(negative())
     bad["matching"]["scanner_roots"] = "src"
     assert any("matching.scanner_roots must be a list" in p for p in g.check_truth(bad))
+
+
+# ---- v3.3: shared fix point (final audit R1, crewai-website-search-a) -----------------------------
+
+def test_shared_location_needs_a_two_sided_waiver():
+    a = path_finding([(100, "sink", True)], fid="F1", line=100)
+    b = path_finding([(104, "sink", True)], fid="F3", line=104)
+    assert any("overlapping accepted locations" in p for p in g.check_truth(positive_with([a, b])))
+    a["shared_location_with"] = ["F3"]
+    assert any("overlapping accepted locations" in p for p in g.check_truth(positive_with([a, b])))
+    b["shared_location_with"] = ["F1"]
+    assert not any("overlapping accepted locations" in p for p in g.check_truth(positive_with([a, b])))

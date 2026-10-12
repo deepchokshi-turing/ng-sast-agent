@@ -174,15 +174,21 @@ def test_minimal_contrast_entry_is_not_a_trap(tmp_path):
     assert score["reward"] == 1.0 and score["fp_outside_scope"] == 1
 
 
-def test_negative_ignores_other_risk_family(tmp_path):
+def test_negative_fails_on_other_risk_family(tmp_path):
+    # v3.3 (final audit D2): a negative is "neither", so an SID claim on an EA-only negative fails too.
     score, detail = run(sarif(result("LLM02.SID.HIGH", TOOL, 21)), ea_only_negative(), tmp_path)
-    assert score["reward"] == 1.0 and score["fp_outside_scope"] == 1
+    assert score["reward"] == 0.0 and score["fp_outside_scope"] == 0
+    assert detail["failure_bucket"] == "in_scope"
     tl = detail["task_level"]
-    # The result does not fail the negative, so it predicts nothing. The loose view still records it.
-    assert tl["risk_types"]["sensitive_information_disclosure"] == "TN"
-    assert tl["risk_types_loose"]["sensitive_information_disclosure"] == "FP"
-    assert (score["tl.pred.SID"], score["tl.pred_loose.SID"]) == (0, 1)
-    assert tl["categories"] == {"LLM03.EA.FUNCTIONALITY": "TN"}
+    assert tl["risk_types"]["sensitive_information_disclosure"] == "FP"
+    assert (score["tl.pred.SID"], score["tl.pred_loose.SID"]) == (1, 1)
+    assert tl["categories"] == {"LLM03.EA.FUNCTIONALITY": "TN", "LLM02.SID": "FP"}
+
+
+def test_negative_other_family_complete_claim_is_not_a_failure(tmp_path):
+    res = result("LLM02.SID.HIGH", TOOL, 21, controlStatus="complete")
+    score, _ = run(sarif(res), ea_only_negative(), tmp_path)
+    assert score["reward"] == 1.0
 
 
 def test_negative_noise_in_fix_file_now_fails(tmp_path):

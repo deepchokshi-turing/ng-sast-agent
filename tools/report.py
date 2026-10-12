@@ -190,10 +190,19 @@ def _call(fn, **known):
 # ---- inputs ------------------------------------------------------------------------------
 
 def read_json_file(path: Path):
+    """JSON from a file, or None. Harbor on Windows can write a job file in the system code page
+    (cp1252) instead of UTF-8 when it holds tool text with typographic quotes, so that is tried
+    second rather than dropping the trial."""
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        raw = path.read_bytes()
+    except OSError:
         return None
+    for encoding in ("utf-8", "cp1252"):
+        try:
+            return json.loads(raw.decode(encoding))
+        except (UnicodeDecodeError, ValueError):
+            continue
+    return None
 
 
 def load_variants(path: Path | None) -> dict:

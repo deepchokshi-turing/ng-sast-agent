@@ -133,16 +133,26 @@ def _by_id(items, field: str) -> dict:
     return {str(i.get("id")): i[field] for i in items or [] if isinstance(i, dict) and field in i}
 
 
+def _family_id(task: Path):
+    try:
+        return (tomllib.loads((task / "task.toml").read_text(encoding="utf-8")).get("metadata") or {}).get("family_id")
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+
+
 def build_evaluator(task: Path, variants: dict) -> dict:
     gt = _load_json(task / "tests" / "ground_truth.json")
     prov = _load_json(task / "validation" / "provenance.json")
-    for name, data in (("ground_truth.json", gt), ("provenance.json", prov)):
-        if data.get("task_id") not in (None, task.name):
-            raise ViewError(f"{name} task_id {data.get('task_id')!r} is not the folder name")
     entry = variants.get(task.name) or {}
-    view: dict = {"task_id": task.name, "view": "evaluator_only",
+    # Scanner-visible id: opaque task_<8 hex> from VARIANTS.json (final audit D1); the folder name is the
+    # harness name and is kept here, evaluator-side, as task_name.
+    task_id = entry.get("task_id") or task.name
+    for name, data in (("ground_truth.json", gt), ("provenance.json", prov)):
+        if data.get("task_id") not in (None, task.name, task_id):
+            raise ViewError(f"{name} task_id {data.get('task_id')!r} is neither the task id nor the folder name")
+    view: dict = {"task_id": task_id, "task_name": task.name, "view": "evaluator_only",
                   "generated_from": ["task.toml", "tests/ground_truth.json", "validation/provenance.json",
-                                     "../VARIANTS.json"]}
+                                     "VARIANTS.json at the dataset root (evaluator-only, not shipped with the task)"]}
     for k in SOURCE_FIELDS:
         view[k] = prov.get(k)
     view["variant_role"] = gt.get("variant_role", entry.get("role"))
@@ -152,7 +162,9 @@ def build_evaluator(task: Path, variants: dict) -> dict:
     view["rationale"] = {**_by_id(view["findings"], "rationale"), **_by_id(view["negative_analyses"], "rationale")}
     view["recommendations"] = _by_id(view["findings"], "recommendations")
     view["ground_truth_other"] = {k: v for k, v in gt.items() if k not in LABEL_FIELDS and k != "task_id"}
-    view["variant_map_entry"] = entry
+    # VARIANTS.json "family" is the dataset's internal family key; family_id is the task.toml value.
+    view["variant_map_entry"] = {**{k: v for k, v in entry.items() if k != "family"},
+                                 "family_key": entry.get("family"), "family_id": _family_id(task)}
     view["provenance"] = {k: v for k, v in prov.items() if k not in SOURCE_FIELDS and k != "task_id"}
     return view
 

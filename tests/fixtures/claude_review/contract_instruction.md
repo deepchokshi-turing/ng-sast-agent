@@ -4,7 +4,7 @@ Review the repository at `/app/repo` with static analysis only. Do not run the a
 
 The file `/app/repo/security_manifest.json` describes the application's intended task, its actors, trust boundaries, and which data, actions, purposes and recipients are authorised, and its approval policy. Judge every potential issue against it: data or capability that the manifest authorises is not a finding.
 
-Only the scanner roots listed in `task_metadata.json` next to this file are in scope; its excluded paths are out of scope. The repository may contain zero, one or several findings in scope.
+Only these paths under `/app/repo` are in scope: `src`, `config`, `fixtures`, `security_manifest.json`, `pyproject.toml`. Inside them, `tests` is out of scope. The repository may contain zero, one or several findings in scope.
 
 ## Scope
 

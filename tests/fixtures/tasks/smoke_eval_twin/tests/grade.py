@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Grade a scanner's SARIF output against ground_truth.json.
 
-grader v3.2 (v3: 2026-10-07, revised after the audit the same day; v3.1 and
-v3.2: 2026-10-12). Every field added since v1 is optional. v3.2 changes how
+grader v3.3 (v3: 2026-10-07, revised after the audit the same day; v3.1 and
+v3.2: 2026-10-12; v3.3: 2026-10-13). Every field added since v1 is optional. v3.2 changes how
 some results are scored whatever the fields (see "v3.2" below); without the
 v3.2 fields it falls back to ``fix_changed_files`` and ``trap_rule_prefixes``.
 
@@ -78,6 +78,11 @@ task_format/README.md, "v3.2"). ``GRADER_VERSION`` is written to grading_detail.
 - Path (A3): ``coverage * (0.2 + 0.8 * order * role) * precision`` (``score_path``).
 - Traps (F-M5): ``trap_rule_ids`` on a trap, when present, are the exact rule
   ids that fail it; otherwise ``trap_rule_prefixes`` as before.
+
+v3.3 (2026-10-13, final audit D2): the negative ``in_scope`` bucket takes a
+result of either risk family (LLM02 or LLM03), not only a contrast-family one.
+A negative's task-level label is "neither" (client spec, measurement 1), so any
+risk claim in scope that is not "complete" is a false alarm.
 - Categories (A6): a failing result on a negative counts against its own
   category (``cat.<category>.detected``), not the contrast prefix.
 - ``norm_uri`` (m9) also strips ``file://``, everything up to ``/app/repo/``,
@@ -130,7 +135,7 @@ import sys
 import traceback
 from pathlib import Path
 
-GRADER_VERSION = "v3.2"
+GRADER_VERSION = "v3.3"
 RISK_PREFIX = {"LLM02": "sensitive_information_disclosure", "LLM03": "excessive_agency"}
 RISK_SHORT = {"sensitive_information_disclosure": "SID", "excessive_agency": "EA"}
 MEASUREMENTS = ("classification", "path", "controls", "recommendations")
@@ -724,8 +729,8 @@ def grade_negative(results: list, truth: dict, w: dict, tol: int) -> tuple[dict,
     - ``trap``: it hits a ``hard_negative_trap`` entry of ``negative_analyses``
       (its rule id is one of the trap's ``trap_rule_ids``, or, when the trap has
       none, its prefix is in ``trap_rule_prefixes``; within tolerance of the trap);
-    - ``in_scope`` (v3.2): its OWASP prefix is a contrast prefix and it lies
-      anywhere in the scope (``scope_of``: the scanner roots minus the excluded
+    - ``in_scope`` (v3.2; v3.3: either risk family): its OWASP prefix is LLM02
+      or LLM03 and it lies anywhere in the scope (``scope_of``: the scanner roots minus the excluded
       paths, else ``fix_changed_files``).
 
     A result whose ``controlStatus`` is "complete" says a control closes the path
@@ -771,7 +776,7 @@ def grade_negative(results: list, truth: dict, w: dict, tol: int) -> tuple[dict,
         hit = [t["id"] for t in traps if hits_trap(rule, primary, t, tol)]
         if hit:
             trap_hits.append({**entry, "traps": hit})
-        elif rule_prefix(rule) in prefixes and in_scope_at(primary[0]):
+        elif risk_of(rule) and in_scope_at(primary[0]):
             in_scope.append(entry)
         else:
             outside.append(entry)
@@ -1121,6 +1126,8 @@ def check_truth(truth: dict, repo=None, manifest=None) -> list[str]:
     apart in one file), when one result could match both (same risk type and,
     under require_cwe, a shared CWE). Such a result can be credited to
     either finding, so which one detected the issue is not well defined.
+    Two findings that name each other in ``shared_location_with`` are exempt:
+    one fix there closes both, and each result is still credited once.
     """
     if not isinstance(truth, dict):
         return ["ground truth is not a JSON object"]
@@ -1222,6 +1229,11 @@ def check_truth(truth: dict, repo=None, manifest=None) -> list[str]:
             if fa["risk_type"] != fb["risk_type"]:
                 continue
             if require_cwe and not (finding_cwes(fa) & finding_cwes(fb)):
+                continue
+            # v3.3: an explicit, two-sided waiver allows a shared fix point (one fix closes both
+            # findings); the one-to-one assignment then credits one result to one of them.
+            if fb.get("id") in (fa.get("shared_location_with") or []) and \
+                    fa.get("id") in (fb.get("shared_location_with") or []):
                 continue
             for x in la:
                 for y in lb:

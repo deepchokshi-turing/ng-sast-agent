@@ -160,7 +160,7 @@ def test_banned_word_in_metadata_view_fails(twins):
 def test_metadata_view_task_id_must_be_the_folder(twins):
     write_meta(twins / POS, "task_99999999", "var_a", "fam_1:var_b")
     write_meta(twins / NEG, NEG, "var_b", "fam_1:var_a")
-    assert "task_metadata.json task_id = 'task_99999999' is not the folder name" in leak(twins).stdout
+    assert "task_metadata.json task_id = 'task_99999999' is not the task id" in leak(twins).stdout
 
 
 # ---- check_clean_build.py ------------------------------------------------------------------

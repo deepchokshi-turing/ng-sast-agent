@@ -38,6 +38,7 @@
   --axis: #c3c2b7;
   --border: rgba(11, 11, 11, 0.10);
   --bar: #2a78d6;
+  --bar-bad: #eb6834;
   --tool-1: #2a78d6;
   --tool-2: #eb6834;
   --tool-3: #1baf7a;
@@ -67,6 +68,7 @@
     --axis: #383835;
     --border: rgba(255, 255, 255, 0.10);
     --bar: #3987e5;
+    --bar-bad: #d95926;
     --tool-1: #3987e5;
     --tool-2: #d95926;
     --tool-3: #199e70;
@@ -93,6 +95,7 @@
   --axis: #383835;
   --border: rgba(255, 255, 255, 0.10);
   --bar: #3987e5;
+  --bar-bad: #d95926;
   --tool-1: #3987e5;
   --tool-2: #d95926;
   --tool-3: #199e70;
@@ -241,6 +244,9 @@ dl.gloss dd { margin: 0; color: var(--ink-2); max-width: 760px; }
 .mchart .grid { stroke: var(--grid); }
 .mchart .axis { stroke: var(--axis); }
 .mchart .mbar { fill: var(--bar); }
+/* The one chart where a longer bar is worse (fixed apps wrongly flagged). */
+.mchart.lower-better .mbar { fill: var(--bar-bad); }
+.mtag { display: inline-block; margin-left: 8px; padding: 1px 7px; border-radius: 999px; font-size: 11px; font-weight: 600; color: var(--bar-bad); border: 1px solid var(--bar-bad); vertical-align: middle; }
 .mchart .hit { fill: transparent; }
 .mchart .mrow { outline: none; }
 .mchart .mrow:hover .hit, .mchart .mrow:focus .hit { fill: var(--surface-2); }
@@ -942,7 +948,7 @@ function measureChart(c, W) {
   let H = 0;
   for (const f of c.facets) H += (f.title ? 26 : 0) + f.rows.length * rowH;
   H += 22;
-  const g = svg("svg", { class: "mchart", viewBox: `0 0 ${W} ${H}`, width: W, height: H, role: "group", "aria-label": c.title });
+  const g = svg("svg", { class: c.lower_is_better ? "mchart lower-better" : "mchart", viewBox: `0 0 ${W} ${H}`, width: W, height: H, role: "group", "aria-label": c.lower_is_better ? `${c.title} (lower is better)` : c.title });
   let y = 0;
   for (const f of c.facets) {
     if (f.title) { g.append(svg("text", { x: 0, y: y + 16, class: "facet" }, f.title)); y += 26; }
@@ -987,7 +993,7 @@ function renderMeasureCharts(s) {
   return section("measures", null, "Measurements at a glance", s.charts_intro || null,
     groups.map(gr => el("div", { class: "mgroup" },
       el("div", { class: "kicker" }, gr.name),
-      gr.charts.map(c => [el("div", { class: "mchart-title" }, c.title), el("p", { class: "mcap" }, c.caption), measureChart(c, W)]))));
+      gr.charts.map(c => [el("div", { class: "mchart-title" }, c.title, c.lower_is_better ? el("span", { class: "mtag" }, "lower is better") : null), el("p", { class: "mcap" }, c.caption), measureChart(c, W)]))));
 }
 
 // The reviewer views start folded. They open on "Show details", on a link to one of them, or

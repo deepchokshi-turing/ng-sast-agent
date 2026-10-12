@@ -1040,6 +1040,8 @@ TOOL_KINDS = {
     "codeql": ("CodeQL", "a code-analysis scanner from GitHub"),
     "sonarqube": ("SonarQube", "a code-quality and security scanner"),
     "claude-code-security-review": ("Claude", "an AI reviewer"),
+    "promptfoo-code-scan": ("Promptfoo", "an AI code scanner (Promptfoo Code Scanning, a cloud service)"),
+    "codex-exec-security-review": ("Codex", "an AI reviewer (OpenAI Codex, run as codex exec with a security-review prompt)"),
 }
 NOT_PROVIDED = "not provided by this tool"
 FREE_TEXT = "given as free text, not scorable"
@@ -1592,17 +1594,20 @@ def summary_charts(tools: list[dict]) -> list[dict]:
     out = []
     for key, (measurement, title, caption) in CHART_TEXT.items():
         out.append({"id": CHART_FILES[key], "group": measurement, "title": title, "caption": caption,
-                    "file": f"charts/{CHART_FILES[key]}.svg", "facets": facets[key]})
+                    "file": f"charts/{CHART_FILES[key]}.svg", "facets": facets[key],
+                    # The one chart where a longer bar is worse: drawn in the alert hue with a tag.
+                    "lower_is_better": key == "flagged"})
     return out
 
 
 # Colours: the page's chart tokens (tools/eval_report.html), checked with the data-viz palette
-# validator. One bar hue, stepped separately for the dark surface.
+# validator. One bar hue, stepped separately for the dark surface; "bar_bad" (the palette's orange)
+# marks the one chart where a longer bar is worse (fixed apps wrongly flagged).
 SVG_COLORS = {
     "light": {"bg": "#fcfcfb", "ink": "#0b0b0b", "ink2": "#52514e", "muted": "#6f6d68", "grid": "#e1e0d9",
-              "axis": "#c3c2b7", "bar": "#2a78d6"},
+              "axis": "#c3c2b7", "bar": "#2a78d6", "bar_bad": "#eb6834"},
     "dark": {"bg": "#1a1a19", "ink": "#ffffff", "ink2": "#c3c2b7", "muted": "#9a988f", "grid": "#2c2c2a",
-             "axis": "#383835", "bar": "#3987e5"},
+             "axis": "#383835", "bar": "#3987e5", "bar_bad": "#d95926"},
 }
 SVG_FONT = "system-ui, -apple-system, 'Segoe UI', sans-serif"
 SVG_W, SVG_PAD, SVG_LABEL_MAX, SVG_LINE = 680, 16, 210, 14
@@ -1701,13 +1706,15 @@ def chart_svg(chart: dict) -> str:
         for facet in chart["facets"] for r in facet["rows"])
     style = (lambda c: f".bg{{fill:{c['bg']}}}.ink{{fill:{c['ink']}}}.ink2{{fill:{c['ink2']}}}"
              f".muted{{fill:{c['muted']}}}.grid{{stroke:{c['grid']}}}.axis{{stroke:{c['axis']}}}"
-             f".bar{{fill:{c['bar']}}}.state{{stroke:{c['bg']}}}")
+             f".bar{{fill:{c['bar_bad' if chart.get('lower_is_better') else 'bar']}}}"
+             f".state{{stroke:{c['bg']}}}")
     cid = chart["id"]
     return "\n".join([
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{SVG_W}" height="{n(height)}" '
         f'viewBox="0 0 {SVG_W} {n(height)}" role="img" aria-labelledby="{cid}-title {cid}-desc" '
         f'font-family="{SVG_FONT}">',
-        f'<title id="{cid}-title">{xml_text(chart["group"])}. {xml_text(chart["title"])}</title>',
+        f'<title id="{cid}-title">{xml_text(chart["group"])}. {xml_text(chart["title"])}'
+        + (" (lower is better)" if chart.get("lower_is_better") else "") + '</title>',
         f'<desc id="{cid}-desc">{xml_text(desc)}</desc>',
         "<style>" + style(SVG_COLORS["light"]) + ".state{stroke-width:3px;paint-order:stroke}"
         "g:hover .bar{opacity:.8}@media (prefers-color-scheme: dark){" + style(SVG_COLORS["dark"]) + "}</style>",

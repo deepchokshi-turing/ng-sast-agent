@@ -1,4 +1,4 @@
-# Task format: grader v3.2
+# Task format: grader v3.3
 
 `grade.py` here is the task grader, and the only one: every task in harbor-tasks and every sample task under `tests/fixtures/tasks` carries a byte-identical copy. Every field added since v1 is optional, so older ground truths still grade; the earlier graders and their comparison test were removed on 2026-10-12.
 
@@ -166,6 +166,8 @@ A result whose `properties.controlStatus` is `"complete"` says that a control cl
 
 An empty SARIF still scores 1.0 on a negative: the tool said the code is clean. A missing SARIF (the tool wrote no answer, for example after a timeout) still scores 0 on a negative as on a positive, with `sarif_missing: 1`, so not finishing is never rewarded (A5).
 
+From v3.3 (2026-10-13, final audit D2) the `in_scope` bucket takes a result of either risk family, LLM02 or LLM03, not only the contrast family. Every negative's task-level label is "neither" (client spec, measurement 1), so an SID claim on a negative whose contrast is EA only, or the reverse, is a false alarm too. Before v3.3 such a claim landed in `fp_outside_scope` and the negative scored 1.0 on 6 of the 15 negatives. Results with a rule id outside LLM02/LLM03 are still not scored (OWASP Benchmark: a result counts only in its own category).
+
 ### Positives count false positives across the scanner roots (F-M1)
 
 An unmatched result is a false positive when it is in scope, not only when it is in `fix_changed_files`. A tool that adds 30 unrelated results in the scanner roots to one correct result now gets a detection F1 of 2/32 instead of 1.0. Results outside the roots or in excluded paths stay `fp_outside_scope`. A ground truth without scanner roots is graded as before (false positives only inside `fix_changed_files`).
@@ -289,6 +291,10 @@ Run it on every task at build time. It reports
   could be credited to either finding, so which finding it detected is not
   well defined. `task_781350`'s F1
   and F2 alternative at `_instrumentation.py:115` and `:107` are an example.
+  From v3.3 two findings that name each other in `shared_location_with` are
+  exempt: one fix there closes both (crewai-website-search-a F1 and F3 at
+  `webpage_loader.py:27`), and the one-to-one assignment still credits each
+  result to one finding only.
 
 - from gt-0.2 on, the fields of "Ground truth gt-0.2" above: a missing snippet id or hash, a missing `affected_asset`, `violates`, `egress` on a sink or action step, `consequence` on an excessive-agency finding, a first `source` or `model_decision` step that is not required, and on a negative a missing `controls` entry or `residual_risk`,
 - whatever the version, a malformed new field: an `egress` kind other than external or internal, a `consequence` that is not text of the rationale, a negative control that is not complete or whose `at` is not one of `fixed_locations`,

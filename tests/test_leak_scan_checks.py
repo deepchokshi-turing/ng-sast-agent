@@ -1,5 +1,5 @@
-"""tools/leak_scan.py checks on the ids in task.toml (task_id equals the folder
-name, no role word in task_id, variant_id or related_variant_ids), on twin
+"""tools/leak_scan.py checks on the ids in task.toml (task_id equals the VARIANTS.json task id,
+else the folder name; no role word in task_id, variant_id or related_variant_ids), on twin
 instruction.md files, and on a VARIANTS.json that cannot be read."""
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ def test_task_id_must_equal_the_folder_name(twins):
     write_ids(twins / NEG, "task_33333333", "var_b", "fam_1:var_a")
     proc = leak(twins)
     assert proc.returncode == 1, proc.stdout
-    assert "task.toml metadata.task_id = 'task_33333333' is not the folder name 'task_22222222'" in proc.stdout
+    assert "task.toml metadata.task_id = 'task_33333333' is not the task id 'task_22222222'" in proc.stdout
     assert f"{NEG}  FAIL" in proc.stdout and f"{POS}  pass" in proc.stdout
 
 
@@ -64,7 +64,7 @@ def test_role_free_folder_with_old_role_task_id_fails(twins):
     write_ids(twins / POS, "task_abc_positive", "var_a", "fam_1:var_b")
     proc = leak(twins)
     assert proc.returncode == 1, proc.stdout
-    assert "is not the folder name 'task_11111111'" in proc.stdout
+    assert "is not the task id 'task_11111111'" in proc.stdout
     assert "role word 'positive' in task.toml metadata.task_id" in proc.stdout
     assert f"{POS}  FAIL" in proc.stdout
 
@@ -158,3 +158,16 @@ def test_malformed_variants_is_a_reported_failure(twins, text):
         qc = json.loads((twins / name / "validation" / "provenance.json").read_text())["qc"]
         assert qc["label_leak_scan"] == "fail"
 
+
+
+def test_task_id_follows_the_variants_map_when_it_names_one(twins):
+    # Final audit D1 (2026-10-13): folder names carry -a/-b, so the scanner-visible task_id is the
+    # opaque id that VARIANTS.json gives, and the folder name may not reach task_metadata.json.
+    variants = json.loads((twins / "VARIANTS.json").read_text(encoding="utf-8"))
+    variants[POS]["task_id"] = "task_aaaaaaaa"
+    (twins / "VARIANTS.json").write_text(json.dumps(variants), encoding="utf-8")
+    proc = leak(twins)
+    assert "task.toml metadata.task_id = 'task_11111111' is not the task id 'task_aaaaaaaa'" in proc.stdout
+    write_ids(twins / POS, "task_aaaaaaaa", "var_a", "fam_1:var_b")
+    proc = leak(twins)
+    assert f"{POS}  pass" in proc.stdout, proc.stdout

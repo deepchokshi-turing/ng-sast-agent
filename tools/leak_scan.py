@@ -34,7 +34,8 @@ For every task folder (one holding task.toml or environment/):
    ``variant_id`` and ``related_variant_ids``. Any other key that differs (a
    package version, an architecture line, a tag) could tell the twins apart.
 8. Because those three keys escape point 7, ``task_id`` (when set) must equal
-   the task folder name, and none of the three may hold a role word
+   the task id in VARIANTS.json (opaque task_<8 hex>; else the folder name), the
+   folder name may not appear in task_metadata.json, and none of the three may hold a role word
    (positive, negative, vulnerable, patch, fixed, benign, or a pos, neg,
    vuln, fix, safe, unsafe, bad or good part between separators).
 9. Twin instruction.md files must be byte-identical.
@@ -210,8 +211,21 @@ def toml_twin_problems(a: Path, b: Path) -> list[str]:
     return [f"task.toml differs between twins in {k}" for k in differing]
 
 
+def expected_task_id(task: Path) -> str:
+    """The scanner-visible task id: VARIANTS.json ``task_id`` when the map gives one, else the folder name.
+
+    Folder names (``<family>-a`` / ``-b``) are for people running the harness; since the final audit
+    (D1, 2026-10-13) the id a scanner can see is the opaque ``task_<8 hex>`` kept in VARIANTS.json."""
+    try:
+        entry = json.loads((task.parent / "VARIANTS.json").read_text(encoding="utf-8")).get(task.name)
+    except (OSError, ValueError, AttributeError):
+        entry = None
+    value = entry.get("task_id") if isinstance(entry, dict) else None
+    return value if isinstance(value, str) and value else task.name
+
+
 def toml_id_problems(task: Path) -> list[str]:
-    """``task_id`` other than the folder name, or a role word in task_id, variant_id or related_variant_ids.
+    """``task_id`` other than the expected id, or a role word in task_id, variant_id or related_variant_ids.
 
     These keys may differ between twins, so they are the one place in task.toml
     where a role could hide without the twin diff seeing it."""
@@ -227,8 +241,8 @@ def toml_id_problems(task: Path) -> list[str]:
         leaf = key.rsplit(".", 1)[-1]
         if leaf not in TOML_TWIN_KEYS:
             continue
-        if leaf == "task_id" and value != task.name:
-            problems.append(f"task.toml {key} = {value!r} is not the folder name {task.name!r}")
+        if leaf == "task_id" and value != expected_task_id(task):
+            problems.append(f"task.toml {key} = {value!r} is not the task id {expected_task_id(task)!r}")
         for item in value if isinstance(value, list) else [value]:
             m = ROLE_RE.search(str(item))
             if m:
@@ -315,8 +329,11 @@ def metadata_view_problems(task: Path) -> list[str]:
     extra = sorted(set(data) - METADATA_ALLOWLIST)
     if extra:
         problems.append(f"{METADATA_FILE} has keys outside the scanner-visible allowlist: {', '.join(extra)}")
-    if "task_id" in data and data["task_id"] != task.name:
-        problems.append(f"{METADATA_FILE} task_id = {data['task_id']!r} is not the folder name {task.name!r}")
+    if "task_id" in data and data["task_id"] != expected_task_id(task):
+        problems.append(f"{METADATA_FILE} task_id = {data['task_id']!r} is not the task id {expected_task_id(task)!r}")
+    # The folder name carries the -a/-b letter, so it must not reach the scanner view (final audit D1).
+    if expected_task_id(task) != task.name and task.name in json.dumps(data):
+        problems.append(f"{METADATA_FILE} names the task folder {task.name!r}")
     return problems
 
 
