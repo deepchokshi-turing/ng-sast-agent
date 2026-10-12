@@ -57,7 +57,8 @@ for k, v in values.items():
     print(f"{k}={v}")
 PY
 TOOL_ARGS=()
-while IFS= read -r line; do TOOL_ARGS+=("$line"); done < "$CONTEXT/build-args.txt"
+# Python on Windows writes CRLF, so drop a trailing carriage return from each line.
+while IFS= read -r line; do TOOL_ARGS+=("$line"); done < <(tr -d '\r' < "$CONTEXT/build-args.txt")
 if [[ ${#TOOL_ARGS[@]} -ne 14 ]]; then
   echo "could not read the CodeQL and sonar-scanner pins" >&2
   exit 1
