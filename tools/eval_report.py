@@ -141,6 +141,7 @@ def collect(job: Path, tasks_dir: Path | None, variants: dict | None = None) -> 
     by_rule = Counter()
     versions = Counter()
     manifest = Counter()
+    models = Counter()
     hits, false_positives, outside, warnings = [], [], [], []
     runs = Counter(r["task"] for r in rows)
     seen: Counter = Counter()
@@ -169,8 +170,14 @@ def collect(job: Path, tasks_dir: Path | None, variants: dict | None = None) -> 
         if row["reward"] is not None and not row.get("has_truth"):
             warnings.append({**where, "warning": "no ground truth found for this task, so location recall and "
                              "taxonomy coverage leave it out"})
+        if meta.get("model"):
+            models[str(meta["model"])] += 1
         for key in ("results_raw", "findings_security", "findings_mapped", "results_emitted"):
-            funnel[key] += meta.get(key) or 0
+            value = meta.get(key)
+            if value is None and key == "results_raw":
+                # Agents that call a model report their raw findings under their own record.
+                value = (meta.get("claude_review") or {}).get("findings_raw")
+            funnel[key] += value or 0
         unmapped.update(meta.get("unmapped_by_cwe") or {})
         by_rule.update(meta.get("results_by_rule") or {})
         versions[meta.get("agent_version") or meta.get("tool_version") or "?"] += 1
@@ -208,6 +215,7 @@ def collect(job: Path, tasks_dir: Path | None, variants: dict | None = None) -> 
         "tool": tool, "job": display_path(job), "rows": rows, "summary": summary,
         "funnel": dict(funnel), "unmapped_by_cwe": dict(unmapped.most_common()),
         "results_by_rule": dict(by_rule.most_common()), "agent_versions": dict(versions),
+        "models": dict(models),
         "image_manifests": dict(manifest), "hits": hits, "false_positives": false_positives,
         "outside_scope": outside, "warnings": warnings,
         "task_outcomes": task_outcomes(rows),
@@ -222,11 +230,16 @@ def assign_keys(jobs: list[dict]) -> None:
     """Unique tool keys (two jobs of one tool get the job folder added) and display labels."""
     counts = Counter(j["tool"] for j in jobs)
     names = Counter((j["tool"], Path(j["job"]).name) for j in jobs)
+    # Two runs of a model-backed tool on different models are told apart by the model.
+    model_of = {id(j): ", ".join(j.get("models") or {}) for j in jobs}
+    model_counts = Counter((j["tool"], model_of[id(j)]) for j in jobs)
     used: set = set()
     for j in jobs:
         job = Path(j["job"])
         # The job folder tells two runs apart, or the jobs folder above it when the job names match.
         tag = job.name if names[(j["tool"], job.name)] == 1 else (job.parent.name or job.name)
+        if model_of[id(j)] and model_counts[(j["tool"], model_of[id(j)])] == 1:
+            tag = model_of[id(j)]
         key = j["tool"] if counts[j["tool"]] == 1 else f"{j['tool']} ({tag})"
         base, n = key, 2
         while key in used:
