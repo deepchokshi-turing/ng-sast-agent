@@ -1068,6 +1068,67 @@ Also under `claude_review`: `scan_instructions_source` (`task_instruction` when 
   the key folder denied), but the review's findings can still be steered by
   repository content.
 
+## Codex security review agent
+
+`sast.codex_security.agent:CodexSecurityAgent` runs a security review with the open-source OpenAI Codex CLI 0.162.1 (`codex exec`, non-interactive) and calls an OpenAI model. Its engine is named "codex exec security review" in the metadata and the SARIF. It is not OpenAI's Codex Security product (`@openai/codex-security`), whose scans need Codex Security access that a plain API key may not have. Design, deviations from Codex's defaults, and what is and is not verified: [docs/codex-security-agent.md](docs/codex-security-agent.md). Status: tested with fakes and with the real Codex binary against a local fake API; not yet run against the real model (no key yet).
+
+Setup installs the pinned Codex release assets (`codex`, `codex-code-mode-host`, `bwrap`, sha256-checked) from github.com into the work dir, so the sandbox needs HTTPS egress to github.com and api.openai.com. Not baked into the tools image yet.
+
+Set the key on the host, never in a job config: `OPENAI_API_KEY` (or `CODEX_API_KEY`). The key reaches Codex only through `codex login --with-api-key` on stdin, into a private `CODEX_HOME` that is deleted after the review.
+
+Codex reviews a copy of the in-scope files plus `security_manifest.json`. By default (`sandbox=read-only`) its commands run in Codex's own read-only sandbox, which also denies `/app/repo`, the key and Codex's home. That sandbox needs unprivileged user namespaces, which a default Docker container (and so Harbor's Docker environment) does not allow: the trial then fails early with `sandbox_unavailable`. Under Harbor, pass `--extra-docker-compose harbor/codex-sandbox.compose.yaml`: that overlay turns off the container's seccomp filter for the task container only, so Codex's own read-only sandbox runs (checked in a real Harbor run on 2026-10-13: sandbox probe ok, and without the overlay the trial stops with `sandbox_unavailable`). `--ak sandbox=container` turns Codex's sandbox off and leaves the task container as the only boundary (the model can then read excluded files and the key, write files and use the network); it is an explicit opt-in, see the docs.
+
+```bash
+export OPENAI_API_KEY=...   # on the host that runs Harbor
+PYTHONPATH=$PWD .venv/bin/harbor run -y -p ../harbor-tasks -n 1 \
+  -a sast.codex_security.agent:CodexSecurityAgent -o jobs/codex-security \
+  --include-task-name crewai-code-interpreter-a \
+  --agent-timeout-multiplier 3 \
+  --ak timeout_sec=2400 --ak mode=scoped \n  --extra-docker-compose harbor/codex-sandbox.compose.yaml
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `model` | `gpt-5.6-sol` (Codex Security's default scan model) | `codex exec -m`. Harbor's `-m` is recorded and not used |
+| `reasoning_effort` | the model's own default | Codex `model_reasoning_effort` (Codex Security uses `xhigh`) |
+| `mode` | `stock` | `stock`: fixed security review prompt, Codex's own review finding shape plus category and CWE. `scoped`: adds the task's output contract (ruleIds, path roles, control status, residual risk, catalogue) to the prompt and, as enums, to the output schema |
+| `sandbox` | `read-only` | `read-only` or `container` (see above) |
+| `auth` | `auto` | `openai_api_key`, `codex_api_key`, or `auto` (`OPENAI_API_KEY` first) |
+| `timeout_sec` | task timeout minus 120 s | wall-clock limit for the whole review; keep Harbor's limit 120 s above it |
+| `attempts` | 2 | `codex exec` attempts when an answer is unusable |
+| `scan_roots`, `exclude` | the task's | as for the other agents |
+
+Every option is also a host variable `CODEX_SECURITY_<KEY>`. Codex reports tokens (in the metadata), not cost, and has no cost or turn cap; only `timeout_sec` bounds a run.
+
+## Promptfoo Code Scanning agent
+
+`sast.promptfoo.agent:PromptfooCodeScanAgent` runs Promptfoo Code Scanning (`promptfoo code-scans run`, promptfoo 0.124.1 on Node.js 24.21.0). The CLI is open source; the scan runs on the hosted Promptfoo service (`api.promptfoo.app`), which picks the model and reports no cost. Design, deviations from promptfoo's defaults, and what is and is not verified: [docs/promptfoo-agent.md](docs/promptfoo-agent.md). Status: install and the run up to the service's authentication verified in the task base image; the scan itself only with fakes (the key is on the owner's host only).
+
+promptfoo scans git changes, so the agent copies the in-scope files and `security_manifest.json` outside `/app/repo`, makes them the whole change of a two-commit repository (pinned git 2.47.3 from Debian, since the task images have none), and runs `code-scans run <copy> --base main --compare scan -f json` there, from an empty private working directory. Setup installs Node.js (nodejs.org, sha256), git (deb.debian.org or snapshot.debian.org, sha256) and the 372 packages of `sast/promptfoo/npm/package-lock.json` (registry.npmjs.org, each checked against its sha512 integrity, no install scripts) in about 20 s; the sandbox needs HTTPS egress to those hosts and to api.promptfoo.app. Not baked into the tools image yet.
+
+Set the key on the host, never in a job config: `PROMPTFOO_API_KEY`. It reaches promptfoo only as that variable in the promptfoo process's own environment, read from a mode 600 file that is deleted after the scan.
+
+In `stock` mode promptfoo's findings name no task ruleId, so none can be scored: the SARIF has no results and every finding is kept in `runs[0].properties.sastAgent.toolFindings` and the metadata. In `scoped` mode the task's output contract goes to promptfoo as `--guidance-file`, asking for a header `RULE=...; CWE=...; CONTROL=...; RISK=...; RECS=...` plus `PATH:` lines at the start of every finding; only that header is read, and a finding without a valid `RULE` is dropped and counted.
+
+```bash
+export PROMPTFOO_API_KEY=...   # on the host that runs Harbor
+PYTHONPATH=$PWD .venv/bin/harbor run -y -p ../harbor-tasks -n 1 \
+  -a sast.promptfoo.agent:PromptfooCodeScanAgent -o jobs/promptfoo \
+  --include-task-name crewai-code-interpreter-a \
+  --agent-timeout-multiplier 3 \
+  --ak timeout_sec=2400 --ak mode=scoped
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `mode` | `stock` | `stock`: promptfoo's own prompt, nothing scorable. `scoped`: the task's contract as guidance, findings scored from their header |
+| `timeout_sec` | task timeout minus 120 s | wall-clock limit for the whole scan; keep Harbor's limit 120 s above it |
+| `min_severity` | not passed (promptfoo: medium) | `--min-severity` (`low`, `medium`, `high`, `critical`) |
+| `diffs_only` | `false` (promptfoo's default) | `--diffs-only`: the service gets the change set only, no filesystem MCP access to the copy |
+| `scan_roots`, `exclude` | the task's | as for the other agents |
+
+Every option is also a host variable `PROMPTFOO_SCAN_<KEY>`. There is no model, cost, turn or API host option: promptfoo has none, and the key only goes to promptfoo's default host.
+
 ## Development
 
 ```bash
