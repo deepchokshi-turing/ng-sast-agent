@@ -638,3 +638,20 @@ def test_agent_imports_only_stdlib_and_harbor():
             offenders.append((module, sorted(dists)))
     assert offenders == []
     assert "anthropic" not in json.loads(out.stdout) and "claudecode" not in json.loads(out.stdout)
+
+
+def test_record_survives_an_early_driver_error_with_scalar_fields():
+    """A real oauth run stopped at check_init (model_remapped) before the filter ran.
+
+    The driver's document then held no filter record, and a scalar in its place
+    made _record crash with AttributeError instead of reporting the error.
+    """
+    from sast.claude_review.agent import ClaudeReviewAgent
+    document = {"status": "error", "error": {"code": "model_remapped", "message": "x"},
+                "filter": "hard_rules", "cli": "oops", "pr": None, "review": [],
+                "request_options": {"filter": "hard_rules", "auth": "oauth"}}
+    review: dict = {}
+    ClaudeReviewAgent._record(document, review)
+    assert review["filter_summary"] is None and review["filter_calls"] == 0
+    assert review["attempts"] == 0 and review["pr"] == {} and review["findings_raw"] == 0
+    assert review["request_options"]["auth"] == "oauth"

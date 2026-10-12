@@ -931,9 +931,10 @@ def main(argv=None):
     try:
         with open(args.request) as f:
             request = json.load(f)
-        document.update({k: request.get(k) for k in ("mode", "model", "filter", "filter_model", "auth", "cli_auth",
-                                                     "max_turns", "max_budget_usd", "cli_attempts", "budget_sec",
-                                                     "cli_share")})
+        # Under their own key: "filter" etc. must not collide with the result records written later.
+        document["request_options"] = {k: request.get(k) for k in (
+            "mode", "model", "filter", "filter_model", "auth", "cli_auth", "max_turns", "max_budget_usd",
+            "cli_attempts", "budget_sec", "cli_share")}
         try:
             with open(args.keyfile) as f:
                 key = f.read().strip()

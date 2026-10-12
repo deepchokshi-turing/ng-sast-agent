@@ -477,9 +477,13 @@ class ClaudeReviewAgent(ScannerAgent):
     @staticmethod
     def _record(document: dict[str, Any], review: dict[str, Any]) -> None:
         """What the run metadata keeps from the driver's result (no findings text)."""
-        cli = document.get("cli") or {}
-        wrapper = cli.get("cli") or {}
-        attempts = cli.get("attempts") or []
+        def record(key: str) -> dict[str, Any]:
+            value = document.get(key)
+            return value if isinstance(value, dict) else {}
+
+        cli = record("cli")
+        wrapper = cli.get("cli") if isinstance(cli.get("cli"), dict) else {}
+        attempts = [a for a in (cli.get("attempts") or []) if isinstance(a, dict)]
         review.update({
             "driver_status": document.get("status"),
             "driver_error": document.get("error"),
@@ -495,7 +499,7 @@ class ClaudeReviewAgent(ScannerAgent):
             "cli_init": cli.get("init"),
             # Where the CLI says its credential came from (a source name such as "none" or
             # "apiKeyHelper", never a value).
-            "cli_credential_source": (cli.get("init") or {}).get("apiKeySource"),
+            "cli_credential_source": (cli.get("init") if isinstance(cli.get("init"), dict) else {}).get("apiKeySource"),
             "prompt_sha256": cli.get("prompt_sha256"),
             "prompt_bytes": cli.get("prompt_bytes"),
             "diff_omitted": cli.get("diff_omitted"),
@@ -516,7 +520,7 @@ class ClaudeReviewAgent(ScannerAgent):
             "api_usage": document.get("api_usage"),
             "api_calls": document.get("api_calls"),
             "review_summary": document.get("review_summary"),
-            "findings_raw": len((document.get("review") or {}).get("findings") or []),
+            "findings_raw": len(record("review").get("findings") or []),
             "findings_kept": len(document.get("kept") or []),
             "findings_excluded": len(document.get("excluded") or []),
             "excluded": [
@@ -525,9 +529,10 @@ class ClaudeReviewAgent(ScannerAgent):
                  "reason": str(e.get("exclusion_reason") or "")[:300]}
                 for e in (document.get("excluded") or []) if isinstance(e, dict)
             ][:200],
-            "filter_summary": (document.get("filter") or {}).get("summary"),
-            "filter_calls": len((document.get("filter") or {}).get("calls") or []),
-            "pr": {k: v for k, v in (document.get("pr") or {}).items() if k != "line_counts"},
+            "filter_summary": record("filter").get("summary"),
+            "filter_calls": len(record("filter").get("calls") or []),
+            "pr": {k: v for k, v in record("pr").items() if k != "line_counts"},
+            "request_options": record("request_options"),
         })
 
     def artifact_files(self) -> dict[str, str]:
