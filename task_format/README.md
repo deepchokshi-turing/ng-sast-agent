@@ -163,7 +163,7 @@ A result names a complete control when its rule id has a contrast prefix, its `p
 
 ## Scoring changes made after seeing results
 
-2026-10-12: `matching.require_cwe` is now `false` on every harbor-tasks ground truth. Reason: the client spec defines detection by risk type and location, not CWE. A result now matches a finding on risk family and location alone, and CWE agreement still feeds the classification sub-score (`0.8 * rule + 0.2 * cwe_ok`). The grader code did not change for this, only the labels. Needs lead sign-off.
+2026-10-12: `matching.require_cwe` is now `false` on every harbor-tasks ground truth. Reason: the client spec defines detection by risk type and location, not CWE. A result now matches a finding on risk family and location alone, and CWE agreement still feeds the classification sub-score (`0.8 * rule + 0.2 * cwe_ok`). The grader code did not change for this, only the labels. Signed off by the lead on 2026-10-12.
 
 ## Task-level outcomes
 

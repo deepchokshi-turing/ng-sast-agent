@@ -705,7 +705,7 @@ The SonarQube job has to be run again for the published numbers to reflect
 `cwe-map-5`. See the `sast/cwe_map.py` docstring for the full decision,
 including why Semgrep's CWE-939 stays unmapped.
 
-`cwe-map-5` is forward-only. It was adopted after its effect on the v0.4.0 results had been checked, so the published v0.4.0 numbers stay under `cwe-map-4`, `cwe-map-5` applies to new runs only, and it needs the lead's explicit sign-off (PR #4 review, item 2). The map, the Claude category map (`ccsr-category-map-1`), the heuristics table and the task ground truth are frozen for the final runs, and every report states the versions it was graded under.
+`cwe-map-5` is forward-only. It was adopted after its effect on the v0.4.0 results had been checked, so the published v0.4.0 numbers stay under `cwe-map-4`, `cwe-map-5` applies to new runs only, and the lead signed it off on 2026-10-12 on that basis (PR #4 review, item 2). The map, the Claude category map (`ccsr-category-map-1`), the heuristics table and the task ground truth are frozen for the final runs, and every report states the versions it was graded under.
 
 #### No Security Hotspots on Community Build 26.9
 
