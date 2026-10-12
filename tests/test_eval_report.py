@@ -102,6 +102,12 @@ def test_report_compares_tools_and_lists_hits_and_false_positives(tmp_path, caps
     start = html.index('<script id="report-data" type="application/json">') + len(
         '<script id="report-data" type="application/json">')
     assert json.loads(html[start:html.index("</script>", start)]) == payload
+    # The plain summary comes first, and the old sections sit one level down under the details heading.
+    assert md.startswith("# Scanner evaluation: summary\n")
+    head, details = md.split("\n## Details for reviewers\n")
+    assert "| Known issues found | 1 of 1 | 0 of 1 |" in head and "## Scoreboard" not in head
+    assert "\n### Scoreboard\n" in details and "\n### Task matrix\n" in details
+    assert payload["summary"]["at_a_glance"]["columns"] == ["", "toola", "toolb"]
 
 
 def test_html_embedding_cannot_close_the_script_element():

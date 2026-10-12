@@ -37,6 +37,7 @@
   --grid: #e1e0d9;
   --axis: #c3c2b7;
   --border: rgba(11, 11, 11, 0.10);
+  --bar: #2a78d6;
   --tool-1: #2a78d6;
   --tool-2: #eb6834;
   --tool-3: #1baf7a;
@@ -65,6 +66,7 @@
     --grid: #2c2c2a;
     --axis: #383835;
     --border: rgba(255, 255, 255, 0.10);
+    --bar: #3987e5;
     --tool-1: #3987e5;
     --tool-2: #d95926;
     --tool-3: #199e70;
@@ -90,6 +92,7 @@
   --grid: #2c2c2a;
   --axis: #383835;
   --border: rgba(255, 255, 255, 0.10);
+  --bar: #3987e5;
   --tool-1: #3987e5;
   --tool-2: #d95926;
   --tool-3: #199e70;
@@ -196,7 +199,7 @@ details.fam > summary::-webkit-details-marker { display: none; }
 details.fam > summary:hover { background: var(--surface-2); }
 details.fam .body { padding: 4px 4px 14px 24px; }
 .caret { display: inline-block; transition: transform .15s; color: var(--muted); }
-details[open] .caret { transform: rotate(90deg); }
+details[open] > summary .caret { transform: rotate(90deg); }
 .tag { display: inline-block; font-size: 12px; padding: 1px 8px; border-radius: 999px; background: var(--surface-2); color: var(--ink-2); border: 1px solid var(--border); margin: 1px 4px 1px 0; white-space: nowrap; }
 code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; overflow-wrap: anywhere; }
 .badge { display: inline-block; font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 999px; white-space: nowrap;
@@ -212,6 +215,50 @@ code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monosp
 .loader { max-width: 560px; margin: 80px auto; text-align: center; }
 .loader input { margin-top: 12px; }
 footer { color: var(--muted); font-size: 13px; padding: 8px 0 40px; }
+/* Plain-English summary at the top, then the reviewer views folded away below it. */
+.sumtable th:first-child, .sumtable td:first-child { position: sticky; left: 0; z-index: 1; background: var(--surface); }
+.sumtable td:first-child { min-width: 150px; max-width: 220px; color: var(--ink-2); }
+.sumtable td { min-width: 96px; }
+.tiles.sumtiles { grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); }
+.plain-list { margin: 6px 0 0; padding-left: 18px; }
+.plain-list li { margin: 6px 0; max-width: 860px; }
+.plain-list .swatch { margin-right: 6px; vertical-align: baseline; }
+dl.gloss { margin: 6px 0 0; display: grid; grid-template-columns: minmax(120px, 200px) 1fr; gap: 8px 16px; }
+dl.gloss dt { font-weight: 600; }
+dl.gloss dd { margin: 0; color: var(--ink-2); max-width: 760px; }
+/* Measurements at a glance: one bar hue (--bar, checked with the data-viz palette validator in both
+   modes), the tool named in the row label, and a missing value written in its row, never a zero bar. */
+.mgroup { border-top: 1px solid var(--grid); margin-top: 18px; }
+.mgroup:first-of-type { border-top: 0; margin-top: 0; }
+.mgroup > .kicker { margin-top: 14px; }
+.mchart-title { font-size: 15px; font-weight: 600; margin: 2px 0 2px; }
+.mcap { font-size: 13px; color: var(--ink-2); margin: 2px 0 6px; max-width: 760px; }
+.mchart { display: block; width: 100%; max-width: 760px; height: auto; margin: 4px 0 10px; }
+.mchart text { font-family: inherit; font-size: 12px; fill: var(--ink); }
+.mchart .facet { fill: var(--ink-2); font-weight: 600; }
+.mchart .tick { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.mchart .state { fill: var(--muted); font-style: italic; stroke: var(--surface); stroke-width: 3px; paint-order: stroke; }
+.mchart .grid { stroke: var(--grid); }
+.mchart .axis { stroke: var(--axis); }
+.mchart .mbar { fill: var(--bar); }
+.mchart .hit { fill: transparent; }
+.mchart .mrow { outline: none; }
+.mchart .mrow:hover .hit, .mchart .mrow:focus .hit { fill: var(--surface-2); }
+.mchart .mrow:focus-visible .hit { stroke: var(--ink-2); stroke-width: 1px; }
+.mchart .mrow:hover .mbar, .mchart .mrow:focus .mbar { opacity: .85; }
+.mchart .mrow:hover .state, .mchart .mrow:focus .state { stroke: var(--surface-2); }
+section.reviewers { margin: 32px 0 0; padding-top: 20px; border-top: 1px solid var(--axis); }
+details.reviewers-body > summary {
+  cursor: pointer; list-style: none; display: inline-flex; align-items: center; gap: 8px; margin: 4px 0 8px;
+  border: 1px solid var(--border); background: var(--surface); border-radius: 6px; padding: 6px 14px;
+  font-weight: 600; color: var(--ink);
+}
+details.reviewers-body > summary::-webkit-details-marker { display: none; }
+details.reviewers-body > summary:hover { background: var(--surface-2); }
+@media (max-width: 640px) {
+  dl.gloss { grid-template-columns: 1fr; gap: 2px; }
+  dl.gloss dd { margin-bottom: 8px; }
+}
 @media (max-width: 640px) {
   h1 { font-size: 21px; }
   section.block { padding: 14px; }
@@ -229,6 +276,7 @@ footer { color: var(--muted); font-size: 13px; padding: 8px 0 40px; }
   <div class="wrap">
     <span class="brand">SAST Scanner Evaluation</span>
     <nav class="sections" aria-label="Sections">
+      <a href="#summary">Summary</a>
       <a href="#overview">Overview</a>
       <a href="#m1">1 Risk detection</a>
       <a href="#m2">2 Path tracing</a>
@@ -332,6 +380,18 @@ document.addEventListener("pointermove", e => {
   if (y + h > innerHeight - 8) y = e.clientY - h - 14;
   tip.style.left = Math.max(4, x) + "px"; tip.style.top = Math.max(4, y) + "px";
 });
+
+// Keyboard focus on a chart row shows the same tooltip, under the row.
+document.addEventListener("focusin", e => {
+  const t = e.target.closest && e.target.closest(".mrow[data-tip]");
+  if (!t) return;
+  tip.textContent = t.getAttribute("data-tip");
+  tip.style.display = "block";
+  const r = t.getBoundingClientRect();
+  tip.style.left = Math.max(4, Math.min(r.left + 8, innerWidth - tip.offsetWidth - 8)) + "px";
+  tip.style.top = Math.min(r.bottom + 6, innerHeight - tip.offsetHeight - 8) + "px";
+});
+document.addEventListener("focusout", e => { if (e.target.closest && e.target.closest(".mrow")) tip.style.display = "none"; });
 
 // ---- theme -------------------------------------------------------------------------
 (function () {
@@ -795,11 +855,157 @@ function renderMethod() {
     el("p", { class: "small" }, "Jobs: ", DATA.tools.map(t => el("div", {}, t.key, " ", code(t.job || "")))));
 }
 
+// ---- plain-English summary -----------------------------------------------------------
+// Written by eval_report.py into DATA.summary, the same text as the top of eval_report.md.
+// It always shows every tool: the scanner chips only filter the reviewer views below it.
+function renderSummary() {
+  const s = DATA.summary;
+  if (!s) return null;
+  const byKey = new Map(DATA.tools.map(t => [t.key, t]));
+  const plainCells = new Set(Object.values(s.labels || {}));
+  const head = (cols, i) => {
+    const t = byKey.get((s.tools[i - 1] || {}).key);
+    return i === 0 ? "" : t ? el("span", { class: "toolhead" }, swatch(t), cols[i]) : cols[i];
+  };
+  const sumTable = tb => el("div", { class: "sumtable" }, table(tb.columns.map((_, i) => head(tb.columns, i)),
+    tb.rows.map(r => r.map((c, i) => i > 0 && plainCells.has(c) ? el("span", { class: "ns" }, c) : String(c ?? "")))));
+  const dot = tool => { const t = byKey.get(tool.key); return t ? swatch(t) : null; };
+  return el("div", { id: "summary" },
+    el("div", { class: "kicker" }, "Summary"),
+    el("h1", {}, s.title),
+    el("p", { class: "sub" }, s.intro),
+    el("div", { class: "tiles sumtiles" },
+      tile(s.apps, "apps tested"), tile(s.vulnerable_apps, "vulnerable apps"),
+      tile(s.fixed_apps, "fixed copies"), tile(s.known_issues, "known issues")),
+    section("tested", null, "What was tested", null,
+      el("ul", { class: "plain-list" }, s.tools.map(t => el("li", {}, dot(t), t.tested)))),
+    section("glance", null, "Results at a glance", null, sumTable(s.at_a_glance),
+      el("h3", {}, "Results by risk type"), sumTable(s.by_risk)),
+    renderMeasureCharts(s),
+    section("meaning", null, "What this means", null,
+      el("ul", { class: "plain-list" }, s.tools.map(t => el("li", {}, dot(t), t.meaning.join(" "))),
+        (s.notes || []).map(n => el("li", {}, n)))),
+    section("words", null, "Words used in this report", null,
+      el("dl", { class: "gloss" }, (s.glossary || []).map(g => [el("dt", {}, g.term), el("dd", {}, g.text)]))));
+}
+
+// ---- measurement charts ---------------------------------------------------------------
+// Drawn from DATA.summary.charts, the specs eval_report.py also writes as charts/*.svg. One bar per
+// tool on a 0 to 100% axis in one hue: the row label says which tool it is. A value that cannot be
+// drawn is written in the tool's row, never shown as a zero bar.
+let measureCtx = null;
+function textW(text, size = 12) {
+  measureCtx = measureCtx || document.createElement("canvas").getContext("2d");
+  measureCtx.font = `${size}px system-ui, -apple-system, "Segoe UI", sans-serif`;
+  return measureCtx.measureText(String(text)).width;
+}
+function barPath(x0, y, w, h) {
+  const r = Math.min(4, w, h / 2);
+  return `M${x0},${y}H${x0 + w - r}A${r},${r} 0 0 1 ${x0 + w},${y + r}V${y + h - r}A${r},${r} 0 0 1 ${x0 + w - r},${y + h}H${x0}Z`;
+}
+function measureChart(c, W) {
+  const rows = c.facets.flatMap(f => f.rows);
+  const nameW = Math.max(0, ...rows.map(r => textW(r.tool)));
+  const scored = rows.filter(r => r.value !== null && r.value !== undefined);
+  const right = scored.length ? Math.max(...scored.map(r => textW(r.text))) + 12 : 8;
+  const stateW = Math.max(0, ...rows.filter(r => r.value === null || r.value === undefined).map(r => textW(r.text)));
+  // The tool name sits left of its bar when there is room, else on its own line above it.
+  const stacked = nameW + 12 > W * 0.4 || nameW + 18 + stateW > W;
+  const x0 = stacked ? 1 : Math.ceil(nameW) + 12;
+  const plot = Math.max(40, W - right - x0);
+  const x = v => x0 + Math.max(0, Math.min(1, v)) * plot;
+  const rowH = stacked ? 44 : 30, ticks = [0, .25, .5, .75, 1];
+  let H = 0;
+  for (const f of c.facets) H += (f.title ? 26 : 0) + f.rows.length * rowH;
+  H += 22;
+  const g = svg("svg", { class: "mchart", viewBox: `0 0 ${W} ${H}`, width: W, height: H, role: "group", "aria-label": c.title });
+  let y = 0;
+  for (const f of c.facets) {
+    if (f.title) { g.append(svg("text", { x: 0, y: y + 16, class: "facet" }, f.title)); y += 26; }
+    const top = y, bottom = y + f.rows.length * rowH;
+    for (const r of f.rows) {
+      const where = f.title ? `${f.title}, ` : "";
+      const tipText = `${where}${r.tool}: ${r.text}`;
+      const row = svg("g", { class: "mrow", tabindex: 0, role: "img", "aria-label": tipText, "data-tip": tipText });
+      row.append(svg("rect", { class: "hit", x: 0, y: y + 1, width: W, height: rowH - 2, rx: 4 }));
+      const barY = stacked ? y + 22 : y + rowH / 2 - 7;
+      const textY = barY + 11;
+      row.append(svg("text", stacked ? { x: 0, y: y + 15 } : { x: x0 - 12, y: textY, "text-anchor": "end" }, r.tool));
+      if (r.value === null || r.value === undefined) {
+        row.append(svg("text", { x: x0 + 6, y: textY, class: "state" }, r.text));
+      } else {
+        const w = x(r.value) - x0;
+        row.append(w > 0 ? svg("path", { class: "mbar", d: barPath(x0, barY, w, 14) })
+          : svg("rect", { class: "mbar", x: x0, y: barY, width: 2, height: 14 }));
+        row.append(svg("text", { x: x0 + Math.max(w, 2) + 6, y: textY }, r.text));
+      }
+      g.append(row);
+      y += rowH;
+    }
+    // Gridlines behind the rows: drawn after them, then moved first. When names sit above the
+    // bars, the lines only run through the bar bands, so they never cross a name.
+    const spans = stacked ? f.rows.map((_, i) => [top + i * rowH + 19, top + i * rowH + 39]) : [[top, bottom]];
+    const lines = spans.flatMap(([y1, y2]) => ticks.map(tk => svg("line", { x1: x(tk), x2: x(tk), y1, y2, class: tk === 0 ? "axis" : "grid", "stroke-width": 1 })));
+    g.insertBefore(svg("g", { "aria-hidden": "true" }, lines), g.firstChild);
+  }
+  ticks.forEach(tk => g.append(svg("text", { x: x(tk), y: y + 16, class: "tick", "text-anchor": tk === 0 && stacked ? "start" : tk === 1 ? "end" : "middle", "aria-hidden": "true" }, `${Math.round(tk * 100)}%`)));
+  return g;
+}
+function renderMeasureCharts(s) {
+  if (!(s.charts || []).length) return null;
+  const app = document.getElementById("app");
+  const W = Math.max(260, Math.min(760, (app.clientWidth || 760) - (innerWidth <= 640 ? 30 : 42)));
+  const groups = [];
+  for (const c of s.charts) {
+    const last = groups.at(-1);
+    if (last && last.name === c.group) last.charts.push(c); else groups.push({ name: c.group, charts: [c] });
+  }
+  return section("measures", null, "Measurements at a glance", s.charts_intro || null,
+    groups.map(gr => el("div", { class: "mgroup" },
+      el("div", { class: "kicker" }, gr.name),
+      gr.charts.map(c => [el("div", { class: "mchart-title" }, c.title), el("p", { class: "mcap" }, c.caption), measureChart(c, W)]))));
+}
+
+// The reviewer views start folded. They open on "Show details", on a link to one of them, or
+// when the page is opened on one, and stay as the reader left them when a chip re-renders.
+let detailsOpen = null;
+const hashInDetails = () => { const id = location.hash.slice(1); return !!id && id !== "summary" && !["tested", "glance", "measures", "meaning", "words"].includes(id); };
+function openDetails() {
+  detailsOpen = true;
+  const d = document.getElementById("details-body");
+  if (d && !d.open) d.open = true;
+}
+document.querySelector("nav.sections").addEventListener("click", e => {
+  const a = e.target.closest("a");
+  if (a && a.getAttribute("href") !== "#summary") openDetails();
+});
+addEventListener("hashchange", () => { if (hashInDetails()) openDetails(); });
+
 function render() {
   const app = document.getElementById("app");
   const y = window.scrollY;
-  app.replaceChildren(renderHeader(), renderVersions(), renderM1(), renderM2(), renderM3(), renderM4(), renderNegatives(), renderFamilies(), renderTaxonomy(), renderOutput(), renderMethod(),
-    el("footer", {}, "Generated by tools/eval_report.py from Harbor jobs. Schema ", DATA.schema || "sast-eval-report/2", "."));
+  const current = document.getElementById("details-body");
+  if (current) detailsOpen = current.open;
+  const views = [renderHeader(), renderVersions(), renderM1(), renderM2(), renderM3(), renderM4(), renderNegatives(), renderFamilies(), renderTaxonomy(), renderOutput(), renderMethod()];
+  const footer = el("footer", {}, "Generated by tools/eval_report.py from Harbor jobs. Schema ", DATA.schema || "sast-eval-report/2", ".");
+  const summary = renderSummary();
+  if (!summary) {
+    // An older payload without a summary: the reviewer views are the whole page.
+    app.replaceChildren(...views, footer);
+  } else {
+    if (detailsOpen === null) detailsOpen = hashInDetails();
+    const s = DATA.summary;
+    const label = el("span", {}, detailsOpen ? "Hide details" : "Show details");
+    const body = el("details", { class: "reviewers-body", id: "details-body", open: detailsOpen },
+      el("summary", {}, el("span", { class: "caret", "aria-hidden": "true" }, "▸"), label), views);
+    body.addEventListener("toggle", () => { detailsOpen = body.open; label.textContent = body.open ? "Hide details" : "Show details"; });
+    app.replaceChildren(summary,
+      el("section", { class: "reviewers", id: "details", "aria-labelledby": "details-h" },
+        el("h2", { id: "details-h" }, s.details_title || "Details for reviewers"),
+        el("p", { class: "lede" }, s.details_intro || ""),
+        body),
+      footer);
+  }
   window.scrollTo(0, y);
 }
 

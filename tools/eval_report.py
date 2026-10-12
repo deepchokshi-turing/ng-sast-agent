@@ -46,8 +46,9 @@ A tool that wrote no result at all carries a "no results, scores not
 meaningful" badge everywhere it is named. Harbor's job-level means are never
 shown or stored, since they average positives and negatives.
 
-With --out it writes eval_report.md, eval_report.json, eval_report.html and
-trials.csv there. The HTML is tools/eval_report.html with the JSON embedded,
+With --out it writes eval_report.md, eval_report.json, eval_report.html,
+trials.csv and the summary's measurement charts (charts/*.svg, linked from the
+Markdown) there. The HTML is tools/eval_report.html with the JSON embedded,
 laid out along the client's four measurements (risk detection, reachability and
 path tracing, mitigation detection, mitigation recommendation), with the
 ambiguous negatives, the per-family results and the scanner output after them.
@@ -60,6 +61,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import os
 import sys
 from collections import Counter
@@ -754,6 +756,464 @@ def observations(jobs: list[dict]) -> list[dict]:
     return notes
 
 
+# ---- plain-English summary ---------------------------------------------------------------
+# The first part of the report, for readers who are not security-tool specialists. Every figure
+# comes from the same per-tool numbers as the scoreboard, and the payload's "summary" block holds
+# the text, so the Markdown and the HTML say the same thing. No scanner-testing terms are used here.
+
+TOOL_KINDS = {
+    "semgrep": ("Semgrep", "a pattern-matching code scanner"),
+    "codeql": ("CodeQL", "a code-analysis scanner from GitHub"),
+    "sonarqube": ("SonarQube", "a code-quality and security scanner"),
+    "claude-code-security-review": ("Claude", "an AI reviewer"),
+}
+NOT_PROVIDED = "not provided by this tool"
+NOTHING_TO_JUDGE = "nothing to judge"
+SUMMARY_MEASURES = [
+    ("path", "Described how the issue is reached", "paths", "describing how the issue is reached"),
+    ("controls", "Judged existing protections", "protections", "judging existing protections"),
+    ("recommendations", "Suggested fixes", "fixes", "suggesting fixes"),
+]
+RISK_PREFIX = {"disclosure": "LLM02", "agency": "LLM03"}
+DETAILS_INTRO = ("The sections below are the full technical results, for people checking the numbers. They use "
+                 "the scanner-testing terms the summary above avoids, and the method section explains them.")
+
+
+def whole_percent(value: float) -> int:
+    """0.204 -> 20, rounding halves up (Python's round() rounds them to even)."""
+    return math.floor(value * 100 + 0.5)
+
+
+def joined(items: list[str], word: str = "and") -> str:
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + f" {word} " + items[-1]
+
+
+def model_name(model: str) -> str:
+    """claude-opus-5-5 -> Opus 5.5. A date suffix (claude-sonnet-4-5-20250929) is left out."""
+    parts = [p for p in str(model).split("-") if p and not (p.isdigit() and len(p) >= 6)]
+    if parts and parts[0].lower() == "claude":
+        parts = parts[1:]
+    words = [p for p in parts if not p.isdigit()]
+    digits = [p for p in parts if p.isdigit()]
+    name = " ".join(w.capitalize() for w in words)
+    return f"{name} {'.'.join(digits)}".strip() if digits else (name or str(model))
+
+
+def tool_identity(j: dict) -> dict:
+    """Short name, kind and the "What was tested" sentence, from the agent metadata and versions."""
+    name, kind = TOOL_KINDS.get(j["tool"], (j["key"], "a security scanner"))
+    claude = versions_of(j).get("claude")
+    if j["tool"] == "claude-code-security-review" or claude:
+        models = list(((claude or {}).get("model") or {}) or j.get("models") or {})
+        pretty = ", ".join(model_name(m) for m in models)
+        modes = set((claude or {}).get("mode") or {})
+        if j["tool"] in TOOL_KINDS:
+            # The mode is part of the name, so stock and scoped runs of one model stay apart.
+            label = ", ".join(x for x in (pretty, " and ".join(sorted(modes))) if x)
+            name = f"Claude ({label})" if label else "Claude"
+        if modes == {"stock"}:
+            how = "It ran as shipped (stock mode)."
+        elif modes == {"scoped"}:
+            how = "It was given the app's security description (scoped mode)."
+        elif modes:
+            how = ("Some of its runs were given the app's security description (scoped mode) and some ran as "
+                   "shipped (stock mode).")
+        else:
+            how = "Whether it was given the app's security description was not recorded."
+        model_text = f", using the {pretty} model" if pretty else ""
+        return {"name": name, "kind": kind,
+                "tested": f"{name}: Claude Code security review, {kind}{model_text}. {how}"}
+    return {"name": name, "kind": kind, "tested": f"{name}: {kind}."}
+
+
+def summary_measure(j: dict, key: str) -> dict:
+    """One of the three measurement cells: a whole percent, not provided, or nothing to judge."""
+    m = j["measures"]
+    if m["supported"].get(key) is False:
+        return {"status": "not_provided", "text": NOT_PROVIDED, "value": None}
+    if key in (m.get("no_results") or []):
+        return {"status": "nothing_to_judge", "text": NOTHING_TO_JUDGE, "value": None}
+    value = m.get(key)
+    if value is None:
+        return {"status": "not_available", "text": "not available", "value": None}
+    return {"status": "scored", "text": f"{whole_percent(value)}%", "value": value}
+
+
+def risk_issues(j: dict) -> dict:
+    """Known issues found per risk type, over the scored vulnerable apps. A total is None when an
+    app's known issues could not be read."""
+    out = {}
+    positives = report.by_role(j["rows"], "positive")
+    for risk, prefix in RISK_PREFIX.items():
+        # The grader only matches a result to an issue of the same risk family, so the result's
+        # rule prefix gives the issue's risk type.
+        found = sum(1 for h in j["hits"] if str(h.get("rule") or "").startswith(prefix))
+        if any(r.get("gt_rules") is None for r in positives):
+            total = None
+        else:
+            total = sum(1 for r in positives for rule in r["gt_rules"] if str(rule).startswith(prefix))
+        out[risk] = {"found": found, "total": total}
+    return out
+
+
+def of_text(found, total) -> str:
+    return f"{found} of {total}" if total is not None else f"{found} (total not known)"
+
+
+def tool_meaning(t: dict, j: dict) -> list[str]:
+    """One or two plain sentences on a tool, then its caveats."""
+    name = t["name"]
+    first = f"{name} found {of_text(t['found'], t['total'])} known issues"
+    alarms = t["false_alarms"]
+    parts = [f"raised {alarms} false alarm{'' if alarms == 1 else 's'} on the vulnerable apps"] if alarms else []
+    if t["fixed_apps"]:
+        parts.append(f"wrongly flagged {t['fixed_flagged']} of {t['fixed_apps']} fixed apps" if t["fixed_flagged"]
+                     else "raised no alarm on the fixed apps")
+    out = [joined([first] + parts) + "."]
+    by_status: dict = {}
+    for key, _, noun, verb in SUMMARY_MEASURES:
+        by_status.setdefault(t[key]["status"], []).append((key, noun, verb))
+    if by_status.get("nothing_to_judge"):
+        nouns = [n for _, n, _ in by_status["nothing_to_judge"]]
+        out.append(f"Because it found no known issue, there was nothing to judge for {joined(nouns, 'or')}.")
+    if by_status.get("scored"):
+        out.append("It scored " + joined([f"{t[k]['text']} on {v}" for k, _, v in by_status["scored"]]) + ".")
+    if by_status.get("not_provided"):
+        nouns = [n for _, n, _ in by_status["not_provided"]]
+        out.append(f"It did not describe {joined(nouns, 'or')} in a form that can be scored.")
+    if j["no_results"]:
+        out.append(f"{name} reported nothing, so its clean results on fixed apps say nothing about it.")
+    claude = versions_of(j).get("claude")
+    if claude and "stock" in (claude.get("mode") or {}):
+        dropped = claude.get("dropped_unmapped")
+        n = ("The number dropped was not recorded." if dropped is None
+             else "None were dropped here." if dropped == 0
+             else f"{dropped} finding{' was' if dropped == 1 else 's were'} dropped here.")
+        out.append("In stock mode some of the AI reviewer's findings can be dropped because their category names "
+                   f"are not in our fixed list. {n}")
+    if claude:
+        filters = set(claude.get("filter_mode") or {})
+        if (filters and "claude" not in filters) or (not filters and "oauth" in (claude.get("auth") or {})):
+            out.append(f"{name} was run on a subscription token, without the extra AI check that normally removes "
+                       "false alarms.")
+    return out
+
+
+def summary_notes(jobs: list[dict], data: dict) -> list[str]:
+    """Caveats that apply to the whole comparison."""
+    notes = []
+    counts = sorted({n for j in jobs for n in Counter(r["task"] for r in j["rows"]).values()})
+    if counts == [1]:
+        notes.append("Each tool ran once per app, so small differences between tools (one or two issues) are "
+                     "not meaningful.")
+    elif len(counts) == 1:
+        notes.append(f"Each tool ran {counts[0]} times per app, and the counts add up all its runs. Small "
+                     "differences between tools are still not meaningful.")
+    elif counts:
+        notes.append(f"The tools ran between {counts[0]} and {counts[-1]} times per app, and the counts add up all "
+                     "their runs. Small differences between tools are not meaningful.")
+    if version_warnings(jobs):
+        notes.append("The tools were run under different versions of our test setup, so compare them with care.")
+    if not data["same_task_set"]:
+        notes.append("The tools were not all run on the same apps, so their numbers are not directly comparable.")
+    unfinished = sum(len(report.not_scored(j["rows"])) for j in jobs)
+    if unfinished:
+        notes.append(f"{unfinished} run{' did' if unfinished == 1 else 's did'} not finish cleanly and "
+                     f"{'is' if unfinished == 1 else 'are'} left out of the numbers.")
+    return notes
+
+
+def build_summary(jobs: list[dict], data: dict, generated: datetime | None = None) -> dict:
+    """The plain-English summary: the numbers and the sentences, shared by the Markdown and the HTML."""
+    generated = generated or datetime.now(timezone.utc)
+    tools = []
+    names = Counter(tool_identity(j)["name"] for j in jobs)
+    for j in jobs:
+        ident = tool_identity(j)
+        if names[ident["name"]] > 1:  # two jobs of one tool: the key tells them apart
+            ident["name"] = j["key"]
+            ident["tested"] = f"{j['key']}: {ident['tested'].split(': ', 1)[1]}"
+        det = j["summary"]["pooled_detection"] or {}
+        clean, fixed = j["summary"]["zero_finding_tasks_clean"]
+        reward = j["summary"]["reward_by_role"]["positive"].get("mean_reward")
+        t = {"key": j["key"], "name": ident["name"], "kind": ident["kind"], "tested": ident["tested"],
+             "found": det.get("tp") or 0, "total": det.get("gt") or 0, "false_alarms": det.get("fp") or 0,
+             "fixed_flagged": fixed - clean, "fixed_apps": fixed,
+             "score": whole_percent(reward) if reward is not None else None,
+             "no_results": j["no_results"], "risks": risk_issues(j)}
+        for key, *_ in SUMMARY_MEASURES:
+            t[key] = summary_measure(j, key)
+        t["meaning"] = tool_meaning(t, j)
+        tools.append(t)
+    columns = [""] + [t["name"] for t in tools]
+    glance = [
+        ["Known issues found"] + [of_text(t["found"], t["total"]) for t in tools],
+        ["False alarms on the vulnerable apps"] + [str(t["false_alarms"]) for t in tools],
+        ["Fixed apps wrongly flagged"] + [f"{t['fixed_flagged']} of {t['fixed_apps']}" for t in tools],
+        ["Average score on vulnerable apps (0–100)"] +
+        [str(t["score"]) if t["score"] is not None else "not available" for t in tools],
+    ] + [[label] + [t[key]["text"] for t in tools] for key, label, *_ in SUMMARY_MEASURES]
+    by_risk = [
+        ["Data disclosure issues found"] + [of_text(**t["risks"]["disclosure"]) for t in tools],
+        ["Excessive agency issues found"] + [of_text(**t["risks"]["agency"]) for t in tools],
+    ]
+    glossary = [
+        {"term": "Vulnerable app", "text": "One of the small AI-agent apps we built with security problems left in "
+         "on purpose."},
+        {"term": "Fixed app", "text": "A copy of a vulnerable app with those problems fixed. A good tool reports "
+         "it as clean."},
+        {"term": "Known issue", "text": "A security problem we put in a vulnerable app and wrote down, with where "
+         "it is and how it should be fixed. The tools never see this list."},
+        {"term": "False alarm", "text": "A warning near the code we check that is not one of the known issues. On "
+         "a fixed app, a warning about the fixed code, or about safe code made to look risky, counts as one."},
+        {"term": "Data disclosure", "text": "Private or sensitive data reaching someone who is not allowed to see "
+         "it."},
+        {"term": "Excessive agency", "text": "The AI agent can do more than its job needs: extra tool features, "
+         "permissions that are too broad, or high-impact actions taken without a person approving them."},
+        {"term": "Score (0–100)", "text": "The grade our checker gives a tool on each vulnerable app, for finding "
+         "its known issues and describing them correctly, averaged over the vulnerable apps. 100 is perfect."},
+    ]
+    if any(versions_of(j).get("claude") for j in jobs):
+        glossary.append({"term": "Stock and scoped mode", "text": "Stock mode runs the AI reviewer as shipped. "
+                         "Scoped mode also gives it the app's security description."})
+    apps = data["positives"] + data["negatives"]
+    return {
+        "title": "Scanner evaluation: summary",
+        "date": generated.strftime("%Y-%m-%d"),
+        "intro": f"{generated.day} {generated.strftime('%B %Y')}. {apps} app{'' if apps == 1 else 's'}: "
+                 f"{data['positives']} vulnerable, "
+                 f"{data['negatives']} fixed cop{'y' if data['negatives'] == 1 else 'ies'}. "
+                 f"{data['gt_findings']} known issue{'' if data['gt_findings'] == 1 else 's'} in the vulnerable apps.",
+        "apps": apps, "vulnerable_apps": data["positives"], "fixed_apps": data["negatives"],
+        "known_issues": data["gt_findings"],
+        "tools": tools,
+        "at_a_glance": {"columns": columns, "rows": glance},
+        "by_risk": {"columns": columns, "rows": by_risk},
+        "charts_intro": CHARTS_INTRO,
+        "charts": summary_charts(tools),
+        "notes": summary_notes(jobs, data),
+        "glossary": glossary,
+        "labels": {"not_provided": NOT_PROVIDED, "nothing_to_judge": NOTHING_TO_JUDGE},
+        "details_title": "Details for reviewers",
+        "details_intro": DETAILS_INTRO,
+    }
+
+
+def summary_markdown(summary: dict) -> list[str]:
+    t = report.md_table
+    out = [f"# {summary['title']}", "", summary["intro"], "", "## What was tested", ""]
+    out += [f"- {tool['tested']}" for tool in summary["tools"]]
+    out += ["", "## Results at a glance"]
+    out += t(summary["at_a_glance"]["columns"], summary["at_a_glance"]["rows"])
+    out += ["", "## Results by risk type"]
+    out += t(summary["by_risk"]["columns"], summary["by_risk"]["rows"])
+    if summary.get("charts"):
+        out += ["", "## Measurements at a glance", "", summary["charts_intro"]]
+        for c in summary["charts"]:
+            out += ["", f"![{c['title']}]({c['file']})", "", c["caption"]]
+    out += ["", "## What this means", ""]
+    out += [f"- {' '.join(tool['meaning'])}" for tool in summary["tools"]]
+    out += [f"- {n}" for n in summary["notes"]]
+    out += ["", "## Words used in this report", ""]
+    out += [f"- **{g['term']}**: {g['text']}" for g in summary["glossary"]]
+    return out
+
+
+# ---- measurement charts ----------------------------------------------------------------
+# One horizontal bar per tool on a 0 to 100% axis, in one colour: the row label says which tool
+# it is. A value that cannot be drawn (not provided, nothing to judge, no total) is written in
+# the tool's row instead of a bar, so it never reads as a zero. The specs live in the summary
+# block, so the HTML draws the same charts as the SVG files the Markdown links to.
+
+CHARTS_INTRO = ("The four measurements as bars, one per tool, from the tables above. A tool with no bar has its "
+                "reason written in its row instead.")
+CHART_TEXT = {
+    "issues": ("Measurement 1: risk detection", "Known issues found, by risk type",
+               "How many of the known issues each tool found, for each risk type. Longer bars are better."),
+    "flagged": ("Measurement 1: risk detection", "Fixed apps wrongly flagged",
+                "How many fixed apps each tool still warned about. A separate job from finding issues, and "
+                "shorter bars are better here."),
+    "path": ("Measurement 2: path tracing", "Described how the issue is reached",
+             "How well each tool described how each known issue is reached, where a missed issue counts as zero. "
+             "Longer bars are better."),
+    "controls": ("Measurement 3: mitigation detection", "Judged existing protections",
+                 "How well each tool judged the protections already in the code, where a missed issue counts as "
+                 "zero. Longer bars are better."),
+    "recommendations": ("Measurement 4: recommendation", "Suggested fixes",
+                        "How well each tool suggested a fix for each known issue, where a missed issue counts as "
+                        "zero. Longer bars are better."),
+}
+CHART_FILES = {"issues": "m1-issues-found", "flagged": "m1-fixed-flagged", "path": "m2-path",
+               "controls": "m3-protections", "recommendations": "m4-fixes"}
+
+
+def count_row(t: dict, found: int, total, empty: str) -> dict:
+    """A bar for found of total, or the reason there is none."""
+    row = {"key": t["key"], "tool": t["name"]}
+    if total is None:
+        return row | {"state": "not_known", "value": None, "text": f"{found} found, total not known"}
+    if not total:
+        return row | {"state": "none", "value": None, "text": empty}
+    return row | {"state": "scored", "value": found / total,
+                  "text": f"{found} of {total} ({whole_percent(found / total)}%)"}
+
+
+def measure_row(t: dict, key: str) -> dict:
+    cell = t[key]
+    return {"key": t["key"], "tool": t["name"], "state": cell["status"],
+            "value": cell["value"] if cell["status"] == "scored" else None, "text": cell["text"]}
+
+
+def summary_charts(tools: list[dict]) -> list[dict]:
+    """The five charts of "Measurements at a glance": two for measurement 1, one each for 2 to 4."""
+    facets = {
+        "issues": [{"title": "Data disclosure", "rows": [
+                       count_row(t, **t["risks"]["disclosure"], empty="no known issues of this type") for t in tools]},
+                   {"title": "Excessive agency", "rows": [
+                       count_row(t, **t["risks"]["agency"], empty="no known issues of this type") for t in tools]}],
+        "flagged": [{"title": None, "rows": [
+            count_row(t, t["fixed_flagged"], t["fixed_apps"], "no fixed apps tested") for t in tools]}],
+    }
+    for key, *_ in SUMMARY_MEASURES:
+        facets[key] = [{"title": None, "rows": [measure_row(t, key) for t in tools]}]
+    out = []
+    for key, (measurement, title, caption) in CHART_TEXT.items():
+        out.append({"id": CHART_FILES[key], "group": measurement, "title": title, "caption": caption,
+                    "file": f"charts/{CHART_FILES[key]}.svg", "facets": facets[key]})
+    return out
+
+
+# Colours: the page's chart tokens (tools/eval_report.html), checked with the data-viz palette
+# validator. One bar hue, stepped separately for the dark surface.
+SVG_COLORS = {
+    "light": {"bg": "#fcfcfb", "ink": "#0b0b0b", "ink2": "#52514e", "muted": "#6f6d68", "grid": "#e1e0d9",
+              "axis": "#c3c2b7", "bar": "#2a78d6"},
+    "dark": {"bg": "#1a1a19", "ink": "#ffffff", "ink2": "#c3c2b7", "muted": "#9a988f", "grid": "#2c2c2a",
+             "axis": "#383835", "bar": "#3987e5"},
+}
+SVG_FONT = "system-ui, -apple-system, 'Segoe UI', sans-serif"
+SVG_W, SVG_PAD, SVG_LABEL_MAX, SVG_LINE = 680, 16, 210, 14
+
+
+def text_px(text: str, size: float = 12) -> float:
+    """A generous estimate of the rendered width, so labels get room without measuring."""
+    return len(text) * size * 0.58
+
+
+def wrap_label(text: str, width: float) -> list[str]:
+    lines, cur = [], ""
+    for word in text.split(" "):
+        nxt = f"{cur} {word}".strip()
+        if cur and text_px(nxt) > width:
+            lines.append(cur)
+            cur = word
+        else:
+            cur = nxt
+    return lines + [cur]
+
+
+def xml_text(text) -> str:
+    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+
+def n(v: float) -> str:
+    """A coordinate with at most one decimal, the same on every run."""
+    s = f"{v:.1f}"
+    return s[:-2] if s.endswith(".0") else s
+
+
+def bar_path(x0: float, y: float, w: float, h: float) -> str:
+    """A bar square at the baseline with a 4px rounded end."""
+    r = min(4.0, w, h / 2)
+    return (f"M{n(x0)},{n(y)}H{n(x0 + w - r)}A{n(r)},{n(r)} 0 0 1 {n(x0 + w)},{n(y + r)}"
+            f"V{n(y + h - r)}A{n(r)},{n(r)} 0 0 1 {n(x0 + w - r)},{n(y + h)}H{n(x0)}Z")
+
+
+def chart_svg(chart: dict) -> str:
+    """A standalone SVG of one chart: inline styles, a dark-mode media query, a title and a text
+    description holding every value. The same chart always gives the same bytes."""
+    rows = [r for f in chart["facets"] for r in f["rows"]]
+    names = {r["tool"]: wrap_label(r["tool"], SVG_LABEL_MAX) for r in rows}
+    label_w = min(SVG_LABEL_MAX, max([text_px(line) for ls in names.values() for line in ls] or [0]))
+    x0 = SVG_PAD + label_w + 12
+    right = max([text_px(r["text"]) for r in rows if r["value"] is not None] or [0]) + 10
+    plot = SVG_W - SVG_PAD - right - x0
+    x = lambda v: x0 + max(0.0, min(1.0, v)) * plot  # noqa: E731
+    body, y = [], SVG_PAD
+    body.append(f'<text class="muted" x="{SVG_PAD}" y="{y + 11}" font-size="12">{xml_text(chart["group"])}</text>')
+    body.append(f'<text class="ink" x="{SVG_PAD}" y="{y + 31}" font-size="15" font-weight="600">'
+                f'{xml_text(chart["title"])}</text>')
+    y += 44
+    for facet in chart["facets"]:
+        if facet["title"]:
+            y += 6
+            body.append(f'<text class="ink2" x="{SVG_PAD}" y="{y + 12}" font-size="12" font-weight="600">'
+                        f'{xml_text(facet["title"])}</text>')
+            y += 18
+        top = y
+        heights = [max(28, 14 + SVG_LINE * len(names[r["tool"]])) for r in facet["rows"]]
+        bottom = top + sum(heights)
+        for tick in (0, .25, .5, .75, 1):
+            cls = "axis" if tick == 0 else "grid"
+            body.append(f'<line class="{cls}" x1="{n(x(tick))}" x2="{n(x(tick))}" y1="{n(top)}" y2="{n(bottom)}" '
+                        'stroke-width="1"/>')
+        for r, h in zip(facet["rows"], heights):
+            mid = y + h / 2
+            lines = names[r["tool"]]
+            first = mid - (len(lines) - 1) * SVG_LINE / 2 + 4
+            spans = "".join(f'<tspan x="{n(x0 - 12)}" y="{n(first + i * SVG_LINE)}">{xml_text(line)}</tspan>'
+                            for i, line in enumerate(lines))
+            parts = [f"<title>{xml_text(r['tool'])}: {xml_text(r['text'])}</title>",
+                     f'<text class="ink" text-anchor="end" font-size="12">{spans}</text>']
+            if r["value"] is None:
+                parts.append(f'<text class="muted state" x="{n(x0 + 6)}" y="{n(mid + 4)}" font-size="12" '
+                             f'font-style="italic">{xml_text(r["text"])}</text>')
+            else:
+                w = x(r["value"]) - x0
+                if w > 0:
+                    parts.append(f'<path class="bar" d="{bar_path(x0, mid - 7, w, 14)}"/>')
+                else:  # a real zero: a 2px stub on the baseline, so it is not mistaken for a missing value
+                    parts.append(f'<rect class="bar" x="{n(x0)}" y="{n(mid - 7)}" width="2" height="14"/>')
+                parts.append(f'<text class="ink" x="{n(x0 + max(w, 2) + 6)}" y="{n(mid + 4)}" font-size="12">'
+                             f'{xml_text(r["text"])}</text>')
+            body.append("<g>" + "".join(parts) + "</g>")
+            y += h
+    y += 4
+    for tick in (0, .25, .5, .75, 1):
+        body.append(f'<text class="muted" x="{n(x(tick))}" y="{n(y + 12)}" font-size="11" text-anchor="middle">'
+                    f'{round(tick * 100)}%</text>')
+    height = y + 16 + SVG_PAD
+    desc = chart["caption"] + " " + " ".join(
+        f"{(facet['title'] + ', ') if facet['title'] else ''}{r['tool']}: {r['text']}."
+        for facet in chart["facets"] for r in facet["rows"])
+    style = (lambda c: f".bg{{fill:{c['bg']}}}.ink{{fill:{c['ink']}}}.ink2{{fill:{c['ink2']}}}"
+             f".muted{{fill:{c['muted']}}}.grid{{stroke:{c['grid']}}}.axis{{stroke:{c['axis']}}}"
+             f".bar{{fill:{c['bar']}}}.state{{stroke:{c['bg']}}}")
+    cid = chart["id"]
+    return "\n".join([
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{SVG_W}" height="{n(height)}" '
+        f'viewBox="0 0 {SVG_W} {n(height)}" role="img" aria-labelledby="{cid}-title {cid}-desc" '
+        f'font-family="{SVG_FONT}">',
+        f'<title id="{cid}-title">{xml_text(chart["group"])}. {xml_text(chart["title"])}</title>',
+        f'<desc id="{cid}-desc">{xml_text(desc)}</desc>',
+        "<style>" + style(SVG_COLORS["light"]) + ".state{stroke-width:3px;paint-order:stroke}"
+        "g:hover .bar{opacity:.8}@media (prefers-color-scheme: dark){" + style(SVG_COLORS["dark"]) + "}</style>",
+        f'<rect class="bg" width="{SVG_W}" height="{n(height)}" rx="8"/>',
+        *body,
+        "</svg>", ""])
+
+
+def write_charts(out_dir: Path, summary: dict) -> list[Path]:
+    paths = []
+    for chart in summary.get("charts") or []:
+        path = out_dir / chart["file"]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(chart_svg(chart))
+        paths.append(path)
+    return paths
+
+
 METHOD = [
     "Each task is a small runnable repository. Scanners receive only the repository source, configuration and "
     "safe fixtures plus the security-context manifest. Labels, expected findings and reproduction tests stay "
@@ -794,7 +1254,8 @@ METHOD = [
 
 
 def md_section(out: list, title: str, intro: str | None, table: list[str] | None = None) -> None:
-    out += ["", f"## {title}"]
+    # Every technical section sits under "Details for reviewers", one level below it.
+    out += ["", f"### {title}"]
     if intro:
         out += ["", intro]
     if table:
@@ -802,17 +1263,20 @@ def md_section(out: list, title: str, intro: str | None, table: list[str] | None
 
 
 def render(jobs: list[dict], tasks_dir: Path | None, data: dict | None = None,
-           warnings: list[str] | None = None, task_set: dict | None = None) -> str:
+           warnings: list[str] | None = None, task_set: dict | None = None, summary: dict | None = None) -> str:
     t = report.md_table
     data = data or dataset(jobs)
     task_set = task_set if task_set is not None else report.task_set_state(tasks_dir)
     warnings = warnings if warnings is not None else warnings_of(jobs, data, [], task_set)
+    summary = summary or build_summary(jobs, data)
     labels = [j["label"] for j in jobs]
     tasks_text = display_path(tasks_dir) if tasks_dir else "the paths recorded in the trials, where found"
-    out = ["# SAST scanner eval report", "",
-           f"Generated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} from "
-           f"{len(jobs)} Harbor jobs. Ground truth from {tasks_text}, task set "
-           f"{report.task_set_text(task_set)}.", ""]
+    # The plain summary first, then every technical section under "Details for reviewers".
+    out = summary_markdown(summary)
+    out += ["", f"## {summary['details_title']}", "", summary["details_intro"], "",
+            f"Generated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} from "
+            f"{len(jobs)} Harbor jobs. Ground truth from {tasks_text}, task set "
+            f"{report.task_set_text(task_set)}.", ""]
     for j in jobs:
         versions = ", ".join(j["agent_versions"])
         manifests = ", ".join(j["image_manifests"]) or "not recorded"
@@ -926,16 +1390,19 @@ DATA_MARKER = '<script id="report-data" type="application/json">null</script>'
 
 
 def build_payload(jobs: list[dict], tasks_dir: Path | None, data: dict | None = None,
-                  warnings: list[str] | None = None, task_set: dict | None = None) -> dict:
+                  warnings: list[str] | None = None, task_set: dict | None = None,
+                  summary: dict | None = None) -> dict:
     """What eval_report.json holds and the HTML view reads."""
     data = data or dataset(jobs)
     task_set = task_set if task_set is not None else report.task_set_state(tasks_dir)
     warnings = warnings if warnings is not None else warnings_of(jobs, data, [], task_set)
+    summary = summary or build_summary(jobs, data)
     labels = ["Measure"] + [j["key"] for j in jobs]
     return {
         "schema": "sast-eval-report/2",
         "generated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "tasks_dir": display_path(tasks_dir) if tasks_dir else None,
+        "summary": summary,
         "dataset": data,
         "coverage_note": coverage_sentence(data),
         "warnings": warnings,
@@ -978,7 +1445,7 @@ def main() -> None:
     parser.add_argument("--tasks", type=Path, help="folder holding the task directories, for ground truth")
     parser.add_argument("--variants", type=Path,
                         help="private map of task dir to family and role (default: <tasks>/VARIANTS.json)")
-    parser.add_argument("--out", type=Path, help="write eval_report.md, eval_report.json and trials.csv here")
+    parser.add_argument("--out", type=Path, help="write eval_report.md, .json, .html, trials.csv and charts/*.svg here")
     args = parser.parse_args()
 
     variants = report.load_variants(report.default_variants(args.tasks, args.variants))
@@ -996,13 +1463,15 @@ def main() -> None:
     data = dataset(jobs)
     task_set = report.task_set_state(args.tasks)  # read once, so every output states the same
     warnings = warnings_of(jobs, data, skipped, task_set)
-    markdown = render(jobs, args.tasks, data, warnings, task_set)
+    summary = build_summary(jobs, data)  # built once, so the Markdown and the HTML show the same text
+    markdown = render(jobs, args.tasks, data, warnings, task_set, summary)
     if args.out:
         args.out.mkdir(parents=True, exist_ok=True)
         (args.out / "eval_report.md").write_text(markdown, encoding="utf-8")
-        payload = build_payload(jobs, args.tasks, data, warnings, task_set)
+        payload = build_payload(jobs, args.tasks, data, warnings, task_set, summary)
         (args.out / "eval_report.json").write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
         (args.out / "eval_report.html").write_text(render_html(payload), encoding="utf-8")
+        write_charts(args.out, summary)
         with open(args.out / "trials.csv", "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS, extrasaction="ignore")
             writer.writeheader()
