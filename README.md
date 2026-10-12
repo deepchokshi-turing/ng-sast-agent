@@ -14,9 +14,6 @@ tool inside the task sandbox, scans `/app/repo`, and writes
 | SonarQube (server you host) | `sast.sonarqube.agent:SonarQubeAgent` | ready, run with Harbor against SonarQube Community Build 26.9 (see [SonarQube agent](#sonarqube-agent)) |
 | Claude Code security review (anthropics/claude-code-security-review at 0c6a49f, calls a model) | `sast.claude_review.agent:ClaudeReviewAgent` | unit-tested with fakes, not yet run against the real API (see [Claude Code security review agent](#claude-code-security-review-agent)) |
 
-The design, and the red-team review behind it, is in
-[docs/semgrep-agent-plan.md](docs/semgrep-agent-plan.md).
-
 ## Register on ng-eval-platform
 
 Settings → Agents → add a custom agent:
@@ -41,8 +38,8 @@ the agent records it as `model_ignored` and never calls it.
 
 ```bash
 uv sync
-PYTHONPATH=$PWD .venv/bin/harbor run -y -p dev/tasks -n 4 -a sast.semgrep.agent:SemgrepAgent -o jobs/semgrep
-python3 tools/report.py jobs/semgrep --tasks dev/tasks
+PYTHONPATH=$PWD .venv/bin/harbor run -y -p tests/fixtures/tasks -n 4 -a sast.semgrep.agent:SemgrepAgent -o jobs/semgrep
+python3 tools/report.py jobs/semgrep --tasks tests/fixtures/tasks
 ```
 
 Expected on the sample tasks (agent 0.2.0 checked in Harbor on 2026-10-07. The
@@ -59,9 +56,8 @@ which still pass at 0.4.0):
 
 These sample tasks are test fixtures for the agents, not dataset tasks. The
 tracked copy lives in `tests/fixtures/tasks/`, and that is what the unit tests
-read (a missing folder fails the run, it is never skipped). `dev/tasks/` is an
-untracked local working area (in `.gitignore`). To use it, copy the fixtures
-there first: `mkdir -p dev/tasks && cp -a tests/fixtures/tasks/. dev/tasks/`.
+read (a missing folder fails the run, it is never skipped). Harbor runs them
+in place with `-p tests/fixtures/tasks`.
 They use
 grader v2 ([task_format/](task_format/README.md)): optional `fixed_locations`
 for twins and `fix_changed_files` for positive tasks; without them a task is
@@ -531,8 +527,7 @@ writes the same SARIF as the Semgrep agent. It keeps both issues of type
 VULNERABILITY and Security Hotspots, but on the server version used here
 (Community Build 26.9.0.129388) a hotspot can never appear, because that
 server has no hotspot rules at all (see "No Security Hotspots on Community
-Build 26.9" below). The design is in
-[docs/superpowers/specs/2026-10-07-codeql-sonarqube-agents-design.md](docs/superpowers/specs/2026-10-07-codeql-sonarqube-agents-design.md).
+Build 26.9" below).
 
 ### 1. Start the server
 
@@ -596,7 +591,7 @@ The task image must carry the scanner, so build it from the tools image
 downloaded at setup.
 
 ```bash
-PYTHONPATH=$PWD .venv/bin/harbor run -y -p dev/tasks -n 2 -a sast.sonarqube.agent:SonarQubeAgent -o jobs/sonarqube
+PYTHONPATH=$PWD .venv/bin/harbor run -y -p tests/fixtures/tasks -n 2 -a sast.sonarqube.agent:SonarQubeAgent -o jobs/sonarqube
 ```
 
 Keep `-n` small: every trial is analysed by the same server, which handles one
@@ -846,7 +841,7 @@ folder:
 ```bash
 R=$PWD
 set -a; source "$R/.env"; set +a
-PYTHONPATH=$R .venv/bin/harbor run -y --force-build -p dev/tasks -n 1 \
+PYTHONPATH=$R .venv/bin/harbor run -y --force-build -p tests/fixtures/tasks -n 1 \
   -a sast.claude_review.agent:ClaudeReviewAgent -o jobs/claude-review-oauth \
   --include-task-name smoke_eval \
   --agent-timeout-multiplier 3 \
@@ -906,7 +901,7 @@ stopped before the review spends anything and the trial fails with an error
 that says to pass `--ak model=<model id>`.
 
 ```bash
-PYTHONPATH=$PWD .venv/bin/harbor run -y --force-build -p dev/tasks -n 2 \
+PYTHONPATH=$PWD .venv/bin/harbor run -y --force-build -p tests/fixtures/tasks -n 2 \
   -a sast.claude_review.agent:ClaudeReviewAgent -o jobs/claude-review \
   --include-task-name smoke_eval \
   --agent-timeout-multiplier 3 \
@@ -917,7 +912,7 @@ The same with the benchmark's scope added to the prompt, three attempts per
 task:
 
 ```bash
-PYTHONPATH=$PWD .venv/bin/harbor run -y --force-build -p dev/tasks -n 2 -k 3 \
+PYTHONPATH=$PWD .venv/bin/harbor run -y --force-build -p tests/fixtures/tasks -n 2 -k 3 \
   -a sast.claude_review.agent:ClaudeReviewAgent -o jobs/claude-review-scoped \
   --include-task-name smoke_eval \
   --agent-timeout-multiplier 3 \
