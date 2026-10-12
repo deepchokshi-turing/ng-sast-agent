@@ -376,6 +376,7 @@ let DATA = null;
 let visible = new Set();
 const NS = () => DATA.not_supported || "not supported by this tool";
 const BADGE = () => DATA.no_results_badge || "no results, scores not meaningful";
+const NR = () => DATA.no_results_measure || "n/a (no results)";
 
 function normalise(data) {
   // eval_report.json from tools/eval_report.py; an older list-of-tools payload is accepted too.
@@ -418,6 +419,11 @@ const cat = t => (S(t).categories || {}).overall || {};
 const riskRow = (t, k, key = "risk_types") => ((S(t)[key]) || {})[k] || {};
 const M = t => t.measures || {};
 const supported = (t, k) => ((M(t).supported || {})[k]) !== false;
+// A measurement of a scanner that matched no finding: whether it can fill the field is not known.
+const noResults = (t, k) => (M(t).no_results || []).includes(k);
+const measureCell = (t, k, value, tipText) => !supported(t, k) ? nsCell()
+  : noResults(t, k) ? el("span", { class: "ns", "data-tip": `${t.key} matched no finding, so this cannot be scored` }, NR())
+  : meter(value, t, tipText);
 
 // ---- reusable pieces ---------------------------------------------------------------
 function meter(value, t, tipText, invert) {
@@ -535,17 +541,28 @@ function renderScoreboard() {
   const colOf = new Map((sb.columns || []).map((c, i) => [c, i]));
   const rows = (sb.rows || []).map(r => [r[0], ...ts.map(t => {
     const v = r[colOf.get(t.key)];
-    return v === NS() ? nsCell() : String(v ?? "");
+    return v === NS() ? nsCell() : v === NR() ? el("span", { class: "ns" }, NR()) : String(v ?? "");
   })]);
   const chart = barChart(ts.map(t => chartItem(t, cat(t).score, `TPR ${num(cat(t).mean_TPR)}, FPR ${num(cat(t).mean_FPR)}`)),
     { min: -1, max: 1, label: "OWASP Benchmark style score per scanner, from -1 to 1" });
   return el("section", { class: "block", "aria-labelledby": "score-h" },
     el("h2", { id: "score-h" }, "Scoreboard"),
-    el("p", { class: "lede" }, "The same rows as the scoreboard in eval_report.md. Positives and negatives are always scored apart, since a scanner that reports nothing passes every negative. \"" + NS() + "\" means no graded result of the scanner carries the field the grader reads."),
+    el("p", { class: "lede" }, "The same rows as the scoreboard in eval_report.md. Positives and negatives are always scored apart, since a scanner that reports nothing passes every negative. \"" + NS() + "\" means the scanner matched a finding but no graded result of it carries the field the grader reads. \"" + NR() + "\" means it matched no finding, so that cannot be told."),
     table(["Measure", ...ts.map(toolHead)], rows, ts.map((_, i) => i + 1)),
     el("h3", {}, "OWASP Benchmark style score per scanner"),
     el("p", { class: "small" }, "Mean true positive rate minus mean false positive rate over the taxonomy categories. 1 is perfect. 0 is what guessing earns, and also what reporting nothing earns."),
     chart, chartFootnote(ts));
+}
+
+function renderVersions() {
+  const v = DATA.versions;
+  if (!v) return null;
+  const ts = shown();
+  const colOf = new Map((v.columns || []).map((c, i) => [c, i]));
+  const rows = (v.rows || []).map(r => [r[0], ...ts.map(t => String(r[colOf.get(t.key)] ?? ""))]);
+  return section("versions", "Provenance", "Versions and run configuration", v.intro || null,
+    el("p", { class: "small" }, "Task set: ", v.task_set_text || "not recorded"),
+    table(["Field", ...ts.map(toolHead)], rows));
 }
 
 function riskTable(ts, key) {
@@ -598,9 +615,9 @@ function renderM2() {
         meter(m.finding_recall, t, "Matched as the grader does: same risk family, within the line tolerance, and a shared CWE"),
         meter(m.near_recall, t, `${m.near ?? "n/a"} of ${m.gt_with_metadata ?? "n/a"}: any security result of the scanner within the line tolerance of the finding, before OWASP mapping`),
         meter(m.near_cwe_recall, t, `${m.near_cwe ?? "n/a"} of ${m.gt_with_metadata ?? "n/a"}: as before, and the raw result carries the finding's primary CWE or an acceptable one`),
-        supported(t, "path") ? meter(m.path, t, "Share of the labelled path steps covered by the result's codeFlows, averaged over every finding (missed findings score 0)") : nsCell(),
+        measureCell(t, "path", m.path, "Share of the labelled path steps covered by the result's codeFlows, averaged over every finding (missed findings score 0)"),
         `${m.hits_with_flow ?? 0} / ${m.hits ?? 0}`]; }), [1, 6]),
-    el("p", { class: "note" }, "The two near columns look at the scanner's raw output, before anything is mapped to an OWASP rule. They show how close a scanner came even when it reported the wrong risk or no rule. \"" + NS() + "\" means no graded result of the scanner has a codeFlows entry, so the path score cannot be earned."));
+    el("p", { class: "note" }, "The two near columns look at the scanner's raw output, before anything is mapped to an OWASP rule. They show how close a scanner came even when it reported the wrong risk or no rule. \"" + NS() + "\" means no graded result of the scanner has a codeFlows entry, so the path score cannot be earned. \"" + NR() + "\" means it matched no finding, so that cannot be told."));
 }
 
 function renderM3() {
@@ -609,7 +626,7 @@ function renderM3() {
     "Can the scanner tell vulnerable code from code with partial or complete controls, and judge the residual risk? On positives this is the control status and residual risk of each matched result. The ambiguous negatives, where a working control is the main difference, test the same skill from the other side.",
     table(["Scanner", "Control and residual-risk score (positives, mean)", "Ambiguous negatives judged clean", "Flagged next to the fixed code", "Flagged on a decoy"],
       ts.map(t => { const m = M(t);
-        return [toolHead(t), supported(t, "controls") ? meter(m.controls, t, "controlStatus (75%) and residualRisk (25%) compared with the labels, missed findings score 0") : nsCell(),
+        return [toolHead(t), measureCell(t, "controls", m.controls, "controlStatus (75%) and residualRisk (25%) compared with the labels, missed findings score 0"),
           meter(ratio(m.negatives_clean, m.negatives), t, `${m.negatives_clean} of ${m.negatives} negatives with no failing result`),
           String(m.failed_near_fix || 0), String(m.failed_trap || 0)]; }), [3, 4]),
     el("p", { class: "note" }, "A negative counts as clean unless a result of a contrasted OWASP prefix (LLM02 or LLM03) lands next to the fixed code, or a result with a decoy's prefix lands on that decoy. Results elsewhere in the repository are listed under scanner output but not held against it."));
@@ -620,7 +637,7 @@ function renderM4() {
   return section("m4", "Measurement 4", "Mitigation recommendation",
     "Does the scanner recommend risk-specific controls where they are missing or ineffective, such as authorizing before retrieval, minimising context, sink-side enforcement, least-privilege tools and exact-action approval?",
     table(["Scanner", "Recommendation score (positives, mean)", "Matched detections"],
-      ts.map(t => [toolHead(t), supported(t, "recommendations") ? meter(M(t).recommendations, t, "Recommendations that apply to the finding earn credit, inapplicable ones are penalised, missed findings score 0") : nsCell(), String((t.hits || []).length)]), [2]),
+      ts.map(t => [toolHead(t), measureCell(t, "recommendations", M(t).recommendations, "Recommendations that apply to the finding earn credit, inapplicable ones are penalised, missed findings score 0"), String((t.hits || []).length)]), [2]),
     el("p", { class: "note" }, "Only the top-level recommendations property of a matched result is scored. Agents that write fixed heuristic recommendations under properties.heuristics are not scored on them, so a scanner with no recommendations of its own shows \"" + NS() + "\"."));
 }
 
@@ -781,7 +798,7 @@ function renderMethod() {
 function render() {
   const app = document.getElementById("app");
   const y = window.scrollY;
-  app.replaceChildren(renderHeader(), renderM1(), renderM2(), renderM3(), renderM4(), renderNegatives(), renderFamilies(), renderTaxonomy(), renderOutput(), renderMethod(),
+  app.replaceChildren(renderHeader(), renderVersions(), renderM1(), renderM2(), renderM3(), renderM4(), renderNegatives(), renderFamilies(), renderTaxonomy(), renderOutput(), renderMethod(),
     el("footer", {}, "Generated by tools/eval_report.py from Harbor jobs. Schema ", DATA.schema || "sast-eval-report/2", "."));
   window.scrollTo(0, y);
 }

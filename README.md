@@ -148,6 +148,8 @@ PowerShell with Docker Desktop. The tools image named by the Dockerfile's
 locally. It removes the images it builds. See the script's docstring for the
 checks.
 
+The leak scan also requires `task_id` in task.toml to equal the task folder name, rejects role words (positive, negative, vulnerable, patched, fixed, benign, and pos, neg, vuln, fix, safe, unsafe, bad or good as a whole id part) in `task_id`, `variant_id` and `related_variant_ids`, and requires the twins' `instruction.md` files to be byte-identical. An unreadable or malformed VARIANTS.json fails every task with a message instead of a traceback.
+
 ## What a run does
 
 1. **setup** (inside the sandbox, ≤ 300 s; Harbor allows 360 s): uploads
@@ -206,13 +208,8 @@ checks.
     storage, and XXE aren't mapped.
   - Unmapped CWEs (XSS, crypto, CSRF, ...) are outside the five ruleIds and are
     not reported; they're still counted in the metadata.
-  - No CWE maps to `LLM03.EA.AUTONOMY`, so no current agent can report it.
-    Missing authorisation (CWE-862, and CWE-285, 284 and 863) maps to
-    `LLM02.SID.HIGH`, and the Claude review agent goes through the same table.
-    A finding labelled `LLM03.EA.AUTONOMY` (for example ec8a82 F1) therefore
-    scores 0 for every one of them by construction. A correct report at the
-    right lines lands in the LLM02 family and cannot match. This is a property
-    of the frozen map, not a miss by the tool.
+  - No CWE maps to `LLM03.EA.AUTONOMY`, so no CWE-mapped agent can report it. Missing authorisation (CWE-862, and CWE-285, 284 and 863) maps to `LLM02.SID.HIGH`. A finding labelled `LLM03.EA.AUTONOMY` (for example ec8a82 F1) therefore scores 0 for Semgrep, CodeQL, SonarQube and the Claude review in stock mode by construction. A correct report at the right lines lands in the LLM02 family and cannot match. This is a property of the frozen map, not a miss by the tool. The Claude review in scoped mode names the ruleId itself, as the task instruction asks, so it can report Autonomy. The map was deliberately not changed for this: CWE-862, 863, 285 and 284 are also the usual CWEs for retrieval without authorisation, which spec section 3 lists under disclosure, and changing the map after seeing results would be tuning.
+  - Findings merged into one result (same file, line and family) keep the family they were merged under, and the combined CWEs only choose LLM02 HIGH or MEDIUM (`cwe_map.family_rule`). Before, the rule was recomputed from the combined list, and a generic CWE next to a `NOT_DISCLOSURE_CWES` entry (for example CodeQL's bind-socket {200} and clear-text-logging {359, 532, 312} on one line) gave no rule and crashed the SARIF writer (PR #4 review, item 1). No recorded result changes.
 - **LLM02 severity (cwe-map-3).** The CWE still picks the family. An LLM02
   result is `LLM02.SID.HIGH` when any of its CWEs is CWE-201, 918, 319, 532 or
   359 (weaknesses defined by data leaving its boundary). Otherwise it's
@@ -297,6 +294,11 @@ The Semgrep version and the rules are pinned in
 
 `tools/report.py <job dir> --tasks <tasks dir>` prints a per-trial table and,
 as the headline for SAST, **detection pooled across tasks**:
+
+- Every report (`report.py` and `eval_report.py`) states what the results were graded under: agent version, CWE map, heuristics, Claude category map, and the task set's git commit and whether its work tree is dirty (when `--tasks` is a git work tree). Different versions within or across jobs are listed as warnings.
+- A measurement is shown as "not supported by this tool" only when the tool matched at least one finding and no graded result carries the field. With no matched result it is "n/a (no results)".
+- For Claude review jobs the report shows the mode (stock or scoped), the auth and the results label. Stock-mode scores depend on the frozen category map (`ccsr-category-map-1`): categories outside it are dropped before grading, and the report counts them.
+- Reading `reward.json` files directly, the task name comes from the trial's `result.json`, or from the folder name without Harbor's `__<suffix>`.
 
 - precision, recall and F1 from the verifier's tp/fp/fn. Precision (and so F1)
   is shown as n/a when the tool reported nothing to take it over;
@@ -708,6 +710,8 @@ The SonarQube job has to be run again for the published numbers to reflect
 `cwe-map-5`. See the `sast/cwe_map.py` docstring for the full decision,
 including why Semgrep's CWE-939 stays unmapped.
 
+`cwe-map-5` is forward-only. It was adopted after its effect on the v0.4.0 results had been checked, so the published v0.4.0 numbers stay under `cwe-map-4`, `cwe-map-5` applies to new runs only, and it needs the lead's explicit sign-off (PR #4 review, item 2). The map, the Claude category map (`ccsr-category-map-1`), the heuristics table and the task ground truth are frozen for the final runs, and every report states the versions it was graded under.
+
 #### No Security Hotspots on Community Build 26.9
 
 SonarQube Community Build 26.9.0.129388, the server this agent was checked
@@ -1015,12 +1019,9 @@ falls back to the regex rules), when any per-finding filter call fails
   entry is a well-formed id on the agent's allow-list, else the table. Rejected
   values are counted in `cwes_rejected`, and each finding's `cweSource` says
   which was used.
-- The CWEs then go through `cwe_map.decide_unordered` and `task_rule`, like
-  CodeQL and SonarQube results, so the ruleId follows the same frozen CWE
-  table as every scanner. `LLM03.EA.AUTONOMY` has no CWE and is never reported,
-  and missing authorisation (CWE-862) becomes `LLM02.SID.HIGH`, so findings
-  labelled with the Autonomy subtype score 0 for this agent by construction, as
-  for the other agents.
+- **RuleId, stock mode**: the CWEs go through `cwe_map.decide_unordered` and `task_rule`, like CodeQL and SonarQube results, so the ruleId follows the same frozen CWE table as every scanner. `LLM03.EA.AUTONOMY` has no CWE and is never reported in stock mode.
+- **RuleId, scoped mode**: the model's own `rule_id` when it is one of the five task ruleIds, which is what the task instruction asks every scanner to report. Then the CWEs do not decide the ruleId, an ambiguous or unmapped CWE set does not drop the finding, and Autonomy can be reported. Without a valid `rule_id` the CWEs decide as in stock mode. `rule_source` and `rule_ids_rejected` in the metadata count both.
+- **Stock-mode caveat**: stock scores depend on the frozen category map, because a category outside it is dropped (`unmapped_by_category`). The map is not extended with names seen in runs. Quote stock numbers with that caveat, next to scoped numbers.
 - **Location**: the finding's `file` must be one of the in-scope text files
   and its `line` a positive integer within the file. Anything else is dropped
   and counted (`dropped_bad_location`, `dropped_out_of_scope`).

@@ -344,8 +344,10 @@ def test_scoped_scan_text_uses_the_upstream_format_and_leaks_no_label():
     headers = re.findall(r"^\*\*(.+):\*\*$", text, re.MULTILINE)
     assert len(headers) == 4 and all(line.startswith(("**", "- ")) for line in text.splitlines() if line)
     assert "security_manifest.json" in text and '"cwe"' in text
-    for field in ('"path"', '"control_status"', '"residual_risk"', '"recommendation_ids"'):
+    for field in ('"rule_id"', '"path"', '"control_status"', '"residual_risk"', '"recommendation_ids"'):
         assert field in text
+    from sast import cwe_map
+    assert all('"{}"'.format(rule) in text for rule in cwe_map.TASK_RULES)
     # The catalogue is the task profile's, in its order, the one the normaliser accepts.
     from sast import heuristics
     assert re.findall(r"^- (REC-[A-Z-]+):", text, re.MULTILINE) == list(heuristics.CATALOGUE)

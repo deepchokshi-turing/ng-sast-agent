@@ -13,7 +13,9 @@ import json
 import sys
 
 import pytest
+from harbor.environments.base import ExecResult
 
+from sast.base import ScannerAgent
 from sast.claude_review import driver
 from sast.claude_review.agent import ClaudeReviewAgent, choose_auth, filter_conflict
 from sast.errors import ScannerError
@@ -28,6 +30,7 @@ from tests.test_claude_review_agent import (
     run_agent,
 )
 from tests.test_claude_review_driver import IN_SCOPE as DRIVER_IN_SCOPE
+from tests.test_claude_review_driver import parse_json_with_fallbacks
 from tests.test_claude_review_driver import repo  # noqa: F401  (fixture)
 
 TOKEN_FILE = f"{KEY_DIR}/claude-oauth-token"
@@ -275,6 +278,7 @@ def test_oauth_settings_have_no_api_key_helper():
     settings = driver.cli_settings("/opt/sast/secret/claude-oauth-token", "/opt/sast/home/claude-review", "oauth")
     assert "apiKeyHelper" not in settings
     assert "Read(//opt/sast/secret/**)" in settings["permissions"]["deny"]
+    assert "Read(//proc/**)" in settings["permissions"]["deny"]      # the token is in the CLI's environment
     assert OAUTH_TOKEN not in json.dumps(settings)
 
 
@@ -321,6 +325,52 @@ def test_api_key_modes_still_reject_none():
 ])
 def test_auth_failure_markers(text, marker):
     assert driver.auth_failure(text, "") == marker
+
+
+def _stream(*messages):
+    return "".join(json.dumps(m) + "\n" for m in messages)
+
+
+#: The model's own text and a tool result quoting a repository file that holds the CLI's refusal phrases.
+QUOTING = (
+    {"type": "assistant", "message": {"content": [{"type": "text", "text": "The README says: Not logged in · "
+                                                                            "Please run /login"}]}},
+    {"type": "user", "message": {"content": [{"type": "tool_result", "content": "die('Invalid API key · Please "
+                                                                                "run /login')"}]}},
+)
+
+
+@pytest.mark.parametrize("stdout, stderr, marker", [
+    # A result that is not an error: the quotes are the repository's, not the CLI's.
+    (_stream(*QUOTING, wrapper(result="Looks fine to me.")), "", None),
+    (_stream(*QUOTING, wrapper(result="Invalid API key · Please run /login")), "", None),
+    # An error result: its own text is the CLI's.
+    (_stream(*QUOTING, wrapper(is_error=True, result="OAuth token revoked · Please run /login")), "",
+     "please run /login"),
+    # No result: the JSON messages are still not read, the CLI's plain lines are.
+    (_stream(*QUOTING), "", None),
+    (_stream(*QUOTING) + "Not logged in\n", "", "not logged in"),
+    # stderr is always the CLI's own.
+    (_stream(*QUOTING, wrapper(result="Looks fine to me.")), "Failed to authenticate. API Error: 401",
+     "failed to authenticate"),
+])
+def test_auth_failure_reads_only_the_clis_own_words(stdout, stderr, marker):
+    assert driver.auth_failure(stdout, stderr, parse_json_with_fallbacks) == marker
+
+
+def test_exec_scrubs_the_output_before_it_cuts_it():
+    """A killed command's error message keeps the last 600 characters of its
+    output. A token straddling that cut leaves no partial copy."""
+    output = "x" * 1000 + OAUTH_TOKEN + "y" * 590
+
+    class Environment:
+        async def exec(self, command, cwd=None, env=None, timeout_sec=None):
+            return ExecResult(stdout=output, stderr="", return_code=124)
+
+    with pytest.raises(ScannerError) as err:
+        asyncio.run(ScannerAgent._exec(None, Environment(), "driver", timeout_sec=10, what="the review",
+                                       scrub=lambda text: text.replace(OAUTH_TOKEN, "***")))
+    assert OAUTH_TOKEN[-10:] not in str(err.value) and str(err.value).endswith("x" * 7 + "***" + "y" * 590)
 
 
 def test_sdk_guard_refuses_to_make_a_client(monkeypatch):
@@ -402,6 +452,21 @@ def test_refused_token_stops_at_once(tmp_path, repo, net):  # noqa: F811
     assert len(run.claude_calls()) == 1                       # not retried
     assert doc["cli"]["attempts"][0]["auth_failure"] == "invalid api key"
     _assert_token_only_in_the_cli_env(run, result)
+
+
+def test_quoted_refusal_phrases_do_not_stop_a_token_run(tmp_path, repo, net):  # noqa: F811
+    """The model quotes a repository file that says "Please run /login", and the
+    attempt fails for another reason: the run retries instead of stopping as
+    cli_oauth_refused."""
+    first = _stream(*QUOTING, wrapper(result="I could not finish: Not logged in · Please run /login"))
+    script = [{"exit": 0, "stdout": first}, {"exit": 0, "wrapper": wrapper(review([finding("src/app/tools.py", 5)]))}]
+    run = _oauth_run(tmp_path, repo, net, script=script)
+    result = run.run(timeout=60)
+    doc = run.document()
+    assert result.returncode == 0, doc.get("error")
+    assert len(run.claude_calls()) == 2
+    assert [a["outcome"] for a in doc["cli"]["attempts"]] == ["retry", "ok"]
+    assert "auth_failure" not in doc["cli"]["attempts"][0]
 
 
 def test_an_api_key_source_stops_a_token_run(tmp_path, repo, net):  # noqa: F811

@@ -119,13 +119,25 @@ runs.
 
 ## Scoped mode
 
-`scoped_scan_instructions.txt` is passed as upstream's `custom_scan_instructions`. It holds the task instruction's public scope table in the upstream `**Category:**` format, a pointer to `security_manifest.json`, and asks for extra fields per finding: a `cwe` list, a `path` (file, line and role per step), `control_status`, `residual_risk` and `recommendation_ids` from the task profile's recommendation catalogue, which it lists. These are the output profile's own fields and vocabulary, so client measurements 2 to 4 (path, controls, recommendations) can be scored for this agent. No upstream code changes: upstream's JSON parser and filter keep every field the model adds, and only our normaliser reads them. It was written from the public instruction and never from a task. A test checks that it shares no six-word run with any sample task's ground truth, and that its catalogue is the one the normaliser accepts.
+`scoped_scan_instructions.txt` is passed as upstream's `custom_scan_instructions`. It holds the task instruction's public scope table in the upstream `**Category:**` format, a pointer to `security_manifest.json`, and asks for extra fields per finding: a `rule_id` (one of the five task ruleIds), a `cwe` list, a `path` (file, line and role per step), `control_status`, `residual_risk` and `recommendation_ids` from the task profile's recommendation catalogue, which it lists. These are the output profile's own fields and vocabulary, so client measurements 2 to 4 (path, controls, recommendations) can be scored for this agent. No upstream code changes: upstream's JSON parser and filter keep every field the model adds, and only our normaliser reads them. It was written from the public instruction and never from a task. A test checks that it shares no six-word run with any sample task's ground truth, and that its catalogue is the one the normaliser accepts.
 
 Scoped results are not stock upstream. Upstream's prompt asks for its own schema "exactly", after our instructions, so the model may leave the extra fields out. `assessed_fields` in the metadata counts how often it gave each one. Upstream also asks only for findings the model is more than 80% sure are exploitable, so `control_status` will lean towards `none`.
 
 `scoped_filter_instructions.txt` is the upstream default filter text without
 hard exclusions 7 and 14, generated from the upstream source and checked
 against it by a test. Both texts' sha256 go into the metadata.
+
+## Hardening after the PR #4 review
+
+- The CLI's settings also deny `Read(//proc/**)`: with a subscription token the token is in the CLI process's environment.
+- The per-finding filter client makes one request per attempt (the SDK's own retries are off, `max_retries=0`), checks the review's deadline before every attempt, and caps each attempt's timeout at the time left. When the time runs out the driver stops with error `deadline` instead of being killed by `timeout -k`.
+- A refused subscription token is recognised only from the CLI's own words: stderr, and the final result's text when it is an error (or the CLI's plain-text lines when there is no result). The model's text and tool output are not searched, so repository content quoting such a message cannot stop a run.
+- The credential is scrubbed from the full output before any part of it is cut and kept, in the driver and in the agent's `_exec` error tail.
+- Line numbers and line counts split on `
+` only, so a form feed, vertical tab or U+2028 in a file no longer shifts them.
+- Merged SARIF results keep the family they were merged under (see README, "Decisions"), so the writer can no longer crash on a generic CWE next to a `NOT_DISCLOSURE_CWES` entry.
+
+Not changed: `max_budget_usd` still defaults to none (a cap that is too low would fail a paid review), and an explicit `timeout_sec` above Harbor's multiplied limit still gets only a note, because Harbor does not tell an agent that limit.
 
 ## Verified and not verified
 

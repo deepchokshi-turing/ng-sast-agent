@@ -692,6 +692,42 @@ def test_scoped_assessment_earns_path_controls_and_recommendations(tmp_path, api
     assert reward["path"] == 1.0 and reward["controls"] == 1.0 and reward["recommendations"] == 1.0
 
 
+def test_scoped_mode_takes_the_models_rule_id(tmp_path, api_key):
+    kept = [
+        # Autonomy has no CWE in the table: only the model's rule_id can report it.
+        finding("src/calc_agent/maintenance.py", 5, category="x", cwe=["CWE-862"], rule_id="llm03.ea.autonomy"),
+        # An ambiguous CWE set is kept when the model names the rule.
+        finding("src/calc_agent/maintenance.py", 8, category="y", cwe=["CWE-78", "CWE-532"],
+                rule_id="LLM03.EA.FUNCTIONALITY"),
+        # An unknown rule_id falls back to the CWEs and is counted.
+        finding("src/calc_agent/llm.py", 2, category="prompt_logging", cwe=["CWE-532"], rule_id="LLM09.MADE.UP"),
+    ]
+    sandbox = FakeSandbox(document=driver_document(kept))
+    _, context, go = run_agent(tmp_path, sandbox, mode="scoped")
+    asyncio.run(go())
+    rules = {(r["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
+              r["locations"][0]["physicalLocation"]["region"]["startLine"]): (r["ruleId"], r["properties"]["cwe"])
+             for r in sarif_of(sandbox)["runs"][0]["results"]}
+    assert rules == {
+        ("src/calc_agent/maintenance.py", 5): ("LLM03.EA.AUTONOMY", ["CWE-862"]),
+        ("src/calc_agent/maintenance.py", 8): ("LLM03.EA.FUNCTIONALITY", ["CWE-78", "CWE-532"]),
+        ("src/calc_agent/llm.py", 2): ("LLM02.SID.HIGH", ["CWE-532"]),
+    }
+    meta = context.metadata
+    assert meta["rule_source"] == {"cwe_table": 1, "model": 2}
+    assert meta["rule_ids_rejected"] == ["LLM09.MADE.UP"]
+
+
+def test_stock_mode_ignores_the_models_rule_id(tmp_path, api_key):
+    kept = [finding("src/calc_agent/agent.py", 8, category="eval_injection", rule_id="LLM03.EA.AUTONOMY")]
+    sandbox = FakeSandbox(document=driver_document(kept))
+    _, context, go = run_agent(tmp_path, sandbox)
+    asyncio.run(go())
+    (result,) = sarif_of(sandbox)["runs"][0]["results"]
+    assert result["ruleId"] == "LLM03.EA.FUNCTIONALITY"
+    assert context.metadata["rule_source"] == {"cwe_table": 1}
+
+
 def test_the_sarif_grades_like_any_scanner(tmp_path, api_key, grade_sarif):
     """The eval() finding on smoke_eval scores as the Semgrep one does: detection and classification."""
     kept = [finding("src/calc_agent/agent.py", 8, category="eval_injection")]

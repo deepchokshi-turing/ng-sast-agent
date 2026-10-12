@@ -265,3 +265,32 @@ def test_tool_labels_go_to_tool_properties_and_merge():
     assert "toolProperties" not in b["properties"]
     for r in results:
         assert not {"controlStatus", "residualRisk", "recommendations"} & set(r["properties"])
+
+
+def test_a_merge_keeps_its_family_when_the_combined_cwes_give_none():
+    """PR #4 review item 1: a generic CWE next to a NOT_DISCLOSURE one on the same line."""
+    bind = Finding("codeql/py/bind-socket-all-network-interfaces", ("CWE-200",), "a.py", 5, 5, "m", "warning")
+    log = Finding("codeql/py/clear-text-logging-sensitive-data", ("CWE-359", "CWE-532", "CWE-312"), "a.py", 5, 5,
+                  "m", "error")
+    assert cwe_map.rule_for(["CWE-200", "CWE-359", "CWE-532", "CWE-312"]) is None  # what used to crash
+    for order in ([bind, log], [log, bind]):
+        doc, stats = sarif.build(order, tool_name="t", tool_version="1")
+        (result,) = doc["runs"][0]["results"]
+        assert result["ruleId"] == "LLM02.SID.HIGH" and stats["results_emitted"] == 1
+    medium = Finding("x/r", ("CWE-200", "CWE-319"), "a.py", 9, 9, "m", "warning")
+    other = Finding("x/s", ("CWE-209",), "a.py", 9, 9, "m", "warning")
+    doc, _ = sarif.build([other, medium], tool_name="t", tool_version="1")
+    assert [r["ruleId"] for r in doc["runs"][0]["results"]] == ["LLM02.SID.MEDIUM"]
+
+
+def test_a_tool_named_rule_wins_and_merges_by_family():
+    autonomy = Finding("ccsr/x", ("CWE-862",), "a.py", 3, 3, "m", "error", task_rule="LLM03.EA.AUTONOMY")
+    no_cwe = Finding("ccsr/y", (), "a.py", 7, 7, "m", "error", task_rule="LLM02.SID.MEDIUM")
+    table = Finding("ccsr/z", ("CWE-532",), "a.py", 7, 7, "m", "error")
+    doc, stats = sarif.build([autonomy, no_cwe, table], tool_name="t", tool_version="1")
+    rules = {(r["locations"][0]["physicalLocation"]["region"]["startLine"], r["ruleId"])
+             for r in doc["runs"][0]["results"]}
+    # The SID finding and the table SID finding share the LLM02 family on line 7: one result, the tool's rule.
+    assert rules == {(3, "LLM03.EA.AUTONOMY"), (7, "LLM02.SID.MEDIUM")}
+    assert stats["findings_unmapped"] == 0
+    assert "LLM03.EA.AUTONOMY" in {r["id"] for r in doc["runs"][0]["tool"]["driver"]["rules"]}

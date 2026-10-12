@@ -33,6 +33,14 @@ For every task folder (one holding task.toml or environment/):
 7. Twin task.toml files are parsed and may differ only in ``task_id``,
    ``variant_id`` and ``related_variant_ids``. Any other key that differs (a
    package version, an architecture line, a tag) could tell the twins apart.
+8. Because those three keys escape point 7, ``task_id`` (when set) must equal
+   the task folder name, and none of the three may hold a role word
+   (positive, negative, vulnerable, patch, fixed, benign, or a pos, neg,
+   vuln, fix, safe, unsafe, bad or good part between separators).
+9. Twin instruction.md files must be byte-identical.
+
+A VARIANTS.json that cannot be read or does not have the shape above fails
+every task with a message instead of stopping the scan.
 
 Prints one line per task and exits 1 when any task has a problem.
 ``--write-qc`` sets ``qc.label_leak_scan`` to "pass" or "fail" in each task's
@@ -89,6 +97,10 @@ TWIN_RE = re.compile(r"^(task_.+)_(positive|negative)$")
 VISIBLE_TASK_FILES = ("task.toml", "instruction.md")
 #: The only task.toml keys that may differ between twins.
 TOML_TWIN_KEYS = {"task_id", "variant_id", "related_variant_ids"}
+#: Words in an id that would say which twin a task is. Long words match anywhere in the id; the short ones
+#: only as a whole part between separators (``_``, ``-``, ``:``, ``.``) so that random hex cannot match.
+ROLE_RE = re.compile(r"positive|negative|vulnerab|patch|fixed|benign"
+                     r"|(?:^|[^a-z0-9])(?:pos|neg|vuln|fix|safe|unsafe|bad|good)(?=[^a-z0-9]|$)", re.IGNORECASE)
 SHINGLE = 6
 WORD_RE = re.compile(r"[a-z0-9_]+")
 
@@ -159,6 +171,42 @@ def toml_twin_problems(a: Path, b: Path) -> list[str]:
     differing = sorted(k for k in set(ta) | set(tb)
                        if ta.get(k) != tb.get(k) and k.rsplit(".", 1)[-1] not in TOML_TWIN_KEYS)
     return [f"task.toml differs between twins in {k}" for k in differing]
+
+
+def toml_id_problems(task: Path) -> list[str]:
+    """``task_id`` other than the folder name, or a role word in task_id, variant_id or related_variant_ids.
+
+    These keys may differ between twins, so they are the one place in task.toml
+    where a role could hide without the twin diff seeing it."""
+    f = task / "task.toml"
+    if not f.is_file():
+        return []
+    try:
+        flat = _flatten(tomllib.loads(f.read_text(encoding="utf-8")))
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
+        return [f"cannot parse task.toml: {exc}"]
+    problems = []
+    for key, value in sorted(flat.items()):
+        leaf = key.rsplit(".", 1)[-1]
+        if leaf not in TOML_TWIN_KEYS:
+            continue
+        if leaf == "task_id" and value != task.name:
+            problems.append(f"task.toml {key} = {value!r} is not the folder name {task.name!r}")
+        for item in value if isinstance(value, list) else [value]:
+            m = ROLE_RE.search(str(item))
+            if m:
+                problems.append(f"role word '{m.group(0).strip('_-:.')}' in task.toml {key} = {item!r}")
+    return problems
+
+
+def instruction_twin_problems(a: Path, b: Path) -> list[str]:
+    """Twin instruction.md files must have the same bytes."""
+    fa, fb = a / "instruction.md", b / "instruction.md"
+    if not fa.is_file() and not fb.is_file():
+        return []
+    if not fa.is_file() or not fb.is_file():
+        return ["instruction.md exists in only one twin"]
+    return [] if fa.read_bytes() == fb.read_bytes() else ["instruction.md differs between twins"]
 
 
 def evaluator_files(files: dict[str, bytes]) -> list[str]:
@@ -332,7 +380,14 @@ def twin_pairs(root: Path, by_name: dict, problems: dict) -> list[tuple[str, str
     pairs = []
     variants_file = root / "VARIANTS.json"
     if variants_file.is_file():
-        variants = json.loads(variants_file.read_text(encoding="utf-8"))
+        try:
+            variants = json.loads(variants_file.read_text(encoding="utf-8"))
+            if not isinstance(variants, dict) or not all(isinstance(v, dict) for v in variants.values()):
+                raise ValueError("expected an object of {task id: {family, role, twin, former_name}} objects")
+        except (OSError, ValueError) as exc:
+            for name in by_name:
+                problems[name].append(f"cannot read VARIANTS.json, so no twin was checked: {exc}")
+            return []
         seen = set()
         for name, v in variants.items():
             if name not in by_name:
@@ -380,10 +435,11 @@ def scan(root: Path) -> dict[str, list[str]]:
         if not files:
             problems[t.name].append("no files under environment/")
         problems[t.name] += banned_hits(files) + visible_file_hits(t) + evaluator_files(files)
-        problems[t.name] += overlap_problems(t, files) + dockerfile_problems(t)
+        problems[t.name] += overlap_problems(t, files) + dockerfile_problems(t) + toml_id_problems(t)
     by_name = {t.name: t for t in tasks}
     for pos, neg in twin_pairs(root, by_name, problems):
-        for p in twin_problems(by_name[pos], by_name[neg]) + toml_twin_problems(by_name[pos], by_name[neg]):
+        a, b = by_name[pos], by_name[neg]
+        for p in twin_problems(a, b) + toml_twin_problems(a, b) + instruction_twin_problems(a, b):
             problems[pos].append(p)
             problems[neg].append(p)
     return problems

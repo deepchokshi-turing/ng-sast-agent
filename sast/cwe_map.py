@@ -39,8 +39,8 @@ mapped secondary CWE, so this choice changes no finding today.)
 When a tool gives its CWEs with no primary (CodeQL's ``external/cwe`` tags, which
 CodeQL lists in numeric order, and SonarQube's ``cwe`` facet, an unordered set),
 :func:`decide_unordered` decides. Unmapped CWEs are ignored. A generic CWE
-(:data:`GENERIC_CWES`: 200, 284, 668, the abstract class and pillar entries
-that more specific CWEs refine) decides only when no specific mapped CWE is in
+(:data:`GENERIC_CWES`: 200, 284 and 668, a hand-picked subset of the
+abstract class and pillar entries in the table, not all of them) decides only when no specific mapped CWE is in
 the set. If the deciding CWEs all fall in one family, that family is reported.
 If they fall in more than one, the result is dropped as ambiguous and counted.
 With no mapped CWE the result is unmapped and not reported. The answer never
@@ -126,12 +126,19 @@ SID_HIGH = "LLM02.SID.HIGH"
 SID_MEDIUM = "LLM02.SID.MEDIUM"
 EA_FUNCTIONALITY = "LLM03.EA.FUNCTIONALITY"
 EA_PERMISSIONS = "LLM03.EA.PERMISSIONS"
+#: No CWE maps here (see the module docstring). Only a tool that names the task
+#: ruleId itself (the Claude review in scoped mode) reports it.
+EA_AUTONOMY = "LLM03.EA.AUTONOMY"
+
+#: Every ruleId of the task's output profile.
+TASK_RULES = (SID_MEDIUM, SID_HIGH, EA_FUNCTIONALITY, EA_PERMISSIONS, EA_AUTONOMY)
 
 RULE_DESCRIPTIONS = {
     SID_HIGH: "Sensitive data can reach an unauthorised party across a trust boundary",
     SID_MEDIUM: "Sensitive data can reach model-visible or other unprotected state",
     EA_FUNCTIONALITY: "A tool or code path can do more than its task requires",
     EA_PERMISSIONS: "Privilege or permission scope exceeds what the operation requires",
+    EA_AUTONOMY: "A model decision can trigger a high-impact action with no independent gate",
 }
 
 # CWE -> (ruleId, why). One entry per CWE; a CWE is never on two sides.
@@ -187,6 +194,10 @@ CWE_MAP: dict[str, tuple[str, str]] = {
 
 #: Abstract CWE entries (MITRE class or pillar) that more specific CWEs refine.
 #: In an unordered set they decide only when no specific mapped CWE is present.
+#: This is a hand-picked subset, not every class-level entry in the table:
+#: 862, 863, 285 and 732 are class-level too but are not listed, so for example
+#: {284, 250} decides EA.PERMISSIONS while {862, 250} stays ambiguous. The set is
+#: part of cwe-map-5 and is frozen with it.
 GENERIC_CWES = frozenset({"CWE-200", "CWE-284", "CWE-668"})
 
 #: CWEs left out of LLM02 on purpose (cwe-map-2) because they are not a flow to
@@ -268,6 +279,19 @@ def decide_unordered(cwes) -> tuple[str, str | None, tuple[str, ...]]:
 
 #: CWEs whose definition is data leaving its authorisation or trust boundary.
 BOUNDARY_CWES = frozenset({"CWE-201", "CWE-918", "CWE-532", "CWE-359"})
+
+
+def family_rule(family: str, cwes: list[str] | tuple[str, ...]) -> str:
+    """The ruleId for a result whose family is already decided.
+
+    ``family`` is what :func:`rule_for` gave (``SID_HIGH`` stands for the whole
+    LLM02 family). For LLM02 the CWEs choose HIGH or MEDIUM as in
+    :func:`task_rule`, other families are returned as they are. Used for merged
+    results, whose combined CWE list may no longer give a family on its own.
+    """
+    if family != SID_HIGH:
+        return family
+    return SID_HIGH if BOUNDARY_CWES.intersection(cwes) else SID_MEDIUM
 
 
 def task_rule(cwes: list[str] | tuple[str, ...]) -> str | None:

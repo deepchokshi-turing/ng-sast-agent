@@ -133,6 +133,13 @@ def tail(text, limit=TAIL_CHARS):
     return text if len(text) <= limit else "[... {} characters cut ...]".format(len(text) - limit) + text[-limit:]
 
 
+def scrub(text, secret):
+    """``text`` with every copy of ``secret`` replaced. Done on the whole text
+    before any ``tail``: a copy cut in two at the cut point would not match."""
+    text = text or ""
+    return text.replace(secret, "***") if secret else text
+
+
 def sha256_text(text):
     return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
 
@@ -155,14 +162,26 @@ def read_repo_file(repo, path):
     return "text", data.decode("utf-8", "replace")
 
 
+def text_lines(text):
+    """The lines of ``text`` as git and finding line numbers count them: split
+    on "\\n" only (``str.splitlines`` also splits on \\f, \\v, U+2028 and others,
+    which would shift every line number below them). A final "\\n" ends the
+    last line, it does not start an empty one."""
+    lines = text.split("\n")
+    if lines[-1] == "":
+        lines.pop()
+    return lines
+
+
 def file_section(path, text):
     """One file of a ``git diff`` against an empty base."""
-    lines = text.splitlines()
+    lines = text_lines(text)
     head = "diff --git a/{0} b/{0}\nnew file mode 100644\n--- /dev/null\n+++ b/{0}\n".format(path)
     if not lines:
         return head
-    body = "".join("+" + line + "\n" for line in lines)
-    if not text.endswith(("\n", "\r")):
+    # A CRLF file's lines go in without their "\r", as before.
+    body = "".join("+" + (line[:-1] if line.endswith("\r") else line) + "\n" for line in lines)
+    if not text.endswith("\n"):
         body += "\\ No newline at end of file\n"
     return head + "@@ -0,0 +1,{} @@\n".format(len(lines)) + body
 
@@ -185,7 +204,7 @@ def synthesise_pr(repo, files):
         if kind != "text":
             record["skipped_binary" if kind == "binary" else "missing"].append(path)
             continue
-        record["line_counts"][path] = len(text.splitlines())
+        record["line_counts"][path] = len(text_lines(text))
         section = file_section(path, text)
         if "@generated" in section:
             record["skipped_generated"].append(path)
@@ -220,6 +239,8 @@ def cli_settings(keyfile, home, cli_auth):
     # print mode denies reads there anyway. These rules say so explicitly.
     for folder in (os.path.dirname(keyfile), home):
         deny.append("Read(/{}/**)".format(folder.rstrip("/")))
+    # With a subscription token the token is in the CLI's own environment (/proc/<pid>/environ).
+    deny.append("Read(//proc/**)")
     settings = {"permissions": {"deny": deny}}
     if cli_auth == "api_key_helper":
         settings["apiKeyHelper"] = "cat {}".format(shlex.quote(keyfile))
@@ -326,9 +347,23 @@ def cli_environment(home, key, cli_auth, path_prefix):
     return env
 
 
-def auth_failure(stdout, stderr):
-    """A short reason when the CLI's output says it refused the credential, else None."""
-    text = "{}\n{}".format(stdout or "", stderr or "").lower()
+def auth_failure(stdout, stderr, parse_json=None):
+    """A short reason when the CLI says it refused the credential, else None.
+
+    Only the CLI's own words are searched: stderr, and the final result's text
+    when that result is an error. With no parseable result, the stdout lines
+    that are not JSON messages are searched instead. The model's text and the
+    tool results (which can quote the repository) are never searched, so a file
+    saying "please run /login" cannot stop a run.
+    """
+    stdout = stdout or ""
+    texts = [stderr or ""]
+    wrapper = result_message(stdout, parse_json or (lambda text, what: (False, None)))
+    if wrapper is None:
+        texts += [line for line in stdout.splitlines() if not line.lstrip().startswith("{")]
+    elif wrapper.get("is_error") and isinstance(wrapper.get("result"), str):
+        texts.append(wrapper["result"])
+    text = "\n".join(texts).lower()
     for marker in AUTH_FAILURE_MARKERS:
         if marker in text:
             return marker
@@ -477,13 +512,14 @@ def judge_attempt(code, stdout, parse_json):
 
 
 def run_review(argv, prompt_for, cwd, env, attempts, cli_deadline, parse_json, sleep=time.sleep,
-               min_attempt_sec=MIN_ATTEMPT_SEC, check_init_for=None, record=None, refused=None):
+               min_attempt_sec=MIN_ATTEMPT_SEC, check_init_for=None, record=None, refused=None, secret=None):
     """Run the CLI until it gives a usable review. Returns (review, record).
 
     ``prompt_for(include_diff)`` builds the prompt. ``check_init_for(init)``
     vets the CLI's init message (see ``check_init``). ``refused`` is a
     (code, message) pair: a failed attempt whose output says the credential
-    was refused raises it at once instead of retrying. Raises DriverError when
+    was refused raises it at once instead of retrying. ``secret`` is scrubbed
+    from the CLI's whole output before any of it is kept. Raises DriverError when
     no attempt gives a usable review. ``record`` (filled as it goes, so it is
     complete after a failure too) is returned with the review.
     """
@@ -501,6 +537,7 @@ def run_review(argv, prompt_for, cwd, env, attempts, cli_deadline, parse_json, s
             raise DriverError("deadline", "the review's time ran out before a usable CLI result ({} attempt(s), last: {})"
                               .format(len(record["attempts"]), last_reason))
         code, out, err, seconds, init, abort = run_cli_once(argv, prompt, cwd, env, left, check_init_for)
+        out, err = scrub(out, secret), scrub(err, secret)
         if init is not None:
             record["init"] = init_summary(init)
         if abort:
@@ -517,7 +554,7 @@ def run_review(argv, prompt_for, cwd, env, attempts, cli_deadline, parse_json, s
             entry["stdout_tail"] = tail(out, 1500)
         record["attempts"].append(entry)
         if refused and judged["outcome"] in ("retry", "fatal"):
-            marker = auth_failure(out, err)
+            marker = auth_failure(out, err, parse_json)
             if marker:
                 entry["auth_failure"] = marker
                 raise DriverError(refused[0], "{} (the CLI said {!r})".format(refused[1], marker))
@@ -669,17 +706,51 @@ def make_api_client_class(base, usage, calls, deadline, check_model):
 
     - checks API access with ``check_model`` (the filter's own model) instead of
       the hard-coded claude-3-5-haiku-20241022, which may be retired;
-    - never starts a call after the deadline, and shortens the per-call
-      timeout to the time left;
+    - makes one request per upstream attempt: the SDK client is rebuilt with
+      ``max_retries=0`` (upstream leaves the SDK's own 2 retries under its 4
+      attempts);
+    - checks the deadline before every attempt, shortens each attempt's
+      timeout to the time left, and stops with DriverError "deadline" when the
+      time runs out, instead of running on until ``timeout -k`` kills the
+      driver;
     - records every finding analysis, so a failed one can be turned into an
       error (upstream keeps such a finding at confidence 10);
     - counts tokens.
     """
 
+    def out_of_time(what):
+        done = len([c for c in calls if c.get("kind") == "finding" and c.get("ok")])
+        return DriverError("deadline", "the review's time ran out in the false-positive filter ({}; {} finding(s) "
+                           "analysed)".format(what, done))
+
     class BenchClaudeAPIClient(base):
         def __init__(self, *args, **kwargs):
             base.__init__(self, *args, **kwargs)
+            self.client = type(self.client)(api_key=self.api_key, max_retries=0)
+            self.ran_out = None
             wrap_create(self.client, usage)
+
+        def call_with_retry(self, *args, **kwargs):
+            # Upstream's attempts, one at a time, each started only with time
+            # left. Upstream's base.call_with_retry catches every exception, so
+            # running out is flagged here and raised by analyze_single_finding.
+            attempts = self.max_retries + 1
+            last = "no attempt was started"
+            for attempt in range(attempts):
+                left = deadline - time.monotonic()
+                if left < MIN_FILTER_CALL_SEC:
+                    self.ran_out = "{} of {} attempt(s) made, last error: {}".format(attempt, attempts, last)
+                    return False, "", self.ran_out
+                self.timeout_seconds = int(min(FILTER_CALL_TIMEOUT_SEC, left - 5))
+                saved, self.max_retries = self.max_retries, 0
+                try:
+                    ok, text, error = base.call_with_retry(self, *args, **kwargs)
+                finally:
+                    self.max_retries = saved
+                if ok:
+                    return ok, text, error
+                last = error
+            return False, "", "API call failed after {} attempts, last: {}".format(attempts, last)
 
         def validate_api_access(self):
             try:
@@ -699,11 +770,16 @@ def make_api_client_class(base, usage, calls, deadline, check_model):
             if left < MIN_FILTER_CALL_SEC:
                 entry.update(ok=False, error="not started: the review's time ran out")
                 calls.append(entry)
-                return False, {}, entry["error"]
-            self.timeout_seconds = int(min(FILTER_CALL_TIMEOUT_SEC, left - 5))
+                raise out_of_time("finding {}:{} not started".format(finding.get("file"), finding.get("line")))
+            self.ran_out = None
             started = time.monotonic()
             ok, result, error = base.analyze_single_finding(self, finding, pr_context, custom_filtering_instructions)
             entry.update(ok=bool(ok and result), seconds=round(time.monotonic() - started, 1))
+            if self.ran_out:
+                entry["error"] = "stopped: the review's time ran out ({})".format(self.ran_out)
+                calls.append(entry)
+                raise out_of_time("finding {}:{}: {}".format(finding.get("file"), finding.get("line"),
+                                                             tail(self.ran_out, 300)))
             if entry["ok"]:
                 entry.update(keep=result.get("keep_finding"), confidence=result.get("confidence_score"))
             else:
@@ -715,10 +791,12 @@ def make_api_client_class(base, usage, calls, deadline, check_model):
 
 
 def run_filter(findings_filter_module, client_module, filter_mode, key, model, instructions, findings, usage,
-               deadline):
-    """Upstream FindingsFilter, with failures made visible. Returns (kept, excluded, record)."""
+               deadline, record=None):
+    """Upstream FindingsFilter, with failures made visible. Returns (kept, excluded, record).
+    ``record`` is filled as it goes, so it is complete after a failure too."""
     calls = []
-    record = {"mode": filter_mode, "model": model if filter_mode == "claude" else None, "calls": calls}
+    record = {} if record is None else record
+    record.update({"mode": filter_mode, "model": model if filter_mode == "claude" else None, "calls": calls})
     if filter_mode == "claude":
         cls = make_api_client_class(client_module.ClaudeAPIClient, usage, calls, deadline, model)
         # FindingsFilter builds its client from this module-level name.
@@ -746,7 +824,7 @@ def run_filter(findings_filter_module, client_module, filter_mode, key, model, i
             first = failed[0].get("error") if failed else (silent[0].get("_filter_metadata") or {}).get("justification")
             raise DriverError("filter_call_failed", "{} of {} per-finding filter call(s) failed (upstream would keep "
                               "those findings at confidence 10). First: {}".format(
-                                  max(len(failed), len(silent)), len(findings), tail(str(first), 400)))
+                                  max(len(failed), len(silent)), len(findings), tail(scrub(str(first), key), 400)))
     return kept, excluded, record
 
 
@@ -902,17 +980,17 @@ def execute(request, key, keyfile, document, started):
                                     record=cli_record,
                                     refused=("cli_oauth_refused", "Claude Code refused the subscription token. Run "
                                              "`claude setup-token` again and set CLAUDE_CODE_OAUTH_TOKEN")
-                                    if oauth else None)
+                                    if oauth else None, secret=key)
     document["review"] = review
     document["review_summary"] = check_review(review, len(pr_data["files"]))
 
     # 4. The false-positive filter.
     findings = list(review.get("findings") or [])
     # A subscription token is never passed to the filter (it runs the regex rules only).
-    kept, excluded, filter_record = run_filter(findings_filter, claude_api_client, filter_mode,
-                                               None if oauth else key, filter_model,
-                                               request.get("filter_instructions"), findings, usage, deadline)
-    document["filter"] = filter_record
+    filter_record = document["filter"] = {}
+    kept, excluded, _ = run_filter(findings_filter, claude_api_client, filter_mode, None if oauth else key,
+                                   filter_model, request.get("filter_instructions"), findings, usage, deadline,
+                                   record=filter_record)
     document["kept"] = kept
     document["excluded"] = excluded
     document["api_calls"] = usage.calls
@@ -949,12 +1027,10 @@ def main(argv=None):
         document["error"] = {"code": exc.code, "message": exc.message}
     except Exception as exc:
         document["error"] = {"code": "driver_crash", "message": "{}: {}".format(type(exc).__name__, exc),
-                             "traceback": tail(traceback.format_exc(), 3000)}
+                             "traceback": tail(scrub(traceback.format_exc(), key), 3000)}
         code = 4
     document["seconds"] = round(time.monotonic() - started, 1)
-    text = json.dumps(document, indent=1, default=str)
-    if key:
-        text = text.replace(key, "***")
+    text = scrub(json.dumps(document, indent=1, default=str), key)
     old = os.umask(0o077)
     try:
         with open(args.out, "w") as f:

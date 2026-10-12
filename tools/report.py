@@ -48,7 +48,18 @@ these views:
   fields the grader reads (``codeFlows`` for path, top-level
   ``properties.controlStatus`` or ``residualRisk`` for controls,
   ``properties.recommendations`` for recommendations), the measurement is
-  reported as not supported by the tool instead of 0.
+  reported as not supported by the tool instead of 0. That needs at least one
+  matched result on a scored positive (the grader reads the fields on matched
+  results only): with none, the measurement is "n/a (no results)", since a tool
+  that matched nothing shows neither that it can nor that it cannot fill them.
+- **Versions**: the agent version, CWE map, heuristics and Claude category map
+  the results were graded under (agent metadata, else the SARIF driver
+  properties), and the task set's git commit and whether its work tree is dirty
+  (``--tasks`` in a git work tree, skipped quietly otherwise). More than one
+  value of a field across the trials is a warning.
+- **Claude review runs**: the mode (stock or scoped), the auth and the results
+  label. Stock-mode scores depend on the frozen category-to-CWE map, since
+  categories outside it are dropped, and the report says how many were.
 
 A task's role (positive or negative) and family come from, in order: the
 private variant map (``--variants``, default ``<tasks>/VARIANTS.json``, of the
@@ -82,7 +93,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 
 RISKS = {"SID": "sensitive_information_disclosure", "EA": "excessive_agency"}
@@ -96,6 +109,11 @@ NOT_SCORED = ("errored", "sarif_missing", "grader_error", "graded_as_old_role")
 #: SARIF fields the grader reads for measurements 2 to 4 (grade.py score_match).
 SUPPORT_FIELDS = {"path": ("codeFlows",), "controls": ("controlStatus", "residualRisk"),
                   "recommendations": ("recommendations",)}
+#: Versions every report states: field -> the SARIF driver property that also records it.
+VERSION_FIELDS = {"agent_version": None, "cwe_map": "cweMap", "heuristics": "heuristics",
+                  "category_map": "categoryMap"}
+VERSION_LABELS = {"agent_version": "agent version", "cwe_map": "CWE map", "heuristics": "heuristics",
+                  "category_map": "Claude category map"}
 
 
 # ---- inputs ------------------------------------------------------------------------------
@@ -150,6 +168,11 @@ def parse_task_name(task: str) -> tuple[str, str]:
     if len(parts) >= 3 and parts[0] == "task" and parts[-1] in ROLES:
         return "_".join(parts[1:-1]), parts[-1]
     return name, ""
+
+
+def strip_trial_suffix(name: str) -> str:
+    """task_1496ad2e__itb9wZY -> task_1496ad2e (Harbor names a trial folder <task>__<suffix>)."""
+    return name.rsplit("__", 1)[0] if "__" in name else name
 
 
 def family_and_role(task: str, truth: dict | None, variants: dict, rewards: dict) -> tuple[str, str, str]:
@@ -321,7 +344,8 @@ def rows_for(job: Path, tasks_dir: Path | None, variants: dict | None = None) ->
         exception = trial.get("exception_info") or {}
         scanned = truth is not None and meta.get("status") == "ok"
         gt_n, near, near_cwe = ground_truth_hits(meta.get("findings_compact") or [], truth) if scanned else (None,) * 3
-        row = base_row(str(trial.get("task_name") or result_file.parent.name).split("/")[-1], rewards,
+        row = base_row(str(trial.get("task_name") or strip_trial_suffix(result_file.parent.name)).split("/")[-1],
+                       rewards,
                        "errored" if exception else meta.get("status", "?"),
                        (exception.get("exception_message") or meta.get("error") or "")[:120],
                        truth, variants)
@@ -337,6 +361,7 @@ def rows_for(job: Path, tasks_dir: Path | None, variants: dict | None = None) ->
             "setup_s": (meta.get("install") or {}).get("setup_seconds"),
             "has_truth": truth is not None,
             "sarif_fields": sarif_fields(result_file.parent),
+            "run_info": run_info(meta, result_file.parent),
         })
         out.append(row)
     return out
@@ -361,9 +386,14 @@ def rows_from_reward_files(files: list[Path], tasks_dir: Path | None = None, var
     rows = []
     for f in files:
         trial_dir = f.parent.parent if f.parent.name == "verifier" else f.parent
-        task = trial_dir.name
-        truth = ground_truth({"task_name": task}, tasks_dir, variants) if tasks_dir is not None else None
+        # The task name from the trial's result.json, else the folder name without Harbor's __<suffix>,
+        # so the variant map and the task folders are looked up under the task's own name.
+        trial = read_json_file(trial_dir / "result.json")
+        trial = trial if isinstance(trial, dict) else {}
+        task = str(trial.get("task_name") or strip_trial_suffix(trial_dir.name)).split("/")[-1]
+        truth = ground_truth({**trial, "task_name": task}, tasks_dir, variants) if tasks_dir is not None else None
         row = base_row(task, json.loads(f.read_text(encoding="utf-8")), truth=truth, variants=variants)
+        row["trial"] = trial_dir.name
         meta = _trial_metadata(f)
         if meta:
             row["tool"] = meta.get("tool") or meta.get("agent")
@@ -372,8 +402,109 @@ def rows_from_reward_files(files: list[Path], tasks_dir: Path | None = None, var
                 row["status"] = meta["status"]
         row["has_truth"] = truth is not None
         row["sarif_fields"] = sarif_fields(trial_dir)
+        row["run_info"] = run_info(meta, trial_dir)
         rows.append(row)
     return rows
+
+
+SAST_ARTIFACTS = Path("artifacts") / "logs" / "artifacts" / "sast"
+
+
+def sarif_driver_properties(trial_dir: Path) -> dict:
+    """properties of the graded SARIF's tool driver (cweMap, heuristics, categoryMap, mode, ...), or {}."""
+    for candidate in (trial_dir / "agent" / "findings.sarif", trial_dir / SAST_ARTIFACTS / "findings.sarif"):
+        data = read_json_file(candidate)
+        if not isinstance(data, dict):
+            continue
+        for run in data.get("runs") or []:
+            props = (((run or {}).get("tool") or {}).get("driver") or {}).get("properties")
+            if isinstance(props, dict):
+                return props
+        return {}
+    return {}
+
+
+def _json_object(path: Path) -> dict:
+    data = read_json_file(path)
+    return data if isinstance(data, dict) else {}
+
+
+def run_info(meta: dict | None, trial_dir: Path | None = None) -> dict:
+    """The versions a trial was graded under and, for a Claude review run, its mode, auth and how many
+    findings the category map dropped. Read from the agent metadata, else the metadata.json and
+    claude_review.json the agent saved, else the graded SARIF's driver properties."""
+    meta = dict(meta or {})
+    review_file: dict = {}
+    driver: dict = {}
+    if trial_dir is not None:
+        if not all(meta.get(k) for k in ("agent_version", "cwe_map", "heuristics")):
+            meta = {**_json_object(trial_dir / SAST_ARTIFACTS / "metadata.json"), **meta}
+        review_file = _json_object(trial_dir / SAST_ARTIFACTS / "claude_review.json")
+        driver = sarif_driver_properties(trial_dir)
+    review = meta.get("claude_review") if isinstance(meta.get("claude_review"), dict) else {}
+    info: dict = {}
+    for field, prop in VERSION_FIELDS.items():
+        value = meta.get(field) or review.get(field) or (driver.get(prop) if prop else None)
+        info[field] = str(value) if value else None
+    if not (review or review_file or info["category_map"]):
+        info["claude"] = None
+        return info
+    options = review.get("request_options") or review_file.get("request_options") or {}
+    mode = meta.get("mode") or review.get("mode") or options.get("mode") or driver.get("mode")
+    by_category = meta.get("unmapped_by_category")
+    unmapped = meta.get("findings_unmapped")
+    if isinstance(by_category, dict) and by_category:
+        dropped = sum(int(v or 0) for v in by_category.values())
+    elif isinstance(by_category, dict) or isinstance(unmapped, int):
+        dropped = int(unmapped or 0)
+    else:
+        dropped = None
+    info["claude"] = {
+        "mode": str(mode) if mode else None,
+        "auth": (meta.get("auth") or review.get("auth") or review_file.get("auth") or options.get("auth")
+                 or driver.get("auth")),
+        "results_label": review.get("results_label") or review_file.get("results_label"),
+        "filter_mode": meta.get("filter_mode") or review.get("filter_mode") or review_file.get("filter_mode"),
+        "model": meta.get("model") or review.get("model") or driver.get("model"),
+        "unmapped_by_category": dict(by_category) if isinstance(by_category, dict) else None,
+        "dropped_unmapped": dropped,
+    }
+    return info
+
+
+def _git(folder: str, *args: str) -> str | None:
+    try:
+        proc = subprocess.run(["git", "-C", folder, *args], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def task_set_state(tasks_dir: Path | None) -> dict | None:
+    """The git commit of the task folder and whether its work tree is dirty, or None when the folder
+    is not in a git work tree or git is not available."""
+    if tasks_dir is None or not Path(tasks_dir).is_dir():
+        return None
+    folder = str(Path(tasks_dir).resolve())
+    head = _git(folder, "rev-parse", "HEAD")
+    if not head:
+        return None
+    status = _git(folder, "status", "--porcelain", "--", ".")
+    changed = [line for line in (status or "").splitlines() if line.strip()]
+    return {"commit": head.strip(), "dirty": bool(changed) if status is not None else None,
+            "changed_files": len(changed) if status is not None else None}
+
+
+def task_set_text(state: dict | None) -> str:
+    if not state:
+        return "not recorded (no --tasks folder in a git work tree, or git is not available)"
+    if state["dirty"] is None:
+        tree = "work tree state unknown"
+    elif state["dirty"]:
+        tree = f"work tree dirty, {state['changed_files']} changed file(s)"
+    else:
+        tree = "work tree clean"
+    return f"git commit {state['commit'][:12]} ({tree})"
 
 
 # ---- aggregation ---------------------------------------------------------------------
@@ -471,15 +602,29 @@ def risk_table(rows: list[dict], pred: str = "pred") -> dict:
 
 
 def measurement_support(rows: list[dict]) -> dict:
-    """Per measurement 2 to 4: True when a scored result carries a field the grader reads,
-    False when the SARIFs were readable and none did, None when no SARIF could be read."""
+    """Per measurement 2 to 4: True when a scored result carries a field the grader reads, False
+    when the SARIFs were readable, a scored positive had a matched result and no result carried it,
+    None when that cannot be told: no SARIF could be read (``undetermined`` "no_sarif") or no
+    scored positive had a matched result (``undetermined`` "no_results")."""
     known = [r["sarif_fields"] for r in usable(rows) if r.get("sarif_fields") is not None]
+    # The grader reads the fields on matched results only, so a tool that matched nothing gives
+    # no evidence either way.
+    matched = sum(r["tp"] or 0 for r in by_role(rows, "positive"))
     out = {}
+    undetermined = {}
     for measure, fields in SUPPORT_FIELDS.items():
         if not known:
             out[measure] = None
+            undetermined[measure] = "no_sarif"
+        elif any(k.get(f, 0) for k in known for f in fields):
+            out[measure] = True
+        elif not matched:
+            out[measure] = None
+            undetermined[measure] = "no_results"
         else:
-            out[measure] = any(k.get(f, 0) for k in known for f in fields)
+            out[measure] = False
+    out["undetermined"] = undetermined
+    out["matched_results"] = matched
     out["results_with"] = {f: sum(k.get(f, 0) for k in known)
                            for f in ("codeFlows", "controlStatus", "residualRisk", "recommendations")}
     out["sarifs_read"] = len(known)
@@ -491,11 +636,12 @@ def measurement_means(rows: list[dict]) -> dict:
     support = measurement_support(rows)
     out = {"tasks": len(positives)}
     for m in MEASURES:
-        if support.get(m) is False:
+        if support.get(m) is False or support["undetermined"].get(m) == "no_results":
             out[m] = None
         else:
             out[m] = sum(r[m] or 0 for r in positives) / len(positives) if positives else None
     out["supported"] = {m: support[m] for m in SUPPORT_FIELDS}
+    out["no_results"] = [m for m in SUPPORT_FIELDS if support["undetermined"].get(m) == "no_results"]
     return out
 
 
@@ -508,6 +654,13 @@ def pooled_detection(rows: list[dict]) -> dict | None:
     fp = sum(r["fp"] or 0 for r in positives)
     fn = sum(r["fn"] or 0 for r in positives)
     gt = sum(r["gt"] or 0 for r in positives)
+    # A task run more than once (harbor -k N) adds its findings once per run. gt_distinct counts them once.
+    runs = Counter(r["task"] for r in positives)
+    gt_by_task: dict = {}
+    for r in positives:
+        if gt_by_task.get(r["task"]) is None:
+            gt_by_task[r["task"]] = r["gt"]
+    gt_distinct = sum(v or 0 for v in gt_by_task.values())
     precision = tp / (tp + fp) if tp + fp else None  # undefined with no result
     recall = tp / gt if gt else (0.0 if positives else None)
     if precision is None or recall is None:
@@ -515,6 +668,7 @@ def pooled_detection(rows: list[dict]) -> dict | None:
     else:
         f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
     return {"tasks": len(positives), "gt": gt, "tp": tp, "fp": fp, "fn": fn,
+            "distinct_tasks": len(runs), "gt_distinct": gt_distinct, "runs_per_task": sorted(set(runs.values())),
             "precision": precision, "recall": recall, "F1": f1,
             "tasks_not_scored": len(skipped),
             "gt_not_scored": sum(r["gt"] or 0 for r in skipped),
@@ -553,6 +707,84 @@ def taxonomy_coverage(rows: list[dict]) -> dict:
     known = bool(tasks)
     return {"known": known, "tasks": len(tasks), "findings_by_rule": findings, "contrasts_by_rule": contrasts,
             "missing": [k for k in TAXONOMY if not findings.get(k)] if known else None}
+
+
+def run_versions(rows: list[dict]) -> dict:
+    """Over every trial: each version field's values and counts, the fields with more than one
+    value (``mixed``), and the Claude review runs' mode, auth, results label and dropped categories."""
+    infos = [r.get("run_info") or {} for r in rows]
+    fields = {}
+    for field in VERSION_FIELDS:
+        fields[field] = dict(Counter(i[field] for i in infos if i.get(field)).most_common())
+    claude_infos = [i["claude"] for i in infos if i.get("claude")]
+    claude = None
+    if claude_infos:
+        dropped_known = [c["dropped_unmapped"] for c in claude_infos if c.get("dropped_unmapped") is not None]
+        by_category: Counter = Counter()
+        for c in claude_infos:
+            by_category.update(c.get("unmapped_by_category") or {})
+        claude = {
+            "trials": len(claude_infos),
+            **{key: dict(Counter(str(c[key]) for c in claude_infos if c.get(key)).most_common())
+               for key in ("mode", "auth", "results_label", "filter_mode", "model")},
+            "dropped_unmapped": sum(dropped_known) if dropped_known else None,
+            "dropped_unknown_trials": len(claude_infos) - len(dropped_known),
+            "unmapped_by_category": dict(by_category.most_common()),
+        }
+    return {"fields": fields, "mixed": [f for f, v in fields.items() if len(v) > 1], "claude": claude}
+
+
+def counted(values: dict) -> str:
+    """{"a": 3} -> "a", {"a": 3, "b": 1} -> "a (3), b (1)", {} -> "not recorded"."""
+    if not values:
+        return "not recorded"
+    if len(values) == 1:
+        return next(iter(values))
+    return ", ".join(f"{k} ({v})" for k, v in values.items())
+
+
+def versions_text(versions: dict) -> str:
+    f = versions["fields"]
+    if not any(f.values()):
+        return "versions not recorded (no agent metadata or SARIF driver properties)"
+    return "graded under " + ", ".join(f"{VERSION_LABELS[k]} {counted(f[k])}" for k in VERSION_FIELDS
+                                       if k != "category_map" or f[k])
+
+
+def mixed_versions_warning(versions: dict, where: str = "the trials") -> str | None:
+    if not versions["mixed"]:
+        return None
+    parts = [f"{VERSION_LABELS[k]} {counted(versions['fields'][k])}" for k in versions["mixed"]]
+    return (f"mixed versions across {where}: " + ", ".join(parts) + ". Results graded under different "
+            "versions are not directly comparable.")
+
+
+def stock_mode_caveat(versions: dict) -> str | None:
+    """The limitation every report that quotes stock-mode numbers states, or None."""
+    claude = versions.get("claude")
+    if not claude or "stock" not in claude["mode"]:
+        return None
+    cmap = counted(versions["fields"].get("category_map") or {})
+    if claude["dropped_unmapped"] is None:
+        dropped = "the number dropped is not recorded"
+    else:
+        dropped = f"{claude['dropped_unmapped']} finding(s) were dropped this way"
+        if claude["dropped_unknown_trials"]:
+            dropped += f" (not recorded for {claude['dropped_unknown_trials']} trial(s))"
+        top = list(claude["unmapped_by_category"].items())[:5]
+        if top:
+            dropped += " (" + ", ".join(f"{k} x{v}" for k, v in top) + ")"
+    return ("stock mode: the upstream reviewer reports a free-text category, which is mapped to a CWE by exact "
+            f"lookup in the frozen category map {cmap}. Categories outside the map are dropped before grading, "
+            f"and {dropped}. Stock-mode scores therefore measure the category map as well as the reviewer.")
+
+
+def claude_text(versions: dict) -> str | None:
+    claude = versions.get("claude")
+    if not claude:
+        return None
+    return (f"Claude review ({claude['trials']} trials): mode {counted(claude['mode'])}, auth "
+            f"{counted(claude['auth'])}, results {counted(claude['results_label'])}.")
 
 
 def _emitted(row: dict) -> int | None:
@@ -594,13 +826,15 @@ NO_RESULTS_BADGE = "no results, scores not meaningful"
 
 NOT_SUPPORTED = "not supported by this tool"
 
+NO_RESULTS_MEASURE = "n/a (no results)"
+
 HARBOR_MEAN_WARNING = ("Harbor's job-level means (result.json) average positives and negatives together, "
                        "for the reward and for every sub-score, so such a mean is not a score: an empty SARIF "
                        "earns 1.0 on every negative. Quote the pooled detection, category and per-role figures "
                        "instead.")
 
 
-def summarise(rows: list[dict]) -> dict:
+def summarise(rows: list[dict], tasks_dir: Path | None = None) -> dict:
     scored = usable(rows)
     emitted = emitted_by_tool(rows)
     negatives = by_role(rows, "negative")
@@ -622,6 +856,8 @@ def summarise(rows: list[dict]) -> dict:
         "measurements_positive_tasks": measurement_means(rows),
         "measurement_support": measurement_support(rows),
         "taxonomy_coverage": taxonomy_coverage(rows),
+        "versions": run_versions(rows),
+        "task_set": task_set_state(tasks_dir),
     }
 
 
@@ -657,7 +893,33 @@ TRIAL_COLUMNS = ["task", "role", "status", "reward", "tp", "fp", "fn", "fp_out",
 def measure_text(m: dict, key: str) -> str:
     if m.get("supported", {}).get(key) is False:
         return NOT_SUPPORTED
+    if key in (m.get("no_results") or []):
+        return NO_RESULTS_MEASURE
     return fmt(m.get(key))
+
+
+def gt_text(det: dict) -> str:
+    """Ground-truth findings on scored positives, saying when repeated runs count a finding more than once."""
+    gt, distinct = det["gt"], det.get("gt_distinct", det["gt"])
+    if gt == distinct:
+        return str(gt)
+    runs = det.get("runs_per_task") or []
+    if len(runs) == 1:
+        return f"{gt} ({distinct} findings x {runs[0]} runs)"
+    return f"{gt} over all runs ({distinct} distinct findings)"
+
+
+def not_scored_text(det: dict) -> str:
+    """What recall leaves out on the positives that were not scored, including counts that are unknown."""
+    n, unknown = det["tasks_not_scored"], det.get("gt_not_scored_unknown", 0)
+    known = det["gt_not_scored"]
+    findings = f"{known} finding{'' if known == 1 else 's'}"
+    if unknown == n:
+        findings = "an unknown number of findings"
+    elif unknown:
+        findings += f" (and an unknown number on {unknown} of them, whose ground truth was not found)"
+    were = "positive that was" if n == 1 else "positives that were"
+    return f"recall leaves out {findings} on {n} {were} not scored"
 
 
 def render(rows: list[dict], summary: dict, table=text_table) -> str:
@@ -665,7 +927,17 @@ def render(rows: list[dict], summary: dict, table=text_table) -> str:
     for tool in summary["no_results_emitted"]:
         graded = summary["results_emitted_by_tool"][tool]["graded"]
         out.append("WARNING: " + NO_RESULTS_WARNING.format(tool=tool, graded=graded))
+    versions = summary.get("versions")
+    if versions:
+        for text in (mixed_versions_warning(versions), stock_mode_caveat(versions)):
+            if text:
+                out.append("WARNING: " + text)
     if out:
+        out.append("")
+    if versions:
+        out.append(versions_text(versions) + f", task set {task_set_text(summary.get('task_set'))}")
+        if claude_text(versions):
+            out.append(claude_text(versions))
         out.append("")
     display = [{**r, "role": r.get("role") or "unknown"} for r in rows]
     cols = [c for c in TRIAL_COLUMNS if any(c in r for r in rows)]
@@ -677,12 +949,11 @@ def render(rows: list[dict], summary: dict, table=text_table) -> str:
                    f"{', ' + r['error'] if r['error'] else ''})")
     det = summary["pooled_detection"]
     if det:
-        out.append(f"detection, pooled over {det['tasks']} scored positives ({det['gt']} ground-truth findings):")
+        out.append(f"detection, pooled over {det['tasks']} scored positives ({gt_text(det)} ground-truth findings):")
         out.append(f"  tp {det['tp']}  fp {det['fp']}  fn {det['fn']}  precision {fmt(det['precision']) or 'n/a'}  "
                    f"recall {fmt(det['recall']) or 'n/a'}  F1 {fmt(det['F1']) or 'n/a'}")
         if det["tasks_not_scored"]:
-            out.append(f"  recall leaves out {det['gt_not_scored']} findings on {det['tasks_not_scored']} "
-                       f"positives that were not scored")
+            out.append("  " + not_scored_text(det))
         with_meta = [r for r in by_role(rows, "positive") if r.get("near") is not None]
         if with_meta:
             gt_meta = sum(r["gt"] or 0 for r in with_meta)
@@ -762,7 +1033,7 @@ def main() -> None:
             nested = sorted(p for p in job.iterdir() if p.is_dir() and trial_results(p))
             job = nested[-1] if nested else job
         rows = rows_for(job, args.tasks, variants)
-    summary = summarise(rows)
+    summary = summarise(rows, args.tasks)
 
     if args.write:
         args.write.mkdir(parents=True, exist_ok=True)

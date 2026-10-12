@@ -24,9 +24,15 @@ both reports always agree). On top of them this script adds:
   grading_detail.json or no ground truth, trials that were not scored),
 - a scoreboard with one column per tool, the same rows in the Markdown and
   the HTML,
+- the versions every job was graded under (agent, CWE map, heuristics,
+  Claude category map) and the task set's git commit and work-tree state,
+  with a warning when they differ within or across jobs, and per Claude review
+  job its mode, auth and results label, with the stock-mode caveat (scores
+  depend on the frozen category map, and the findings it dropped are counted),
 - measurement 1 (risk types, strict and loose) and measurements 2 to 4 (path,
   controls, recommendations), each shown as "not supported by this tool" when
-  no graded result of the tool carries the SARIF field the grader reads,
+  the tool matched a finding and no graded result of it carries the SARIF
+  field the grader reads, and as "n/a (no results)" when it matched nothing,
 - OWASP category and risk-type tables side by side, with their denominators,
 - a task matrix (one row per task, grouped by family, every tool, with the
   runs of a repeated task summed up),
@@ -65,6 +71,7 @@ import report  # noqa: E402  (tools/report.py)
 
 fmt = report.fmt
 NOT_SUPPORTED = report.NOT_SUPPORTED
+NO_RESULTS_MEASURE = report.NO_RESULTS_MEASURE
 NO_RESULTS_BADGE = report.NO_RESULTS_BADGE
 
 
@@ -270,6 +277,7 @@ def measures_of(j: dict) -> dict:
         "near_cwe_recall": report.ratio(sum(r["near_cwe"] for r in with_meta), gt_meta) if with_meta else None,
         "path": m.get("path"), "controls": m.get("controls"), "recommendations": m.get("recommendations"),
         "supported": m.get("supported") or {},
+        "no_results": m.get("no_results") or [],
         "results_with": s["measurement_support"]["results_with"],
         "hits": len(j["hits"]), "hits_with_flow": sum(1 for h in j["hits"] if h.get("has_flow")),
         "negatives_clean": clean, "negatives": negatives,
@@ -280,7 +288,82 @@ def measures_of(j: dict) -> dict:
 def measure_value(j: dict, key: str) -> str:
     if j["measures"]["supported"].get(key) is False:
         return NOT_SUPPORTED
+    if key in (j["measures"].get("no_results") or []):
+        return NO_RESULTS_MEASURE
     return fmt(j["measures"][key]) or "n/a"
+
+
+# ---- versions --------------------------------------------------------------------------
+
+def versions_of(j: dict) -> dict:
+    return j["summary"].get("versions") or report.run_versions(j["rows"])
+
+
+def version_rows(jobs: list[dict]) -> list[list]:
+    """Versions and run configuration per tool, shared by the Markdown and the HTML."""
+    def field(name):
+        return lambda j: report.counted(versions_of(j)["fields"].get(name) or {})
+
+    def claude(key):
+        def get(j):
+            c = versions_of(j).get("claude")
+            return report.counted(c.get(key) or {}) if c else ""
+        return get
+
+    def dropped(j):
+        c = versions_of(j).get("claude")
+        if not c:
+            return ""
+        if c["dropped_unmapped"] is None:
+            return "not recorded"
+        top = ", ".join(f"{k} x{v}" for k, v in list(c["unmapped_by_category"].items())[:4])
+        unknown = f", not recorded for {c['dropped_unknown_trials']} trial(s)" if c["dropped_unknown_trials"] else ""
+        return f"{c['dropped_unmapped']}{' (' + top + ')' if top else ''}{unknown}"
+
+    rows = [("Agent version", field("agent_version")), ("CWE map", field("cwe_map")),
+            ("Heuristics", field("heuristics"))]
+    if any(versions_of(j).get("claude") or versions_of(j)["fields"].get("category_map") for j in jobs):
+        def category_map(j):
+            v = versions_of(j)
+            return field("category_map")(j) if v.get("claude") or v["fields"].get("category_map") else ""
+
+        rows += [("Claude category map", category_map), ("Claude review mode", claude("mode")),
+                 ("Claude auth", claude("auth")), ("Claude results label", claude("results_label")),
+                 ("Claude findings dropped, category not in the map", dropped)]
+    return [[label] + [fn(j) for j in jobs] for label, fn in rows]
+
+
+def version_warnings(jobs: list[dict]) -> list[str]:
+    """Mixed versions within a job, and across jobs (the agent version by its release, before the "+")."""
+    out = []
+    for j in jobs:
+        text = report.mixed_versions_warning(versions_of(j), f"the trials of {j['key']}")
+        if text:
+            out.append(text[0].upper() + text[1:])
+    for name in ("agent_version", "cwe_map", "heuristics", "category_map"):
+        values: dict = {}
+        for j in jobs:
+            for v in versions_of(j)["fields"].get(name) or {}:
+                v = v.split("+")[0] if name == "agent_version" else v
+                values.setdefault(v, []).append(j["key"])
+        if len(values) > 1:
+            label = "agent release" if name == "agent_version" else report.VERSION_LABELS[name]
+            parts = ", ".join(f"{v} ({', '.join(dict.fromkeys(keys))})" for v, keys in values.items())
+            out.append(f"Mixed {label} across jobs: {parts}. Results graded under different versions are not "
+                       "directly comparable.")
+    return out
+
+
+def task_set_warning(state: dict | None) -> str | None:
+    if state and state.get("dirty"):
+        return (f"The task set has uncommitted changes ({state['changed_files']} changed file(s) on top of commit "
+                f"{state['commit'][:12]}), so the ground truth read now may differ from any recorded state.")
+    return None
+
+
+def stock_mode_note(j: dict) -> str | None:
+    text = report.stock_mode_caveat(versions_of(j))
+    return f"{j['key']} ran in {text[0].lower() + text[1:]}" if text else None
 
 
 # ---- dataset ---------------------------------------------------------------------------
@@ -324,8 +407,12 @@ def dataset(jobs: list[dict]) -> dict:
     }
 
 
-def warnings_of(jobs: list[dict], data: dict, skipped: list[str]) -> list[str]:
+def warnings_of(jobs: list[dict], data: dict, skipped: list[str], task_set: dict | None = None) -> list[str]:
     out = [f"No Harbor trials were found under {name}, so it was left out of the report." for name in skipped]
+    out += version_warnings(jobs)
+    dirty = task_set_warning(task_set)
+    if dirty:
+        out.append(dirty)
     if not data["same_task_set"]:
         parts = ", ".join(f"{k} ran {data['tasks_by_tool'][k]}" for k in data["tasks_by_tool"])
         out.append(f"The tools ran on different task sets ({parts}, {data['tasks']} tasks in all). "
@@ -334,8 +421,16 @@ def warnings_of(jobs: list[dict], data: dict, skipped: list[str]) -> list[str]:
         bad = report.not_scored(j["rows"])
         if bad:
             det = j["summary"]["pooled_detection"] or {}
-            extra = (f" Recall leaves out {det.get('gt_not_scored', 0)} ground-truth findings on "
-                     f"{det.get('tasks_not_scored', 0)} of them.") if det.get("tasks_not_scored") else ""
+            extra = ""
+            n, unknown = det.get("tasks_not_scored", 0), det.get("gt_not_scored_unknown", 0)
+            if n and unknown == n:
+                extra = (f" Recall leaves out an unknown number of ground-truth findings on {n} of them (their "
+                         "ground truth was not found).")
+            elif unknown:
+                extra = (f" Recall leaves out {det.get('gt_not_scored', 0)} ground-truth findings on {n - unknown} "
+                         f"of them, and an unknown number on the other {unknown} (their ground truth was not found).")
+            elif n:
+                extra = f" Recall leaves out {det.get('gt_not_scored', 0)} ground-truth findings on {n} of them."
             out.append(f"{j['key']}: {len(bad)} trial(s) did not finish cleanly and are not scored "
                        f"(listed under 'Trials that did not finish cleanly').{extra}")
         missing_detail = [w for w in j["warnings"] if "grading_detail" in w["warning"]]
@@ -401,8 +496,18 @@ def headline(jobs: list[dict]) -> list[list]:
 
     def gt(j):
         d = j["summary"]["pooled_detection"] or {}
-        extra = f" (+{d['gt_not_scored']} not scored)" if d.get("tasks_not_scored") else ""
-        return f"{d.get('gt', 0)}{extra}"
+        if not d:
+            return "0"
+        extra = ""
+        if d.get("tasks_not_scored"):
+            unknown = d.get("gt_not_scored_unknown", 0)
+            if unknown == d["tasks_not_scored"]:
+                extra = f" (+ unknown on {unknown} not scored)"
+            elif unknown:
+                extra = f" (+{d['gt_not_scored']} not scored, + unknown on {unknown} more)"
+            else:
+                extra = f" (+{d['gt_not_scored']} not scored)"
+        return f"{report.gt_text(d)}{extra}"
 
     def scan(j):
         return mean([r.get("scan_s") for r in j["rows"]])
@@ -610,6 +715,9 @@ def observations(jobs: list[dict]) -> list[dict]:
     for j in jobs:
         s = j["summary"]
         det = s["pooled_detection"] or {}
+        stock = stock_mode_note(j)
+        if stock:
+            notes.append({"tool": j["key"], "text": stock})
         if j["no_results"]:
             notes.append({"tool": j["key"], "text": f"{j['key']} wrote no result on any task, so its negatives "
                           "pass by default, its FPR is 0 and its OWASP score is 0. Those scores say nothing "
@@ -673,8 +781,10 @@ METHOD = [
     "severity.",
     "Measurements 2 to 4 are scored on matched findings only: path from the result's codeFlows, controls from "
     "the top-level controlStatus (75%) and residualRisk (25%), recommendations from the recommendations "
-    "property. When no graded result of a tool carries the field, the measurement is shown as not supported "
-    "by that tool. Agents that write heuristic values under properties.heuristics are not scored on them.",
+    "property. When a tool matched at least one finding and no graded result of it carries the field, the "
+    "measurement is shown as not supported by that tool. When it matched none, it is shown as n/a (no "
+    "results), since that shows nothing about the field. Agents that write heuristic values under "
+    "properties.heuristics are not scored on them.",
     "Trials that errored, whose agent reported an error, whose SARIF was missing or whose grader crashed are "
     "not scored. Neither is a trial recorded before the role-free rename under a name whose role has since "
     "changed, since it was graded against the old label. Their findings are named apart and not added to recall.",
@@ -692,15 +802,17 @@ def md_section(out: list, title: str, intro: str | None, table: list[str] | None
 
 
 def render(jobs: list[dict], tasks_dir: Path | None, data: dict | None = None,
-           warnings: list[str] | None = None) -> str:
+           warnings: list[str] | None = None, task_set: dict | None = None) -> str:
     t = report.md_table
     data = data or dataset(jobs)
-    warnings = warnings if warnings is not None else warnings_of(jobs, data, [])
+    task_set = task_set if task_set is not None else report.task_set_state(tasks_dir)
+    warnings = warnings if warnings is not None else warnings_of(jobs, data, [], task_set)
     labels = [j["label"] for j in jobs]
     tasks_text = display_path(tasks_dir) if tasks_dir else "the paths recorded in the trials, where found"
     out = ["# SAST scanner eval report", "",
            f"Generated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} from "
-           f"{len(jobs)} Harbor jobs. Ground truth from {tasks_text}.", ""]
+           f"{len(jobs)} Harbor jobs. Ground truth from {tasks_text}, task set "
+           f"{report.task_set_text(task_set)}.", ""]
     for j in jobs:
         versions = ", ".join(j["agent_versions"])
         manifests = ", ".join(j["image_manifests"]) or "not recorded"
@@ -713,6 +825,8 @@ def render(jobs: list[dict], tasks_dir: Path | None, data: dict | None = None,
     if notes:
         md_section(out, "Key observations", None)
         out += [""] + [f"- {n['text']}" for n in notes]
+    md_section(out, "Versions and run configuration", VERSIONS_INTRO + " Task set: "
+               + report.task_set_text(task_set) + ".", t(["Field"] + labels, version_rows(jobs)))
     sets = data["positives_by_risk_set"]
     md_section(out, "Dataset",
                f"{data['families']} repository families, {data['positives']} positive tasks (vulnerable) and "
@@ -725,7 +839,8 @@ def render(jobs: list[dict], tasks_dir: Path | None, data: dict | None = None,
     md_section(out, "Scoreboard",
                "Positive tasks hold the vulnerable code, negative tasks the fixed twin. Rewards are never "
                "averaged over both, since an empty SARIF scores 1.0 on every negative. "
-               f"\"{NOT_SUPPORTED}\" means no graded result of the tool carries the field the grader reads.",
+               f"\"{NOT_SUPPORTED}\" means the tool matched a finding but no graded result of it carries the field "
+               f"the grader reads. \"{NO_RESULTS_MEASURE}\" means it matched no finding, so that cannot be told.",
                t(["Measure"] + labels, headline(jobs)))
     md_section(out, "Measurement 1: risk detection",
                "Whether the scanner says the repository has Sensitive Information Disclosure, Excessive Agency, "
@@ -798,15 +913,24 @@ def render(jobs: list[dict], tasks_dir: Path | None, data: dict | None = None,
     return "\n".join(out)
 
 
+VERSIONS_INTRO = ("The versions the results were graded under, from the agent metadata (else the SARIF). A "
+                  "value with a count in brackets means the trials of that job differ. Claude review rows "
+                  "show the mode: in stock mode the reviewer's free-text category is mapped to a CWE by exact "
+                  "lookup in the frozen category map and categories outside it are dropped, so stock-mode "
+                  "scores depend on that map. Scoped runs give their own CWE lists and can write code flows, "
+                  "control status and recommendations, so measurements 2 to 4 apply to them as to any tool.")
+
+
 HTML_TEMPLATE = Path(__file__).resolve().parent / "eval_report.html"
 DATA_MARKER = '<script id="report-data" type="application/json">null</script>'
 
 
 def build_payload(jobs: list[dict], tasks_dir: Path | None, data: dict | None = None,
-                  warnings: list[str] | None = None) -> dict:
+                  warnings: list[str] | None = None, task_set: dict | None = None) -> dict:
     """What eval_report.json holds and the HTML view reads."""
     data = data or dataset(jobs)
-    warnings = warnings if warnings is not None else warnings_of(jobs, data, [])
+    task_set = task_set if task_set is not None else report.task_set_state(tasks_dir)
+    warnings = warnings if warnings is not None else warnings_of(jobs, data, [], task_set)
     labels = ["Measure"] + [j["key"] for j in jobs]
     return {
         "schema": "sast-eval-report/2",
@@ -818,8 +942,11 @@ def build_payload(jobs: list[dict], tasks_dir: Path | None, data: dict | None = 
         "observations": observations(jobs),
         "scoreboard": {"columns": labels, "rows": headline(jobs)},
         "measurement_rows": measurement_rows(jobs),
+        "versions": {"columns": ["Field"] + [j["key"] for j in jobs], "rows": version_rows(jobs),
+                     "intro": VERSIONS_INTRO, "task_set": task_set, "task_set_text": report.task_set_text(task_set)},
         "method": METHOD,
         "not_supported": NOT_SUPPORTED,
+        "no_results_measure": NO_RESULTS_MEASURE,
         "no_results_badge": NO_RESULTS_BADGE,
         "harbor_mean_warning": report.HARBOR_MEAN_WARNING,
         "tools": [{k: v for k, v in j.items() if k != "rows"} | {"trials": j["rows"]} for j in jobs],
@@ -867,12 +994,13 @@ def main() -> None:
         sys.exit("eval_report: no Harbor trials found in any of the given folders")
     assign_keys(jobs)
     data = dataset(jobs)
-    warnings = warnings_of(jobs, data, skipped)
-    markdown = render(jobs, args.tasks, data, warnings)
+    task_set = report.task_set_state(args.tasks)  # read once, so every output states the same
+    warnings = warnings_of(jobs, data, skipped, task_set)
+    markdown = render(jobs, args.tasks, data, warnings, task_set)
     if args.out:
         args.out.mkdir(parents=True, exist_ok=True)
         (args.out / "eval_report.md").write_text(markdown, encoding="utf-8")
-        payload = build_payload(jobs, args.tasks, data, warnings)
+        payload = build_payload(jobs, args.tasks, data, warnings, task_set)
         (args.out / "eval_report.json").write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
         (args.out / "eval_report.html").write_text(render_html(payload), encoding="utf-8")
         with open(args.out / "trials.csv", "w", newline="", encoding="utf-8") as f:

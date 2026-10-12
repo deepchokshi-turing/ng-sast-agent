@@ -14,6 +14,12 @@ Each kept finding (after the upstream filter) has ``file``, ``line``,
   table only. The set is decided by ``cwe_map.decide_unordered``, as for
   CodeQL and SonarQube: an ambiguous set is dropped and counted, and a finding
   with no mapped CWE is passed on and counted by the SARIF writer as unmapped.
+- RuleId, scoped mode: the model's ``rule_id`` when it is one of the task
+  profile's ruleIds (``cwe_map.TASK_RULES``), as the task instruction asks every
+  scanner to report. It is kept as ``Finding.task_rule``, so the CWEs no longer
+  decide the ruleId: an ambiguous or unmapped CWE set does not drop the finding,
+  and ``LLM03.EA.AUTONOMY``, which no CWE maps to, can be reported. Without a
+  valid ``rule_id`` the CWEs decide as above. ``rule_source`` counts both.
 - Level and residual risk: HIGH gives ``error``/``high``, MEDIUM
   ``warning``/``medium``, LOW ``note``/``low`` (``heuristics.residual_risk``).
   Any other severity gives ``warning``/``medium`` and is counted.
@@ -109,11 +115,11 @@ def _path(value: Any, line_counts: dict[str, int], roots: list[str], excludes: l
     return tuple(steps)
 
 
-def _choice(value: Any, allowed: tuple[str, ...], rejected: list[str]) -> str | None:
+def _choice(value: Any, allowed: tuple[str, ...], rejected: list[str], normal=str.lower) -> str | None:
     """``value`` when it is one of ``allowed`` (any case), else None (and counted unless missing)."""
     if value is None:
         return None
-    text = str(value).strip().lower()
+    text = normal(str(value).strip())
     if text in allowed:
         return text
     rejected.append(_text(value, 50))
@@ -158,6 +164,8 @@ def normalise(
     assessed: Counter[str] = Counter({"path": 0, "path_steps": 0, "control_status": 0, "residual_risk": 0,
                                       "recommendations": 0})
     values_rejected: list[str] = []
+    rules_rejected: list[str] = []
+    rule_sources: Counter[str] = Counter()
     recs_rejected: list[str] = []
 
     for item in kept:
@@ -191,7 +199,10 @@ def normalise(
         sources[source] += 1
         decision, _family, ordered = cwe_map.decide_unordered(cwes)
         decisions[decision] += 1
-        if decision == "ambiguous":
+        task_rule = _choice(item.get("rule_id"), cwe_map.TASK_RULES, rules_rejected,
+                            normal=str.upper) if mode == "scoped" else None
+        rule_sources["model" if task_rule else "cwe_table"] += 1
+        if decision == "ambiguous" and not task_rule:
             ambiguous.append([category, list(ordered), file, line])
             continue
 
@@ -232,6 +243,7 @@ def normalise(
             control_status=control_status,
             assessed_residual_risk=residual,
             recommendations=recs,
+            task_rule=task_rule,
         ))
 
     counts = {
@@ -253,5 +265,7 @@ def normalise(
         "path_steps_dropped_count": len(path_dropped),
         "assessed_values_rejected": values_rejected[:200],
         "recommendations_rejected": recs_rejected[:200],
+        "rule_source": dict(sorted(rule_sources.items())),
+        "rule_ids_rejected": rules_rejected[:200],
     }
     return findings, counts

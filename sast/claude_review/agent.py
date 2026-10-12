@@ -562,7 +562,8 @@ class ClaudeReviewAgent(ScannerAgent):
             raise ScannerError(f"refusing to run a command whose command line or env contains {secret_name}")
         started = time.monotonic()
         try:
-            result = await self._exec(environment, command, timeout_sec=timeout_sec, what=what, cwd=cwd, env=env)
+            result = await self._exec(environment, command, timeout_sec=timeout_sec, what=what, cwd=cwd, env=env,
+                                      scrub=lambda text: _scrub(text, key))
         except ScannerError as exc:
             raise ScannerError(_scrub(str(exc), key)) from None
         clean = ExecResult(stdout=_scrub(result.stdout, key), stderr=_scrub(result.stderr, key),

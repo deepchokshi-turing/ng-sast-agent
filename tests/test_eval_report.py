@@ -211,7 +211,7 @@ def standard_pair(job, tool, emit=True):
         "results_near_fixed_code": [], "outside_scope_results": []}, [], {"results_emitted": 0})
 
 
-def test_measurements_2_to_4_not_supported_unless_a_field_is_emitted(tmp_path, monkeypatch, capsys):
+def test_measurements_2_to_4_not_supported_only_after_a_match_without_the_field(tmp_path, monkeypatch, capsys):
     tasks = make_tasks(tmp_path, {"task_fam1_positive": GT_POS, "task_fam1_negative": GT_NEG})
     a = job_dir(tmp_path, "plain")
     standard_pair(a, "plain")
@@ -225,11 +225,13 @@ def test_measurements_2_to_4_not_supported_unless_a_field_is_emitted(tmp_path, m
     add(b, "task_fam1_negative", "rich", neg_rewards(), {"negative": True}, [], {"results_emitted": 0})
     md, payload, html = run(monkeypatch, capsys, a.parent, b.parent, "--tasks", tasks, "--out", tmp_path / "o")
     plain, rich = payload["tools"]
-    assert plain["measures"]["supported"] == {"path": False, "controls": False, "recommendations": False}
+    # plain matched no finding, so nothing shows whether it can fill the fields: n/a, not "not supported".
+    assert plain["measures"]["supported"] == {"path": None, "controls": None, "recommendations": None}
+    assert plain["measures"]["no_results"] == ["path", "controls", "recommendations"]
     assert rich["measures"]["supported"] == {"path": True, "controls": False, "recommendations": True}
-    assert "| Path tracing (measurement 2), mean on positives | not supported by this tool | 0.250 |" in md
-    assert "| Recommendation (measurement 4), mean on positives | not supported by this tool | 0.500 |" in md
-    assert "| Mitigation detection (measurement 3), mean on positives | not supported by this tool | " \
+    assert "| Path tracing (measurement 2), mean on positives | n/a (no results) | 0.250 |" in md
+    assert "| Recommendation (measurement 4), mean on positives | n/a (no results) | 0.500 |" in md
+    assert "| Mitigation detection (measurement 3), mean on positives | n/a (no results) | " \
            "not supported by this tool |" in md
     assert "| Matched detections with a code flow | 0/0 | 1/1 |" in md
     # The HTML reads the same rows and shows the same words.

@@ -25,7 +25,7 @@ import time
 from abc import abstractmethod
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, Callable, ClassVar
 
 from harbor.agents.base import BaseAgent
 from harbor.agents.capabilities import AgentCapabilities
@@ -277,11 +277,15 @@ class ScannerAgent(BaseAgent):
         what: str,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
+        scrub: Callable[[str], str] | None = None,
     ) -> ExecResult:
         """environment.exec with our own time limit, failing as ScannerError.
 
         The environment enforces ``timeout_sec`` itself (Daytona wraps the command
         in ``timeout``); the outer wait is a backstop in case it does not.
+        ``scrub`` (a secret remover) is applied to the whole output before the
+        error message keeps its tail: a secret cut in two at the cut point would
+        no longer match afterwards.
         """
         try:
             result = await asyncio.wait_for(
@@ -298,9 +302,10 @@ class ScannerAgent(BaseAgent):
             raise ScannerError(f"{what} could not run in the sandbox: {type(exc).__name__}: {exc}") from exc
         if result.return_code in (124, 137, 143):
             reason = "ran out of time" if result.return_code == 124 else "was killed (out of memory?)"
-            raise ScannerError(
-                f"{what} {reason} (exit {result.return_code}). Last output: {_tail(result.stdout or result.stderr, 600)}"
-            )
+            output = result.stdout or result.stderr
+            if scrub is not None:
+                output = scrub(output or "")
+            raise ScannerError(f"{what} {reason} (exit {result.return_code}). Last output: {_tail(output, 600)}")
         return result
 
     async def _existing_roots(self, environment: BaseEnvironment, roots: list[str], meta: dict[str, Any]) -> list[str]:

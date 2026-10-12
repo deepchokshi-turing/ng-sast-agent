@@ -54,6 +54,10 @@ class Finding:
     control_status: str | None = None
     assessed_residual_risk: str | None = None
     recommendations: tuple[str, ...] = ()
+    #: The task ruleId when the tool names it itself (Claude review in scoped
+    #: mode, one of ``cwe_map.TASK_RULES``). None means the ruleId comes from
+    #: the CWE table, as for every pattern or taint scanner.
+    task_rule: str | None = None
 
     def compact(self, emitted_rule: str | None) -> list:
         """One row of the run's metadata, small enough to keep thousands."""

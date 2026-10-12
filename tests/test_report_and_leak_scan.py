@@ -100,7 +100,7 @@ def test_measurements_and_fp_out(report):
     assert data["summary"]["fp_outside_scope"] == 4
     det = data["summary"]["pooled_detection"]
     assert (det["gt"], det["tasks_not_scored"], det["gt_not_scored"]) == (3, 1, 1)
-    assert "recall leaves out 1 findings on 1 positives that were not scored" in stdout
+    assert "recall leaves out 1 finding on 1 positive that was not scored" in stdout
     assert "fp_out" in stdout and "youden" in stdout and "| category |" in md
 
 

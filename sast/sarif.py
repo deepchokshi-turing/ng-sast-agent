@@ -3,7 +3,12 @@
 What each field is built from:
 
 - ``ruleId``: the CWE table (``sast.cwe_map.task_rule``). An LLM02 result is
-  HIGH when one of its CWEs shows data leaving its boundary, else MEDIUM.
+  HIGH when one of its CWEs shows data leaving its boundary, else MEDIUM. A
+  tool that names the task ruleId itself (``Finding.task_rule``, Claude review
+  in scoped mode) keeps it, and its CWEs are written but do not decide it.
+  Findings merged into one result keep the family of the group they were
+  merged by: the combined CWE list only chooses LLM02 HIGH or MEDIUM
+  (``cwe_map.family_rule``), so a merge can never lose the family.
 - ``locations[0]``: the match.
 - ``codeFlows``: written only from a dataflow trace the tool itself reported
   (``Finding.trace``), taken from the first finding of the merged group that
@@ -76,13 +81,20 @@ def _code_flows(trace: tuple[TraceStep, ...]) -> list[dict[str, Any]]:
     return [{"threadFlows": [{"locations": locations}]}]
 
 
+def _family(f: Finding) -> str | None:
+    """The family a finding is grouped under: its own task ruleId's, else its primary CWE's."""
+    if f.task_rule:
+        return cwe_map.SID_HIGH if f.task_rule.startswith("LLM02.") else f.task_rule
+    return cwe_map.rule_for(f.cwes)
+
+
 def _group(findings: list[Finding]) -> tuple[dict[tuple[str, int, str], dict[str, Any]], Counter[str], int]:
     """Findings merged by (file, line, ruleId family), with unmapped ones counted."""
     groups: dict[tuple[str, int, str], dict[str, Any]] = {}
     dropped_by_cwe: Counter[str] = Counter()
     mapped = 0
     for f in sorted(findings, key=lambda f: (f.file, f.start_line, f.tool_rule_id)):
-        family = cwe_map.rule_for(f.cwes)
+        family = _family(f)
         if family is None:
             dropped_by_cwe[f.cwes[0] if f.cwes else "none"] += 1
             continue
@@ -98,6 +110,7 @@ def _group(findings: list[Finding]) -> tuple[dict[tuple[str, int, str], dict[str
                 "tool_rule_ids": [f.tool_rule_id],
                 "residual_risk": f.residual_risk,
                 "trace": f.trace,
+                "task_rule": f.task_rule,
                 "control_status": f.control_status,
                 "assessed_residual_risk": f.assessed_residual_risk,
                 "recommendations": f.recommendations,
@@ -117,7 +130,7 @@ def _group(findings: list[Finding]) -> tuple[dict[tuple[str, int, str], dict[str
             group["tool_rule_ids"].append(f.tool_rule_id)
         if not group["trace"] and f.trace:
             group["trace"] = f.trace
-        for key in ("control_status", "assessed_residual_risk", "recommendations"):
+        for key in ("task_rule", "control_status", "assessed_residual_risk", "recommendations"):
             if not group[key] and getattr(f, key):
                 group[key] = getattr(f, key)
         for k, v in f.extra:
@@ -125,8 +138,10 @@ def _group(findings: list[Finding]) -> tuple[dict[tuple[str, int, str], dict[str
             if v not in values:
                 values.append(v)
         group["members"].append(f)
-    for group in groups.values():
-        group["rule"] = cwe_map.task_rule(group["cwes"])
+    for (_file, _line, family), group in groups.items():
+        # From the group's family, never from the combined CWEs alone: a generic
+        # CWE next to a NOT_DISCLOSURE one gives no family (cwe-map-5).
+        group["rule"] = group["task_rule"] or cwe_map.family_rule(family, group["cwes"])
     return groups, dropped_by_cwe, mapped
 
 

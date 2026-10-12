@@ -14,6 +14,8 @@ import json
 import os
 import stat
 import sys
+import time
+import types
 
 import pytest
 
@@ -98,6 +100,24 @@ def test_file_sections_are_new_files_against_an_empty_base(repo):
     assert diff.endswith("@@ -0,0 +1,2 @@\n+PROMPT = 'hi'\n+print(PROMPT)\n\\ No newline at end of file\n")
 
 
+@pytest.mark.parametrize("text, count", [("", 0), ("\n", 1), ("a", 1), ("a\nb", 2), ("a\nb\n", 2), ("a\n\n", 2)])
+def test_text_lines_counts_like_splitlines_for_plain_text(text, count):
+    assert len(driver.text_lines(text)) == count == len(text.splitlines())
+
+
+def test_line_numbers_count_newlines_only(tmp_path):
+    """Form feed, vertical tab and U+2028 are not line breaks for git or for a finding's line number."""
+    root = tmp_path / "r"
+    root.mkdir()
+    (root / "a.py").write_bytes("x = 1\f\ny = '\u2028'\nz = 3\v\nw = 4\n".encode("utf-8"))
+    (root / "b.py").write_bytes(b"a\r\nb\r\n")
+    pr, diff, record = driver.synthesise_pr(str(root), ["a.py", "b.py"])
+    assert record["line_counts"] == {"a.py": 4, "b.py": 2}
+    assert "@@ -0,0 +1,4 @@\n+x = 1\f\n+y = '\u2028'\n+z = 3\v\n+w = 4\n" in diff
+    assert diff.endswith("@@ -0,0 +1,2 @@\n+a\n+b\n")       # CRLF lines as before
+    assert "No newline" not in diff and pr["additions"] == 6
+
+
 def test_upstream_prompt_gets_the_neutral_frame_and_the_custom_text(repo):
     pr, diff, _ = driver.synthesise_pr(str(repo), ["src/app/tools.py"])
     prompt = get_security_audit_prompt(pr, diff, custom_scan_instructions="**Extra:**\n- thing")
@@ -129,6 +149,7 @@ def test_settings_name_the_key_file_only_and_deny_the_risky_tools():
     for tool in ("Bash", "WebFetch", "WebSearch", "Edit", "Write"):
         assert tool in deny
     assert "Read(//opt/sast/secret/**)" in deny and "Read(//opt/sast/home/claude-review/**)" in deny
+    assert "Read(//proc/**)" in deny           # a subscription token is in the CLI's environment
     assert "apiKeyHelper" not in driver.cli_settings("/k/key", "/h", "env")
 
 
@@ -186,6 +207,124 @@ def test_judge_accepts_a_review_and_keeps_the_cli_figures():
 def test_judge_every_failure(code, out, outcome, words):
     judged = _judge(code, out)
     assert judged["outcome"] == outcome and words in judged["reason"]
+
+
+def test_cli_output_is_scrubbed_before_it_is_cut(monkeypatch):
+    """The key straddles the point where the kept tails start (the last 1500 characters)."""
+    text = "x" * 2000 + KEY + "y" * 1490
+    monkeypatch.setattr(driver, "run_cli_once", lambda *args: (1, text, text, 0.1, None, None))
+    record = {}
+    with pytest.raises(driver.DriverError):
+        driver.run_review(["claude"], lambda include_diff: "prompt", "/", {}, 1, time.monotonic() + 600,
+                          parse_json_with_fallbacks, sleep=lambda s: None, min_attempt_sec=1, record=record,
+                          secret=KEY)
+    (attempt,) = record["attempts"]
+    for kept in (attempt["stdout_tail"], attempt["stderr_tail"]):
+        assert kept.endswith("x" * 7 + "***" + "y" * 1490) and KEY[-10:] not in kept
+
+
+# ---------------------------------------------------------------- the filter's deadline
+
+
+class _Clock:
+    """A fake time module: a request that times out moves the clock on by its timeout, a sleep by its length."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def monotonic(self):
+        return self.now
+
+    def time(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+def _upstream_api_client(monkeypatch, sdk):
+    """The vendored upstream claude_api_client with ``sdk`` as anthropic, loaded
+    without the claudecode package's __init__ (which needs requests). Every
+    module it adds to sys.modules is removed again after the test."""
+    package = types.ModuleType("claudecode")
+    package.__path__ = []
+    monkeypatch.setitem(sys.modules, "claudecode", package)
+    monkeypatch.setitem(sys.modules, "anthropic", sdk)
+    for name in ("constants", "logger", "json_parser", "claude_api_client"):
+        spec = importlib.util.spec_from_file_location(f"claudecode.{name}", CCSR_DIR / "claudecode" / f"{name}.py")
+        module = importlib.util.module_from_spec(spec)
+        monkeypatch.setitem(sys.modules, f"claudecode.{name}", module)
+        previous, sys.dont_write_bytecode = sys.dont_write_bytecode, True
+        try:
+            spec.loader.exec_module(module)
+        finally:
+            sys.dont_write_bytecode = previous
+    return module
+
+
+def test_filter_stops_at_its_deadline_without_sdk_retries(monkeypatch):
+    """Upstream makes 4 attempts and the SDK would add 2 retries to each: every
+    request timing out would run the filter far past its time. The driver's
+    client makes one request per attempt and stops with "deadline" in time."""
+    clock = _Clock()
+    made, requests = [], []
+
+    class Messages:
+        def create(self, model=None, max_tokens=None, timeout=None, **kwargs):
+            requests.append(timeout)
+            clock.now += timeout                       # the request runs to its timeout
+            raise RuntimeError("Request timed out.")
+
+    class Anthropic:
+        def __init__(self, api_key=None, max_retries=2):
+            made.append(max_retries)
+            self.messages = Messages()
+
+    sdk = types.ModuleType("anthropic")
+    sdk.Anthropic = Anthropic
+    upstream = _upstream_api_client(monkeypatch, sdk)
+    monkeypatch.setattr(upstream, "time", clock)
+    monkeypatch.setattr(driver, "time", clock)
+    calls = []
+    deadline = clock.now + 100
+    cls = driver.make_api_client_class(upstream.ClaudeAPIClient, driver.Usage(), calls, deadline, "claude-x")
+    client = cls(model="claude-x", api_key=KEY)
+    assert made[-1] == 0                               # the SDK's own retries are off
+    with pytest.raises(driver.DriverError) as first:
+        client.analyze_single_finding(finding("src/app/tools.py", 5))
+    assert first.value.code == "deadline" and "false-positive filter" in first.value.message
+    assert requests == [95] and clock.now <= deadline  # one request, then no time for another
+    assert calls[0]["ok"] is False and "time ran out" in calls[0]["error"]
+    with pytest.raises(driver.DriverError) as second:   # the next finding is not started
+        client.analyze_single_finding(finding("src/app/llm.py", 2))
+    assert second.value.code == "deadline" and "not started" in second.value.message and requests == [95]
+
+
+def test_filter_retries_while_there_is_time(monkeypatch):
+    clock = _Clock()
+    replies = iter([RuntimeError("Error code: 500 - overloaded"), '{"keep_finding": true, "confidence_score": 8}'])
+
+    class Messages:
+        def create(self, **kwargs):
+            reply = next(replies)
+            if isinstance(reply, Exception):
+                raise reply
+            return types.SimpleNamespace(content=[types.SimpleNamespace(text=reply)], usage=None)
+
+    class Anthropic:
+        def __init__(self, api_key=None, max_retries=2):
+            self.messages = Messages()
+
+    sdk = types.ModuleType("anthropic")
+    sdk.Anthropic = Anthropic
+    upstream = _upstream_api_client(monkeypatch, sdk)
+    monkeypatch.setattr(upstream, "time", clock)
+    monkeypatch.setattr(driver, "time", clock)
+    calls = []
+    cls = driver.make_api_client_class(upstream.ClaudeAPIClient, driver.Usage(), calls, clock.now + 1000, "claude-x")
+    ok, result, _ = cls(model="claude-x", api_key=KEY).analyze_single_finding(finding("src/app/tools.py", 5))
+    assert ok and result["keep_finding"] is True
+    assert calls[0]["ok"] is True and calls[0]["confidence"] == 8
 
 
 # ---------------------------------------------------------------- whole runs
