@@ -310,13 +310,14 @@ class ClaudeReviewAgent(ScannerAgent):
             "auth": self.auth_mode(),
             # Harbor's -m: recorded, never used (the platform makes every run name one).
             "harbor_model_name_ignored": self.model_name,
-            "reasoning_effort_ignored": options.reasoning_effort,
+            # None: the CLI's own default, as upstream; a value is passed as --effort (a deviation).
+            "reasoning_effort": options.reasoning_effort,
         }
 
     def sarif_driver_properties(self) -> dict[str, Any]:
         options = self.review_options
         return {"model": self.review_model(), "mode": options.mode, "filterMode": self.filter_mode(),
-                "auth": self.auth_mode(),
+                "auth": self.auth_mode(), "reasoningEffort": options.reasoning_effort,
                 "upstreamCommit": pins.CCSR_COMMIT, "claudeCodeVersion": pins.CLAUDE_CODE_VERSION,
                 "categoryMap": category_map.VERSION}
 
@@ -460,6 +461,7 @@ class ClaudeReviewAgent(ScannerAgent):
             "auth": auth,
             "max_turns": options.max_turns,
             "max_budget_usd": options.max_budget_usd,
+            "effort": options.reasoning_effort,
             "cli_attempts": options.cli_attempts,
             "cli_auth": options.cli_auth,
             "cli_share": options.cli_share,

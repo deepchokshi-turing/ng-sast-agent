@@ -39,8 +39,8 @@ class ClaudeReviewOptions(AgentOptions):
         default=None, description="Model for the false-positive filter. Default: the review model (as upstream)."
     )
     mode: Annotated[Literal["stock", "scoped"], _env("mode")] = Field(
-        default="stock",
-        description="stock: upstream prompts and filter unchanged. scoped: adds the benchmark's LLM02/LLM03 scope "
+        default="scoped",
+        description="scoped is the default (the benchmark's output contract); stock: upstream prompts and filter unchanged. scoped: adds the benchmark's LLM02/LLM03 scope "
         "and the security_manifest.json pointer through the upstream custom instructions, asks for a CWE list per "
         "finding, and uses a filter text without two default exclusions that cover those risks.",
     )
@@ -92,8 +92,11 @@ class ClaudeReviewOptions(AgentOptions):
     exclude: list[str] | None = Field(
         default=None, description="Paths to skip (comma-separated). Default: the task's metadata.excluded_paths."
     )
-    reasoning_effort: str | None = Field(
-        default=None, description="Accepted and recorded, not used: the upstream tool sets no effort."
+    reasoning_effort: Annotated[Literal["low", "medium", "high", "xhigh", "max"] | None, _env("reasoning_effort")] = Field(
+        default=None,
+        description="Claude Code --effort for the review (low, medium, high, xhigh, max). Default: none, the CLI's "
+        "own default, as upstream (which sets no effort). Setting it is a deviation from upstream and is recorded "
+        "in the metadata and SARIF. The filter's API calls are not affected.",
     )
 
     @field_validator("scan_roots", "exclude", mode="before")

@@ -35,6 +35,7 @@ The CLI's reads are confined to that scope (audit A8). The driver copies the in-
 | failed filter call keeps the finding at confidence 10 | error | a finding the filter never judged is not a filtered finding |
 | a reply with no findings JSON counts as a clean review | retried, then an error | a failed review must not look like a clean one |
 | `is_error` and subtypes unchecked | checked, `error_max_turns` and `error_max_budget_usd` are fatal | as above |
+| no effort setting (the CLI's default) | the same by default; `reasoning_effort` passes Claude Code `--effort` (`low` to `max`) and is recorded in the metadata and SARIF | lets a run compare effort levels; a run without it stays upstream behaviour |
 | 20 minutes per CLI attempt, the timeout input is dead | one deadline for the whole review, split between CLI and filter, and `timeout -k` around the driver | Harbor must not kill the agent first |
 | the CLI runs in the checked-out repository | the CLI runs in a copy of the in-scope files plus `security_manifest.json`, the real repository is denied, and every tool call is kept | the task's excluded paths must be out of the reviewer's reach, and there must be a record of what it read (audit A8) |
 | no preflight | network check and one tiny request per model (skipped with a subscription token) | a bad key, a retired model or a blocked network fails in seconds instead of after the CLI's own long retries |
