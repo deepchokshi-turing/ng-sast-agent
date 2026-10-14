@@ -5,3 +5,4 @@ __pycache__/
 jobs/
 .DS_Store
 handoff/
+.env

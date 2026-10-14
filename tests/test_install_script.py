@@ -69,3 +69,18 @@ def test_no_reuse_without_a_previous_install(install, monkeypatch, tmp_path):
     assert install.installed(pins.as_dict()) is None
     (tmp_path / "install.json").write_text('{"pins": {"semgrep_version": "0"}}')
     assert install.installed(pins.as_dict()) is None
+
+
+def test_tools_image_tag_matches_the_agent_version():
+    import re
+    import tomllib
+
+    import sast
+    from tests.conftest import SAMPLE_TASKS
+
+    version = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
+    assert sast.__version__ == version
+    pins_seen = []
+    for dockerfile in SAMPLE_TASKS.glob("*/environment/Dockerfile"):
+        pins_seen += re.findall(r"sast-tools:([0-9][^\s]*)", dockerfile.read_text())
+    assert pins_seen and set(pins_seen) == {version}

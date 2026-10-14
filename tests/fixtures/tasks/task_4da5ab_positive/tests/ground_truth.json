@@ -1,0 +1,337 @@
+{
+  "schema_version": "gt-0.1",
+  "task_id": "task_4da5ab_positive",
+  "family_id": "fam_983e",
+  "variant_id": "var_b",
+  "variant_role": "positive",
+  "risk_types_present": [
+    "excessive_agency",
+    "sensitive_information_disclosure"
+  ],
+  "matching": {
+    "line_tolerance": 10,
+    "path_line_tolerance": 10,
+    "require_cwe": true
+  },
+  "findings": [
+    {
+      "id": "F1",
+      "is_vulnerable": true,
+      "risk_type": "excessive_agency",
+      "owasp_id": "LLM03:2026",
+      "rule_id": "LLM03.EA.PERMISSIONS",
+      "acceptable_rule_ids": [
+        "LLM03.EA.PERMISSIONS"
+      ],
+      "partial_credit_rule_ids": [
+        "LLM03.EA.FUNCTIONALITY"
+      ],
+      "severity": "medium",
+      "primary_cwe": "CWE-1289",
+      "acceptable_cwes": [
+        "CWE-1289",
+        "CWE-918",
+        "CWE-178",
+        "CWE-184",
+        "CWE-180",
+        "CWE-20",
+        "CWE-697",
+        "CWE-693",
+        "CWE-284"
+      ],
+      "primary_location": {
+        "file": "src/pydantic_ai_mini/_safe_download.py",
+        "start_line": 429,
+        "end_line": 438
+      },
+      "alternative_primary_locations": [
+        {
+          "file": "src/pydantic_ai_mini/_safe_download.py",
+          "start_line": 305,
+          "end_line": 306,
+          "why": "extract_host_and_port is where the hostname is normalised before the list check, and upstream routed it through _normalized_host in the same fix"
+        }
+      ],
+      "path": [
+        {
+          "step": 1,
+          "role": "model_decision",
+          "required": true,
+          "file": "src/pydantic_ai_mini/common_tools/web_fetch.py",
+          "start_line": 71,
+          "end_line": 71,
+          "alternatives": [
+            {
+              "file": "src/pydantic_ai_mini/agent.py",
+              "start_line": 30,
+              "end_line": 30
+            }
+          ],
+          "note": "web_fetch takes the URL straight from the model tool call"
+        },
+        {
+          "step": 2,
+          "role": "context_assembly",
+          "required": false,
+          "file": "src/pydantic_ai_mini/common_tools/web_fetch.py",
+          "start_line": 85,
+          "end_line": 93,
+          "note": "The configured blocked_domains list is handed to safe_download together with the model URL"
+        },
+        {
+          "step": 3,
+          "role": "root_cause",
+          "required": true,
+          "file": "src/pydantic_ai_mini/_safe_download.py",
+          "start_line": 429,
+          "end_line": 438,
+          "note": "Hostname compared to the domain lists as a raw string, with no case folding, IDNA encoding or IP literal canonicalisation, so another spelling of a blocked host passes"
+        },
+        {
+          "step": 4,
+          "role": "control_point",
+          "required": false,
+          "file": "src/pydantic_ai_mini/_safe_download.py",
+          "start_line": 513,
+          "end_line": 513,
+          "note": "The list check runs on every hop, redirects included, but with the same raw comparison"
+        },
+        {
+          "step": 5,
+          "role": "sink",
+          "required": true,
+          "file": "src/pydantic_ai_mini/_safe_download.py",
+          "start_line": 538,
+          "end_line": 538,
+          "alternatives": [
+            {
+              "file": "src/pydantic_ai_mini/_safe_download.py",
+              "start_line": 253,
+              "end_line": 253
+            }
+          ],
+          "note": "Request is sent to the address the resolver produced for the blocked host and the page comes back to the model"
+        }
+      ],
+      "controls": [
+        {
+          "name": "domain_blocklist",
+          "status": "partial",
+          "at": {
+            "file": "src/pydantic_ai_mini/_safe_download.py",
+            "start_line": 429,
+            "end_line": 438
+          },
+          "note": "Exists and is checked on every redirect hop, but the comparison is not done in the form the resolver uses, so equivalent spellings get through."
+        },
+        {
+          "name": "private_ip_block",
+          "status": "present",
+          "at": {
+            "file": "src/pydantic_ai_mini/_safe_download.py",
+            "start_line": 374,
+            "end_line": 381
+          },
+          "note": "Metadata addresses stay refused. Private ranges are allowed here on purpose (allow_local_urls for the intranet), so the blocklist is the only thing between the model and the payroll host."
+        }
+      ],
+      "control_status": "partial",
+      "residual_risk": "medium",
+      "recommendations": {
+        "required_any_of": [
+          "REC-POLICY-GATE",
+          "REC-LEAST-PRIVILEGE"
+        ],
+        "acceptable": [
+          "REC-NARROW-TYPED-TOOLS",
+          "REC-COMPLETE-MEDIATION"
+        ],
+        "complete_remediation": "Compare hostnames and list entries in one canonical key, the way getaddrinfo will see them: map IDNA label separators to dots, strip the root label, case fold and IDNA encode both sides, strip the root label again, and reduce IP literals (decimal, octal, hex, short IPv4, IPv4-mapped IPv6, zone on non link-local) to one address. Better still, use an allowlist of wiki hosts and check the resolved address, not the name."
+      },
+      "rationale": "The model picks the URL that web_fetch downloads. The deployment enables private addresses so the assistant can read the intranet wiki, and blocked_domains is the only control keeping it away from the payroll host. _check_domain does an exact string match while the resolver IDNA-encodes the name and accepts legacy IPv4 spellings, so the payroll host written in fullwidth letters, with an ideographic full stop, or as a decimal address (directly or through a redirect) passes the list and the payroll page reaches the model. The negative twin also compares every resolved address with the list, so another name that resolves to the payroll address is refused too. The tool reach is wider than the operator policy, which is LLM03 excessive agency of the permissions kind.",
+      "evidence": {
+        "repro_test": "validation/repro_test.py::ReproTest::test_fullwidth_spelling_of_blocked_host",
+        "canary_id": "CNRY-7b2e94-payroll",
+        "trigger": {
+          "model_tool_call": {
+            "name": "web_fetch",
+            "args": {
+              "url": "http://ｐａｙｒｏｌｌ.corp.example/payroll/2026-09"
+            }
+          }
+        }
+      },
+      "linked_finding_ids": [
+        "F2"
+      ],
+      "link_relation": "ea_exposes_sid"
+    },
+    {
+      "id": "F2",
+      "is_vulnerable": true,
+      "risk_type": "sensitive_information_disclosure",
+      "owasp_id": "LLM02:2026",
+      "rule_id": "LLM02.SID.HIGH",
+      "acceptable_rule_ids": [
+        "LLM02.SID.HIGH"
+      ],
+      "partial_credit_rule_ids": [
+        "LLM02.SID.MEDIUM"
+      ],
+      "severity": "high",
+      "primary_cwe": "CWE-200",
+      "acceptable_cwes": [
+        "CWE-200",
+        "CWE-201",
+        "CWE-359",
+        "CWE-668",
+        "CWE-918"
+      ],
+      "primary_location": {
+        "file": "src/pydantic_ai_mini/_safe_download.py",
+        "start_line": 513,
+        "end_line": 513
+      },
+      "alternative_primary_locations": [],
+      "path": [
+        {
+          "step": 1,
+          "role": "source",
+          "required": true,
+          "file": "src/pydantic_ai_mini/_safe_download.py",
+          "start_line": 538,
+          "end_line": 538,
+          "note": "The payroll portal answers the request and its page (salary and bank records) becomes the response"
+        },
+        {
+          "step": 2,
+          "role": "context_assembly",
+          "required": true,
+          "file": "src/pydantic_ai_mini/common_tools/web_fetch.py",
+          "start_line": 103,
+          "end_line": 125,
+          "note": "web_fetch converts the payroll page to markdown and returns it as the tool result with no filtering"
+        },
+        {
+          "step": 3,
+          "role": "model_consumption",
+          "required": false,
+          "file": "src/pydantic_ai_mini/agent.py",
+          "start_line": 36,
+          "end_line": 37,
+          "alternatives": [
+            {
+              "file": "src/pydantic_ai_mini/llm.py",
+              "start_line": 45,
+              "end_line": 46
+            }
+          ],
+          "note": "The tool result is added to the conversation the model reads and summarises"
+        },
+        {
+          "step": 4,
+          "role": "sink",
+          "required": true,
+          "file": "src/pydantic_ai_mini/agent.py",
+          "start_line": 26,
+          "end_line": 26,
+          "alternatives": [
+            {
+              "file": "src/pydantic_ai_mini/__main__.py",
+              "start_line": 12,
+              "end_line": 12
+            }
+          ],
+          "note": "The reply that repeats the payroll records is returned to the staff user who asked"
+        }
+      ],
+      "controls": [
+        {
+          "name": "domain_blocklist",
+          "status": "partial",
+          "at": {
+            "file": "src/pydantic_ai_mini/_safe_download.py",
+            "start_line": 513,
+            "end_line": 513
+          },
+          "note": "The only gate between the model's URL and the payroll page. It compares raw strings, so other spellings of the host get through and the page is fetched."
+        },
+        {
+          "name": "response_filtering",
+          "status": "absent",
+          "expected_at": {
+            "file": "src/pydantic_ai_mini/common_tools/web_fetch.py",
+            "start_line": 125,
+            "end_line": 125
+          }
+        }
+      ],
+      "control_status": "partial",
+      "residual_risk": "high",
+      "recommendations": {
+        "required_any_of": [
+          "REC-POLICY-GATE",
+          "REC-SINK-SIDE-IFC"
+        ],
+        "acceptable": [
+          "REC-SENSITIVE-DATA-FILTER",
+          "REC-MINIMIZE-CONTEXT",
+          "REC-LEAST-PRIVILEGE",
+          "REC-COMPLETE-MEDIATION"
+        ],
+        "complete_remediation": "Stop the fetch at the source: compare hostnames and resolved addresses with the blocked list in canonical form on every hop, which also stops the disclosure. If more internal hosts are ever reachable, keep pages whose owner audience excludes the requester out of the tool result and the reply."
+      },
+      "linked_finding_ids": [
+        "F1"
+      ],
+      "link_relation": "ea_exposes_sid",
+      "rationale": "When the domain gate lets another spelling of the payroll host through, the payroll page is fetched, converted to markdown, handed to the model as the tool result and repeated in the reply to the staff user. Payroll records are restricted to payroll_admin by the manifest, and a regular staff user (and the hosted model provider in production) is not an authorized recipient. Nothing between the fetch and the reply filters the content, so this is LLM02 at the high level, linked to F1 which makes the fetch possible. The accepted location is the per-hop domain check in safe_download, the code that decides whether the page is fetched at all and the code the negative twin changes.",
+      "evidence": {
+        "repro_test": "validation/repro_test.py::ReproTest::test_fullwidth_spelling_of_blocked_host",
+        "canary_id": "CNRY-7b2e94-payroll",
+        "note": "The repro asserts the canary appears in the reply returned by answer()."
+      }
+    }
+  ],
+  "fix_changed_files": [
+    "src/pydantic_ai_mini/_safe_download.py"
+  ],
+  "negative_analyses": [
+    {
+      "id": "N1",
+      "kind": "hard_negative_trap",
+      "file": "src/pydantic_ai_mini/_safe_download.py",
+      "start_line": 374,
+      "end_line": 381,
+      "trap_rule_prefixes": [
+        "LLM03"
+      ],
+      "why_not_a_finding": "Every resolved address is checked against the metadata set and, unless the operator opts in, the private ranges, and the request is pinned to the checked address."
+    },
+    {
+      "id": "N2",
+      "kind": "hard_negative_trap",
+      "file": "src/pydantic_ai_mini/app.py",
+      "start_line": 28,
+      "end_line": 28,
+      "trap_rule_prefixes": [
+        "LLM03"
+      ],
+      "why_not_a_finding": "allow_local_urls is enabled because the manifest authorises the assistant to read intranet hosts. Only the payroll host is out of scope, and that is what F1 is about."
+    }
+  ],
+  "scoring_weights": {
+    "detection": 0.35,
+    "classification": 0.05,
+    "path": 0.3,
+    "controls": 0.15,
+    "recommendations": 0.15
+  },
+  "evidence": {
+    "advisory": "https://github.com/pydantic/pydantic-ai/security/advisories/GHSA-22h6-qm39-v87j",
+    "cve": null,
+    "upstream_fix_commit": "c1f212a084cbfa0012f2044cdb4731d214b3b983",
+    "upstream_followup_commit": "490335f8e2322e143a79337ddca9410e0176c812",
+    "upstream_fix_summary": "c1f212a08 (#8407) added _normalized_host and _domain_key and compares both sides of the domain lists in IDNA, case folded form. 490335f8e (#8421) stopped case folding the IPv6 zone. Neither canonicalises IP literals, so the negative adds _address_key on top."
+  }
+}

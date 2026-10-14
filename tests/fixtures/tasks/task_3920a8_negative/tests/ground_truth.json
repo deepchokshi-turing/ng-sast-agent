@@ -1,0 +1,99 @@
+{
+  "schema_version": "gt-0.1",
+  "task_id": "task_3920a8_negative",
+  "family_id": "fam_2109",
+  "variant_id": "var_b",
+  "variant_role": "negative",
+  "risk_types_present": [],
+  "matching": {
+    "line_tolerance": 10,
+    "path_line_tolerance": 10,
+    "require_cwe": true
+  },
+  "findings": [],
+  "contrast_rule_ids": [
+    "LLM03.EA.FUNCTIONALITY",
+    "LLM02.SID.HIGH"
+  ],
+  "fixed_locations": [
+    {
+      "file": "src/langchain_mini/chains/api/base.py",
+      "start_line": 20,
+      "end_line": 48,
+      "why": "_extract_scheme_and_domain and _check_in_allowed_domain compare the url's scheme and host with the allowlist"
+    },
+    {
+      "file": "src/langchain_mini/chains/api/base.py",
+      "start_line": 65,
+      "end_line": 74,
+      "why": "limit_to_domains field"
+    },
+    {
+      "file": "src/langchain_mini/chains/api/base.py",
+      "start_line": 103,
+      "end_line": 116,
+      "why": "validate_limit_to_domains refuses to build the chain without an allowlist"
+    },
+    {
+      "file": "src/langchain_mini/chains/api/base.py",
+      "start_line": 142,
+      "end_line": 148,
+      "why": "the model-written url is checked against limit_to_domains before the sync fetch"
+    },
+    {
+      "file": "src/langchain_mini/chains/api/base.py",
+      "start_line": 177,
+      "end_line": 183,
+      "why": "the same check before the async fetch"
+    },
+    {
+      "file": "src/langchain_mini/chains/api/base.py",
+      "start_line": 205,
+      "end_line": 217,
+      "why": "from_llm_and_api_docs requires and forwards limit_to_domains"
+    },
+    {
+      "file": "src/langchain_mini/app.py",
+      "start_line": 17,
+      "end_line": 17,
+      "why": "the app restricts the chain to the configured weather API base"
+    }
+  ],
+  "fix_changed_files": [
+    "src/langchain_mini/chains/api/base.py",
+    "src/langchain_mini/app.py"
+  ],
+  "negative_analyses": [
+    {
+      "id": "N1",
+      "kind": "minimal_contrast",
+      "contrast_of": "F1",
+      "file": "src/langchain_mini/chains/api/base.py",
+      "start_line": 142,
+      "end_line": 148,
+      "rationale": "The model still writes the url, but the chain raises before fetching unless the scheme and host equal the configured weather API base. A url pointing at the metadata service or any other internal host is refused, so the model can no longer choose where the server sends requests."
+    },
+    {
+      "id": "N2",
+      "kind": "minimal_contrast",
+      "contrast_of": "F2",
+      "file": "src/langchain_mini/chains/api/base.py",
+      "start_line": 142,
+      "end_line": 148,
+      "rationale": "Because only the public forecast API can be fetched, api_response can only hold public forecast data. No internal response reaches the answer prompt, the model provider or the end user."
+    }
+  ],
+  "scoring_weights": {
+    "detection": 0.35,
+    "classification": 0.05,
+    "path": 0.3,
+    "controls": 0.15,
+    "recommendations": 0.15
+  },
+  "evidence": {
+    "advisory": "https://github.com/advisories/GHSA-6h8p-4hx9-w66c",
+    "cve": "CVE-2023-32786",
+    "upstream_fix_commit": "b1caae62fd529b682517557989b7df11ea41ab1a",
+    "upstream_fix_summary": "Added a mandatory limit_to_domains allowlist to APIChain and a scheme plus domain check before both the sync and async request."
+  }
+}

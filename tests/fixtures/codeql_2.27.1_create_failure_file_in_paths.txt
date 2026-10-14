@@ -1,0 +1,25 @@
+[2026-10-08 01:10:47] [build-stdout] Trying to guess Python version based on travis file
+[2026-10-08 01:10:47] [build-stdout] Did not find any travis files (expected them at either ['/tmp/claude-0/fail/repo/.travis.yml', '/tmp/claude-0/fail/repo/travis.yml'])
+[2026-10-08 01:10:47] [build-stdout] Trying to guess Python version based on installed versions
+[2026-10-08 01:10:47] [build-stderr] /bin/sh: 1: python2: not found
+[2026-10-08 01:10:47] [build-stdout] Wanted to run Python 2, but it is not available. Using Python 3 instead
+[2026-10-08 01:10:47] [build-stdout] This script is running Python 3, but Python 2 is also available (as 'python3')
+[2026-10-08 01:10:47] [build-stdout] Could not guess Python version, will use default: Python 3
+[2026-10-08 01:10:47] [build-stderr] Traceback (most recent call last):
+[2026-10-08 01:10:47] [build-stderr]   File "/tmp/claude-0/-home-claude/c2de191a-dcd0-518e-ba2b-df7d85b867ab/scratchpad/tools/codeql/python/tools/index.py", line 28, in <module>
+[2026-10-08 01:10:47] [build-stderr]     buildtools.index.main()
+[2026-10-08 01:10:47] [build-stderr]     ~~~~~~~~~~~~~~~~~~~~~^^
+[2026-10-08 01:10:47] [build-stderr]   File "/tmp/claude-0/-home-claude/c2de191a-dcd0-518e-ba2b-df7d85b867ab/scratchpad/tools/codeql/python/tools/python3src.zip/buildtools/index.py", line 403, in main
+[2026-10-08 01:10:47] [build-stderr]     args = extractor_executable() + site_flag(3) + [tracer] + extractor_options(version)
+[2026-10-08 01:10:47] [build-stderr]                                                               ~~~~~~~~~~~~~~~~~^^^^^^^^^
+[2026-10-08 01:10:47] [build-stderr]   File "/tmp/claude-0/-home-claude/c2de191a-dcd0-518e-ba2b-df7d85b867ab/scratchpad/tools/codeql/python/tools/python3src.zip/buildtools/index.py", line 340, in extractor_options
+[2026-10-08 01:10:47] [build-stderr]     options += exclude_pip_21_3_build_dir_options()
+[2026-10-08 01:10:47] [build-stderr]                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+[2026-10-08 01:10:47] [build-stderr]   File "/tmp/claude-0/-home-claude/c2de191a-dcd0-518e-ba2b-df7d85b867ab/scratchpad/tools/codeql/python/tools/python3src.zip/buildtools/index.py", line 159, in exclude_pip_21_3_build_dir_options
+[2026-10-08 01:10:47] [build-stderr]     walk_dir(top)
+[2026-10-08 01:10:47] [build-stderr]     ~~~~~~~~^^^^^
+[2026-10-08 01:10:47] [build-stderr]   File "/tmp/claude-0/-home-claude/c2de191a-dcd0-518e-ba2b-df7d85b867ab/scratchpad/tools/codeql/python/tools/python3src.zip/buildtools/index.py", line 131, in walk_dir
+[2026-10-08 01:10:47] [build-stderr]     contents = os.listdir(dirpath)
+[2026-10-08 01:10:47] [build-stderr] NotADirectoryError: [Errno 20] Not a directory: 'p.toml'
+[2026-10-08 01:10:47] [ERROR] Spawned process exited abnormally (code 1; tried to run: [/tmp/claude-0/-home-claude/c2de191a-dcd0-518e-ba2b-df7d85b867ab/scratchpad/tools/codeql/python/tools/autobuild.sh])
+A fatal error occurred: Exit status 1 from command: [/tmp/claude-0/-home-claude/c2de191a-dcd0-518e-ba2b-df7d85b867ab/scratchpad/tools/codeql/python/tools/autobuild.sh]

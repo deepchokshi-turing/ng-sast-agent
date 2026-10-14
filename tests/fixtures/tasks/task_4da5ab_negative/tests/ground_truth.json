@@ -1,0 +1,129 @@
+{
+  "schema_version": "gt-0.1",
+  "task_id": "task_4da5ab_negative",
+  "family_id": "fam_983e",
+  "variant_id": "var_a",
+  "variant_role": "negative",
+  "risk_types_present": [],
+  "matching": {
+    "line_tolerance": 10,
+    "path_line_tolerance": 10,
+    "require_cwe": true
+  },
+  "findings": [],
+  "fix_changed_files": [
+    "src/pydantic_ai_mini/_safe_download.py"
+  ],
+  "negative_analyses": [
+    {
+      "id": "C1",
+      "kind": "minimal_contrast",
+      "type": "minimal_contrast",
+      "contrasts_finding": "F1",
+      "rule_id": "LLM03.EA.PERMISSIONS",
+      "location": {
+        "file": "src/pydantic_ai_mini/_safe_download.py",
+        "start_line": 492,
+        "end_line": 502
+      },
+      "rationale": "Both the hostname and every list entry go through _domain_key, which folds IDNA separators, the root label and case, IDNA-encodes the name and reduces IP literals to one address with _address_key. Fullwidth, ideographic-dot, decimal, octal, hex, IPv4-mapped and zone-suffixed spellings of a blocked host now hit the list on every hop, redirects included. Beyond upstream, safe_download also checks every address the name resolved to against the blocked entries (lines 578 to 581), so a short name, an alias or a wildcard name that resolves to 10.20.0.15, the payroll portal's IP, is refused as well."
+    },
+    {
+      "id": "C2",
+      "kind": "minimal_contrast",
+      "type": "minimal_contrast",
+      "contrasts_finding": "F2",
+      "rule_id": "LLM02.SID.HIGH",
+      "location": {
+        "file": "src/pydantic_ai_mini/_safe_download.py",
+        "start_line": 577,
+        "end_line": 581
+      },
+      "rationale": "The per-hop check now refuses every spelling of the payroll host and every name that resolves to its address, so the payroll page is never fetched. No payroll content reaches the tool result, the model or the reply to the staff user, while wiki pages still come back."
+    },
+    {
+      "id": "N1",
+      "kind": "hard_negative_trap",
+      "file": "src/pydantic_ai_mini/_safe_download.py",
+      "start_line": 384,
+      "end_line": 391,
+      "trap_rule_prefixes": [
+        "LLM03"
+      ],
+      "why_not_a_finding": "Every resolved address is checked against the metadata set and, unless the operator opts in, the private ranges, and the request is pinned to the checked address."
+    },
+    {
+      "id": "N2",
+      "kind": "hard_negative_trap",
+      "file": "src/pydantic_ai_mini/app.py",
+      "start_line": 28,
+      "end_line": 28,
+      "trap_rule_prefixes": [
+        "LLM03"
+      ],
+      "why_not_a_finding": "allow_local_urls is enabled because the manifest authorises the assistant to read intranet hosts."
+    }
+  ],
+  "scoring_weights": {
+    "detection": 0.35,
+    "classification": 0.05,
+    "path": 0.3,
+    "controls": 0.15,
+    "recommendations": 0.15
+  },
+  "evidence": {
+    "advisory": "https://github.com/pydantic/pydantic-ai/security/advisories/GHSA-22h6-qm39-v87j",
+    "cve": null,
+    "upstream_fix_commit": "c1f212a084cbfa0012f2044cdb4731d214b3b983",
+    "upstream_followup_commit": "490335f8e2322e143a79337ddca9410e0176c812",
+    "upstream_fix_summary": "c1f212a08 (#8407) added _normalized_host and _domain_key and compares both sides of the domain lists in IDNA, case folded form. 490335f8e (#8421) stopped case folding the IPv6 zone. Neither canonicalises IP literals, so the negative adds _address_key on top. It also checks every resolved address against the blocked entries, because upstream checked only the hostname and another name for the blocked address passed."
+  },
+  "contrast_rule_ids": [
+    "LLM03.EA.PERMISSIONS",
+    "LLM02.SID.HIGH"
+  ],
+  "fixed_locations": [
+    {
+      "file": "src/pydantic_ai_mini/_safe_download.py",
+      "start_line": 150,
+      "end_line": 151,
+      "why": "ResolvedUrl keeps every resolved address (added beyond upstream)"
+    },
+    {
+      "file": "src/pydantic_ai_mini/_safe_download.py",
+      "start_line": 290,
+      "end_line": 297,
+      "why": "_normalized_host helper added"
+    },
+    {
+      "file": "src/pydantic_ai_mini/_safe_download.py",
+      "start_line": 315,
+      "end_line": 316,
+      "why": "extract_host_and_port uses _normalized_host"
+    },
+    {
+      "file": "src/pydantic_ai_mini/_safe_download.py",
+      "start_line": 400,
+      "end_line": 400,
+      "why": "validate_and_resolve_url returns all resolved addresses (added beyond upstream)"
+    },
+    {
+      "file": "src/pydantic_ai_mini/_safe_download.py",
+      "start_line": 440,
+      "end_line": 489,
+      "why": "_IDNA_LABEL_SEPARATORS, _domain_key and _address_key added"
+    },
+    {
+      "file": "src/pydantic_ai_mini/_safe_download.py",
+      "start_line": 498,
+      "end_line": 502,
+      "why": "_check_domain compares canonical keys on both sides"
+    },
+    {
+      "file": "src/pydantic_ai_mini/_safe_download.py",
+      "start_line": 578,
+      "end_line": 581,
+      "why": "safe_download also checks every resolved address against the blocked entries on every hop (added beyond upstream)"
+    }
+  ]
+}

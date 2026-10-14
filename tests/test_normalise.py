@@ -56,3 +56,35 @@ def test_results_without_a_line_are_skipped():
                         "extra": {"metadata": {"category": "security", "cwe": "CWE-95"}}}]}
     findings, _ = normalise(doc)
     assert findings == []
+
+
+@pytest.mark.parametrize("severity, impact, expected", [
+    ("ERROR", "LOW", "high"),
+    ("WARNING", "HIGH", "high"),
+    ("WARNING", "MEDIUM", "medium"),
+    ("INFO", "LOW", "low"),
+    ("INFO", None, "low"),
+    (None, None, "medium"),
+])
+def test_residual_risk_follows_severity_and_impact(severity, impact, expected):
+    doc = {"results": [{"check_id": "x", "path": "a.py", "start": {"line": 3}, "end": {"line": 3},
+                        "extra": {"severity": severity,
+                                  "metadata": {"category": "security", "cwe": "CWE-95", "impact": impact}}}]}
+    (f,), _ = normalise(doc)
+    assert f.residual_risk == expected
+
+
+@pytest.mark.parametrize("name", [
+    "semgrep_1.179.0_smoke_eval.json", "semgrep_1.179.0_smoke_eval_twin.json",
+    "semgrep_1.179.0_smoke_eval_node.json", "semgrep_1.179.0_smoke_empty.json",
+    "semgrep_1.179.0_task_7f3a91.json",
+])
+def test_recorded_output_has_no_dataflow_trace(name):
+    # No recorded run carries a dataflow_trace. Semgrep OSS 1.179.0 writes none in
+    # JSON without a login, even under --dataflow-traces, so the agent reads none.
+    assert all("dataflow_trace" not in (r.get("extra") or {}) for r in fixture_json(name)["results"])
+
+
+def test_residual_risk_on_recorded_output():
+    findings, _ = normalise(fixture_json("semgrep_1.179.0_smoke_eval.json"))
+    assert {f.residual_risk for f in findings} == {"high"}  # eval: impact HIGH, subprocess: ERROR

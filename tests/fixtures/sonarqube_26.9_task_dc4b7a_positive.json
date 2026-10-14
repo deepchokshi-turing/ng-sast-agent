@@ -1,0 +1,240 @@
+{
+ "ce_task": {
+  "analysisId": "407aff30-4443-4d01-89bb-45eece159399",
+  "componentId": "ed81244e-15bf-4be9-b63e-a0aeab002d5d",
+  "componentKey": "sast-1c56fa8f998c",
+  "componentName": "sast-1c56fa8f998c",
+  "componentQualifier": "TRK",
+  "executedAt": "2026-10-07T19:21:28+0000",
+  "executionTimeMs": 1711,
+  "hasScannerContext": true,
+  "id": "30ce2b63-07f0-495b-b086-a411d477bf04",
+  "infoMessages": [],
+  "startedAt": "2026-10-07T19:21:26+0000",
+  "status": "SUCCESS",
+  "submittedAt": "2026-10-07T19:21:26+0000",
+  "submitterLogin": "admin",
+  "type": "REPORT",
+  "warningCount": 0,
+  "warnings": []
+ },
+ "delete_error": null,
+ "deleted": true,
+ "error": null,
+ "fetch_format": 1,
+ "hotspots_pages": [
+  {
+   "components": [],
+   "hotspots": [],
+   "paging": {
+    "pageIndex": 1,
+    "pageSize": 500,
+    "total": 0
+   }
+  }
+ ],
+ "issues_pages": [
+  {
+   "components": [
+    {
+     "enabled": true,
+     "key": "sast-1c56fa8f998c:src/crewai_rag_web_mini/_compat/requests.py",
+     "longName": "src/crewai_rag_web_mini/_compat/requests.py",
+     "name": "requests.py",
+     "path": "src/crewai_rag_web_mini/_compat/requests.py",
+     "qualifier": "FIL"
+    },
+    {
+     "enabled": true,
+     "key": "sast-1c56fa8f998c",
+     "longName": "sast-1c56fa8f998c",
+     "name": "sast-1c56fa8f998c",
+     "qualifier": "TRK"
+    }
+   ],
+   "effortTotal": 30,
+   "facets": [],
+   "issues": [
+    {
+     "author": "",
+     "cleanCodeAttribute": "COMPLETE",
+     "cleanCodeAttributeCategory": "INTENTIONAL",
+     "codeVariants": [],
+     "component": "sast-1c56fa8f998c:src/crewai_rag_web_mini/_compat/requests.py",
+     "creationDate": "2026-10-07T19:20:47+0000",
+     "debt": "30min",
+     "effort": "30min",
+     "flows": [],
+     "fromSonarQubeUpdate": false,
+     "hash": "16fde88bb34e2f96c0d5a6c3549cec57",
+     "impacts": [
+      {
+       "severity": "LOW",
+       "softwareQuality": "SECURITY"
+      }
+     ],
+     "internalTags": [],
+     "issueStatus": "OPEN",
+     "key": "6e062fd1-998f-4dd6-b494-de1a02026ac7",
+     "line": 115,
+     "linkedTicketStatus": "NOT_LINKED",
+     "message": "Using HTTP protocol is insecure. Use HTTPS instead.",
+     "messageFormattings": [],
+     "prioritizedRule": false,
+     "project": "sast-1c56fa8f998c",
+     "quickFixAvailable": false,
+     "rule": "python:S5332",
+     "scope": "MAIN",
+     "severity": "MINOR",
+     "status": "OPEN",
+     "tags": [
+      "cwe",
+      "former-hotspot"
+     ],
+     "textRange": {
+      "endLine": 115,
+      "endOffset": 28,
+      "startLine": 115,
+      "startOffset": 19
+     },
+     "type": "VULNERABILITY",
+     "updateDate": "2026-10-07T19:20:47+0000"
+    }
+   ],
+   "p": 1,
+   "paging": {
+    "pageIndex": 1,
+    "pageSize": 500,
+    "total": 1
+   },
+   "ps": 500,
+   "total": 1
+  }
+ ],
+ "kept": false,
+ "project_key": "sast-1c56fa8f998c",
+ "quality_profiles": {
+  "actions": {
+   "create": true
+  },
+  "profiles": [
+   {
+    "actions": {
+     "associateProjects": false,
+     "copy": true,
+     "delete": false,
+     "edit": false,
+     "setAsDefault": false
+    },
+    "activeDeprecatedRuleCount": 0,
+    "activeRuleCount": 398,
+    "isBuiltIn": true,
+    "isDefault": true,
+    "isInherited": false,
+    "key": "d3cf3dde-998b-4c25-bc8b-514f04c2dc3e",
+    "language": "py",
+    "languageName": "Python",
+    "lastUsed": "2026-10-07T19:20:47+0000",
+    "name": "Sonar way",
+    "rulesUpdatedAt": "2026-10-07T18:30:01+0000"
+   }
+  ]
+ },
+ "report_task": {
+  "ceTaskId": "30ce2b63-07f0-495b-b086-a411d477bf04",
+  "ceTaskUrl": "http://host.docker.internal:9000/api/ce/task?id=30ce2b63-07f0-495b-b086-a411d477bf04",
+  "projectKey": "sast-1c56fa8f998c"
+ },
+ "rules": {
+  "python:S5332": {
+   "actives": [],
+   "rule": {
+    "cleanCodeAttribute": "COMPLETE",
+    "cleanCodeAttributeCategory": "INTENTIONAL",
+    "createdAt": "2026-10-07T18:29:44+0000",
+    "debtRemFnType": "CONSTANT_ISSUE",
+    "defaultDebtRemFnType": "CONSTANT_ISSUE",
+    "defaultRemFnBaseEffort": "30min",
+    "defaultRemFnType": "CONSTANT_ISSUE",
+    "descriptionSections": [
+     {
+      "content": "<p>The following code uses a clear-text protocol or disables encryption for a network connection, leaving transmitted data exposed to\ninterception.</p>\n<h4>Noncompliant code example</h4>\n<pre data-diff-id=\"1\" data-diff-type=\"noncompliant\">\nurl = \"http://example.com\" # Noncompliant\nurl = \"ftp://anonymous@example.com\" # Noncompliant\nurl = \"telnet://anonymous@example.com\" # Noncompliant\n\nimport telnetlib\ncnx = telnetlib.Telnet(\"telnet.example.com\") # Noncompliant\n\nimport ftplib\ncnx = ftplib.FTP(\"ftp.example.com\") # Noncompliant\n\nimport smtplib\nsmtp = smtplib.SMTP(\"smtp.example.com\", port=587) # Noncompliant\n</pre>\n<h4>Compliant solution</h4>\n<pre data-diff-id=\"1\" data-diff-type=\"compliant\">\nurl = \"https://example.com\"\nurl = \"sftp://anonymous@example.com\"\nurl = \"ssh://anonymous@example.com\"\n\nimport ftplib\ncnx = ftplib.FTP_TLS(\"ftp.example.com\")\n\nimport smtplib\nsmtp = smtplib.SMTP(\"smtp.example.com\", port=587)\nsmtp.starttls(context=context)\n\nsmtp_ssl = smtplib.SMTP_SSL(\"smtp.example.com\", port=465)\n</pre>",
+      "context": {
+       "displayName": "Python Standard Library",
+       "key": "python_standard_library"
+      },
+      "key": "how_to_fix"
+     },
+     {
+      "content": "<p>The following code uses a clear-text protocol or disables encryption for a network connection, leaving transmitted data exposed to\ninterception.</p>\n<h4>Noncompliant code example</h4>\n<p>For <a href=\"https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_kinesis/CfnStream.html\">aws_cdk.aws_kinesis.CfnStream</a>:</p>\n<pre data-diff-id=\"4\" data-diff-type=\"noncompliant\">\nfrom aws_cdk import (\n    aws_kinesis as kinesis,\n)\n\nkinesis.CfnStream( # Noncompliant: encryption is disabled by default for CfnStreams\n    self,\n    \"example-cfnstream-implicit\",\n    shard_count=1\n)\n\nkinesis.CfnStream(self,\n    \"example-cfnstream-explicit\",\n    shard_count=1,\n    stream_encryption=None # Noncompliant\n)\n</pre>\n<p>For <a href=\"https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_kinesis/Stream.html\">aws_cdk.aws_kinesis.Stream</a>:</p>\n<pre data-diff-id=\"5\" data-diff-type=\"noncompliant\">\nfrom aws_cdk import (\n    aws_kinesis as kinesis,\n)\n\nstream = kinesis.Stream(self,\n    \"example-stream\",\n    shard_count=1,\n    encryption=kinesis.StreamEncryption.UNENCRYPTED # Noncompliant\n)\n</pre>\n<h4>Compliant solution</h4>\n<pre data-diff-id=\"4\" data-diff-type=\"compliant\">\nfrom aws_cdk import (\n    aws_kinesis as kinesis,\n)\n\nkinesis.CfnStream(\n    self,\n    \"example-cfnstream-explicit\",\n    shard_count=1,\n    stream_encryption=kinesis.CfnStream.StreamEncryptionProperty(\n        encryption_type=\"KMS\",\n        key_id=\"alias/aws/kinesis\"\n    )\n)\n</pre>\n<pre data-diff-id=\"5\" data-diff-type=\"compliant\">\nfrom aws_cdk import (\n    aws_kinesis as kinesis,\n    aws_kms as kms\n)\n\nstream = kinesis.Stream( # Encryption is enabled by default for Streams\n    self,\n    \"example-stream\",\n    shard_count=1\n)\n\nstream = kinesis.Stream(\n    self,\n    \"example-stream-managed\",\n    shard_count=1,\n    encryption=kinesis.StreamEncryption.MANAGED\n)\n</pre>\n<h2>Exceptions</h2>\n<p>No issue is reported for the following cases:</p>\n<ul>\n  <li>URLs whose host resolves only within a private runtime environment and is not reachable from the public internet (including loopback and cloud\n  metadata hosts)</li>\n  <li>Well-known namespace URI authorities used in in XML, JSON-LD, RDF, or similar formats (for example, <code>www.w3.org</code>,\n  <code>schemas.android.com</code>, <code>schema.org</code>).</li>\n  <li>IANA-reserved documentation and test domains like <code>example.com</code>, <code>example.net</code>, <code>example.org</code> (RFC 6761). These\n  are almost always placeholders in source code, not real connection targets.</li>\n</ul>",
+      "context": {
+       "displayName": "AWS Kinesis",
+       "key": "aws_kinesis"
+      },
+      "key": "how_to_fix"
+     },
+     {
+      "content": "<p>The following code uses a clear-text protocol or disables encryption for a network connection, leaving transmitted data exposed to\ninterception.</p>\n<h4>Noncompliant code example</h4>\n<p>For <a\nhref=\"https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_elasticache/CfnReplicationGroup.html\">aws_cdk.aws_elasticache.CfnReplicationGroup</a>:</p>\n<pre data-diff-id=\"3\" data-diff-type=\"noncompliant\">\nfrom aws_cdk import (\n    aws_elasticache as elasticache\n)\n\nelasticache.CfnReplicationGroup(\n    self,\n    \"example-explicit\",\n    replication_group_description=\"a replication group\",\n    automatic_failover_enabled=False,\n    transit_encryption_enabled=False, # Noncompliant\n    cache_subnet_group_name=\"test\",\n    engine=\"redis\",\n    engine_version=\"3.2.6\",\n    num_cache_clusters=1,\n    cache_node_type=\"cache.t2.micro\"\n)\n\nelasticache.CfnReplicationGroup( # Noncompliant: encryption is disabled by default\n    self,\n    \"example-implicit\",\n    replication_group_description=\"a replication group\",\n    automatic_failover_enabled=False,\n    cache_subnet_group_name=\"test\",\n    engine=\"redis\",\n    engine_version=\"3.2.6\",\n    num_cache_clusters=1,\n    cache_node_type=\"cache.t2.micro\"\n)\n</pre>\n<h4>Compliant solution</h4>\n<pre data-diff-id=\"3\" data-diff-type=\"compliant\">\nfrom aws_cdk import (\n    aws_elasticache as elasticache\n)\n\nelasticache.CfnReplicationGroup(\n    self,\n    \"example-explicit\",\n    replication_group_description=\"a test replication group\",\n    automatic_failover_enabled=False,\n    transit_encryption_enabled=True,\n    cache_subnet_group_name=\"test\",\n    engine=\"redis\",\n    engine_version=\"3.2.6\",\n    num_cache_clusters=1,\n    cache_node_type=\"cache.t2.micro\"\n)\n</pre>",
+      "context": {
+       "displayName": "Amazon ElastiCache",
+       "key": "amazon_elasticache"
+      },
+      "key": "how_to_fix"
+     },
+     {
+      "content": "<p>Using clear-text protocols exposes data in transit to eavesdropping and man-in-the-middle attacks.</p>",
+      "key": "introduction"
+     },
+     {
+      "content": "<p>An attacker who can observe network traffic \u2014 for example through a compromised network device, a position on the same network segment, or a cloud\nenvironment breach \u2014 can read, modify, or inject data sent over <code>ftp</code>, <code>telnet</code>, <code>http</code>, or unencrypted SMTP without\ndetection. This is true even on internal or isolated networks, where insider threats or lateral movement after an initial compromise can expose\nunencrypted traffic. This rule raises an issue when a clear-text protocol scheme is used or when encryption is explicitly disabled for a network\nconnection.</p>\n<h3>What is the potential impact?</h3>\n<h4>Sensitive data exposure</h4>\n<p>An attacker who can intercept network traffic can read all data transmitted over clear-text connections, including credentials, session tokens, API\nkeys, or personal data.</p>\n<h4>Data tampering</h4>\n<p>Because clear-text protocols provide no integrity protection, an attacker in a man-in-the-middle position can silently modify data in transit \u2014\nredirecting users to malicious endpoints, injecting malicious content into responses, or altering commands sent to remote services.</p>",
+      "key": "root_cause"
+     },
+     {
+      "content": "<p>The following code uses a clear-text protocol or disables encryption for a network connection, leaving transmitted data exposed to\ninterception.</p>\n<h4>Noncompliant code example</h4>\n<p>For <a\nhref=\"https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_elasticloadbalancingv2/ApplicationLoadBalancer.html\">aws_cdk.aws_elasticloadbalancingv2.ApplicationLoadBalancer</a>:</p>\n<pre data-diff-id=\"2\" data-diff-type=\"noncompliant\">\nfrom aws_cdk import (\n    aws_elasticloadbalancingv2 as elbv2,\n)\n\nlb = elbv2.ApplicationLoadBalancer(\n    self,\n    \"LB\",\n    vpc=vpc,\n    internet_facing=True\n)\n\nlb.add_listener(\n    \"Listener-default\",\n    port=80, # Noncompliant\n    open=True\n)\nlb.add_listener(\n    \"Listener-http-explicit\",\n    protocol=elbv2.ApplicationProtocol.HTTP, # Noncompliant\n    port=8080,\n    open=True\n)\n</pre>\n<h4>Compliant solution</h4>\n<pre data-diff-id=\"2\" data-diff-type=\"compliant\">\nfrom aws_cdk import (\n    aws_elasticloadbalancingv2 as elbv2,\n)\n\nlb = elbv2.ApplicationLoadBalancer(\n    self,\n    \"LB\",\n    vpc=vpc,\n    internet_facing=True\n)\n\nlb.add_listener(\n    \"Listener-https-explicit\",\n    protocol=elbv2.ApplicationProtocol.HTTPS,\n    certificates=[elbv2.ListenerCertificate(\"certificateARN\")],\n    port=443,\n    open=True\n)\n\nlb.add_listener(\n    \"Listener-https-implicit\",\n    certificates=[elbv2.ListenerCertificate(\"certificateARN\")],\n    port=8443,\n    open=True\n)\n</pre>",
+      "context": {
+       "displayName": "AWS Elastic Load Balancing",
+       "key": "aws_elastic_load_balancing"
+      },
+      "key": "how_to_fix"
+     },
+     {
+      "content": "<h3>Documentation</h3>\n<ul>\n  <li>AWS Documentation - <a href=\"https://docs.aws.amazon.com/elasticloadbalancing/latest/application/load-balancer-listeners.html\">Listeners for\n  your Application Load Balancers</a></li>\n  <li>AWS Documentation - <a\n  href=\"https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-kinesis-stream-streamencryption.html\">Stream Encryption</a></li>\n</ul>\n<h3>Articles &amp; blog posts</h3>\n<ul>\n  <li>Google - <a href=\"https://security.googleblog.com/2016/09/moving-towards-more-secure-web.html\">Moving towards more secure web</a></li>\n  <li>Mozilla - <a href=\"https://blog.mozilla.org/security/2015/04/30/deprecating-non-secure-http/\">Deprecating non secure http</a></li>\n</ul>\n<h3>Standards</h3>\n<ul>\n  <li>OWASP - <a href=\"https://owasp.org/www-project-top-ten/2017/A3_2017-Sensitive_Data_Exposure\">Top 10 2017 Category A3 - Sensitive Data\n  Exposure</a></li>\n  <li>OWASP - <a href=\"https://owasp.org/Top10/A02_2021-Cryptographic_Failures/\">Top 10 2021 Category A2 - Cryptographic Failures</a></li>\n  <li>CWE - <a href=\"https://cwe.mitre.org/data/definitions/200\">CWE-200 - Exposure of Sensitive Information to an Unauthorized Actor</a></li>\n  <li>CWE - <a href=\"https://cwe.mitre.org/data/definitions/319\">CWE-319 - Cleartext Transmission of Sensitive Information</a></li>\n  <li>STIG Viewer - <a href=\"https://stigviewer.com/stigs/application_security_and_development/2024-12-06/finding/V-222397\">Application Security and\n  Development: V-222397</a> - The application must implement cryptographic mechanisms to protect the integrity of remote access sessions.</li>\n  <li>STIG Viewer - <a href=\"https://stigviewer.com/stigs/application_security_and_development/2024-12-06/finding/V-222534\">Application Security and\n  Development: V-222534</a> - Service-Oriented Applications handling non-releasable data must authenticate endpoint devices via mutual SSL/TLS.</li>\n  <li>STIG Viewer - <a href=\"https://stigviewer.com/stigs/application_security_and_development/2024-12-06/finding/V-222562\">Application Security and\n  Development: V-222562</a> - Applications used for non-local maintenance must implement cryptographic mechanisms to protect the integrity of\n  maintenance and diagnostic communications.</li>\n  <li>STIG Viewer - <a href=\"https://stigviewer.com/stigs/application_security_and_development/2024-12-06/finding/V-222563\">Application Security and\n  Development: V-222563</a> - Applications used for non-local maintenance must implement cryptographic mechanisms to protect the confidentiality of\n  maintenance and diagnostic communications.</li>\n  <li>STIG Viewer - <a href=\"https://stigviewer.com/stigs/application_security_and_development/2024-12-06/finding/V-222577\">Application Security and\n  Development: V-222577</a> - The application must not expose session IDs.</li>\n  <li>STIG Viewer - <a href=\"https://stigviewer.com/stigs/application_security_and_development/2024-12-06/finding/V-222596\">Application Security and\n  Development: V-222596</a> - The application must protect the confidentiality and integrity of transmitted information.</li>\n  <li>STIG Viewer - <a href=\"https://stigviewer.com/stigs/application_security_and_development/2024-12-06/finding/V-222597\">Application Security and\n  Development: V-222597</a> - The application must implement cryptographic mechanisms to prevent unauthorized disclosure of information and/or detect\n  changes to information during transmission.</li>\n  <li>STIG Viewer - <a href=\"https://stigviewer.com/stigs/application_security_and_development/2024-12-06/finding/V-222598\">Application Security and\n  Development: V-222598</a> - The application must maintain the confidentiality and integrity of information during preparation for transmission.</li>\n  <li>STIG Viewer - <a href=\"https://stigviewer.com/stigs/application_security_and_development/2024-12-06/finding/V-222599\">Application Security and\n  Development: V-222599</a> - The application must maintain the confidentiality and integrity of information during reception.</li>\n</ul>",
+      "key": "resources"
+     }
+    ],
+    "educationPrinciples": [],
+    "impacts": [
+     {
+      "severity": "LOW",
+      "softwareQuality": "SECURITY"
+     }
+    ],
+    "isExternal": false,
+    "isTemplate": false,
+    "key": "python:S5332",
+    "lang": "py",
+    "langName": "Python",
+    "name": "Clear-text protocols should not be used",
+    "params": [],
+    "remFnBaseEffort": "30min",
+    "remFnOverloaded": false,
+    "remFnType": "CONSTANT_ISSUE",
+    "repo": "python",
+    "scope": "MAIN",
+    "severity": "MINOR",
+    "status": "READY",
+    "sysTags": [
+     "cwe",
+     "former-hotspot"
+    ],
+    "tags": [],
+    "type": "VULNERABILITY",
+    "updatedAt": "2026-10-07T18:29:44+0000"
+   }
+  }
+ },
+ "server": {
+  "host_url": "http://host.docker.internal:9000",
+  "version": "26.9.0.129388"
+ }
+}

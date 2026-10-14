@@ -1,0 +1,363 @@
+{
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "oracle",
+          "version": "gt-0.1",
+          "rules": [
+            {
+              "id": "LLM02.SID.HIGH"
+            },
+            {
+              "id": "LLM03.EA.FUNCTIONALITY"
+            },
+            {
+              "id": "LLM03.EA.PERMISSIONS"
+            }
+          ]
+        }
+      },
+      "results": [
+        {
+          "ruleId": "LLM03.EA.FUNCTIONALITY",
+          "level": "error",
+          "message": {
+            "text": "The model's title is formatted into the SQL text, so it can run any query, not only a lookup of one note."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/notes_agent/agent.py"
+                },
+                "region": {
+                  "startLine": 16,
+                  "endLine": 16
+                }
+              }
+            }
+          ],
+          "codeFlows": [
+            {
+              "threadFlows": [
+                {
+                  "locations": [
+                    {
+                      "location": {
+                        "physicalLocation": {
+                          "artifactLocation": {
+                            "uri": "src/notes_agent/agent.py"
+                          },
+                          "region": {
+                            "startLine": 40,
+                            "endLine": 40
+                          }
+                        }
+                      },
+                      "properties": {
+                        "role": "model_decision"
+                      }
+                    },
+                    {
+                      "location": {
+                        "physicalLocation": {
+                          "artifactLocation": {
+                            "uri": "src/notes_agent/agent.py"
+                          },
+                          "region": {
+                            "startLine": 16,
+                            "endLine": 16
+                          }
+                        }
+                      },
+                      "properties": {
+                        "role": "root_cause"
+                      }
+                    },
+                    {
+                      "location": {
+                        "physicalLocation": {
+                          "artifactLocation": {
+                            "uri": "src/notes_agent/agent.py"
+                          },
+                          "region": {
+                            "startLine": 16,
+                            "endLine": 16
+                          }
+                        }
+                      },
+                      "properties": {
+                        "role": "sink"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "properties": {
+            "cwe": [
+              "CWE-89"
+            ],
+            "controlStatus": "none",
+            "residualRisk": "high",
+            "recommendations": [
+              "REC-NARROW-TYPED-TOOLS"
+            ]
+          }
+        },
+        {
+          "ruleId": "LLM03.EA.FUNCTIONALITY",
+          "level": "error",
+          "message": {
+            "text": "The word count tool runs a shell command built from the model's argument, so the model can run any command."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/notes_agent/agent.py"
+                },
+                "region": {
+                  "startLine": 23,
+                  "endLine": 23
+                }
+              }
+            }
+          ],
+          "codeFlows": [
+            {
+              "threadFlows": [
+                {
+                  "locations": [
+                    {
+                      "location": {
+                        "physicalLocation": {
+                          "artifactLocation": {
+                            "uri": "src/notes_agent/agent.py"
+                          },
+                          "region": {
+                            "startLine": 40,
+                            "endLine": 40
+                          }
+                        }
+                      },
+                      "properties": {
+                        "role": "model_decision"
+                      }
+                    },
+                    {
+                      "location": {
+                        "physicalLocation": {
+                          "artifactLocation": {
+                            "uri": "src/notes_agent/agent.py"
+                          },
+                          "region": {
+                            "startLine": 23,
+                            "endLine": 23
+                          }
+                        }
+                      },
+                      "properties": {
+                        "role": "root_cause"
+                      }
+                    },
+                    {
+                      "location": {
+                        "physicalLocation": {
+                          "artifactLocation": {
+                            "uri": "src/notes_agent/agent.py"
+                          },
+                          "region": {
+                            "startLine": 23,
+                            "endLine": 23
+                          }
+                        }
+                      },
+                      "properties": {
+                        "role": "sink"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "properties": {
+            "cwe": [
+              "CWE-78"
+            ],
+            "controlStatus": "none",
+            "residualRisk": "high",
+            "recommendations": [
+              "REC-NARROW-TYPED-TOOLS"
+            ]
+          }
+        },
+        {
+          "ruleId": "LLM03.EA.PERMISSIONS",
+          "level": "error",
+          "message": {
+            "text": "The notes folder is made writable by every user, more than reading and counting notes needs."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/notes_agent/agent.py"
+                },
+                "region": {
+                  "startLine": 29,
+                  "endLine": 29
+                }
+              }
+            }
+          ],
+          "codeFlows": [
+            {
+              "threadFlows": [
+                {
+                  "locations": [
+                    {
+                      "location": {
+                        "physicalLocation": {
+                          "artifactLocation": {
+                            "uri": "src/notes_agent/agent.py"
+                          },
+                          "region": {
+                            "startLine": 29,
+                            "endLine": 29
+                          }
+                        }
+                      },
+                      "properties": {
+                        "role": "root_cause"
+                      }
+                    },
+                    {
+                      "location": {
+                        "physicalLocation": {
+                          "artifactLocation": {
+                            "uri": "src/notes_agent/agent.py"
+                          },
+                          "region": {
+                            "startLine": 29,
+                            "endLine": 29
+                          }
+                        }
+                      },
+                      "properties": {
+                        "role": "sink"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "properties": {
+            "cwe": [
+              "CWE-732"
+            ],
+            "controlStatus": "none",
+            "residualRisk": "high",
+            "recommendations": [
+              "REC-LEAST-PRIVILEGE"
+            ]
+          }
+        },
+        {
+          "ruleId": "LLM02.SID.HIGH",
+          "level": "error",
+          "message": {
+            "text": "The user's personal notes are sent to the backup server over clear-text HTTP."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/notes_agent/agent.py"
+                },
+                "region": {
+                  "startLine": 11,
+                  "endLine": 11
+                }
+              }
+            }
+          ],
+          "codeFlows": [
+            {
+              "threadFlows": [
+                {
+                  "locations": [
+                    {
+                      "location": {
+                        "physicalLocation": {
+                          "artifactLocation": {
+                            "uri": "src/notes_agent/agent.py"
+                          },
+                          "region": {
+                            "startLine": 33,
+                            "endLine": 33
+                          }
+                        }
+                      },
+                      "properties": {
+                        "role": "source"
+                      }
+                    },
+                    {
+                      "location": {
+                        "physicalLocation": {
+                          "artifactLocation": {
+                            "uri": "src/notes_agent/agent.py"
+                          },
+                          "region": {
+                            "startLine": 11,
+                            "endLine": 11
+                          }
+                        }
+                      },
+                      "properties": {
+                        "role": "root_cause"
+                      }
+                    },
+                    {
+                      "location": {
+                        "physicalLocation": {
+                          "artifactLocation": {
+                            "uri": "src/notes_agent/agent.py"
+                          },
+                          "region": {
+                            "startLine": 35,
+                            "endLine": 35
+                          }
+                        }
+                      },
+                      "properties": {
+                        "role": "sink"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "properties": {
+            "cwe": [
+              "CWE-319"
+            ],
+            "controlStatus": "none",
+            "residualRisk": "high",
+            "recommendations": [
+              "REC-SINK-SIDE-IFC"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

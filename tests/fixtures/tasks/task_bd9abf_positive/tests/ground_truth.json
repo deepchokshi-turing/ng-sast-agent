@@ -1,0 +1,202 @@
+{
+ "schema_version": "gt-0.1",
+ "task_id": "task_bd9abf_positive",
+ "family_id": "fam_84d8",
+ "variant_id": "var_b",
+ "variant_role": "positive",
+ "risk_types_present": [
+  "excessive_agency"
+ ],
+ "matching": {
+  "line_tolerance": 10,
+  "path_line_tolerance": 10,
+  "require_cwe": true
+ },
+ "fix_changed_files": [
+  "src/crewai_codeint_mini/tools/code_interpreter_tool/code_interpreter_tool.py"
+ ],
+ "findings": [
+  {
+   "id": "F1",
+   "is_vulnerable": true,
+   "risk_type": "excessive_agency",
+   "owasp_id": "LLM03:2026",
+   "rule_id": "LLM03.EA.PERMISSIONS",
+   "acceptable_rule_ids": [
+    "LLM03.EA.PERMISSIONS",
+    "LLM03.EA.FUNCTIONALITY"
+   ],
+   "partial_credit_rule_ids": [],
+   "severity": "critical",
+   "primary_cwe": "CWE-749",
+   "acceptable_cwes": [
+    "CWE-749",
+    "CWE-636",
+    "CWE-693",
+    "CWE-94",
+    "CWE-95",
+    "CWE-265",
+    "CWE-78"
+   ],
+   "primary_location": {
+    "file": "src/crewai_codeint_mini/tools/code_interpreter_tool/code_interpreter_tool.py",
+    "start_line": 312,
+    "end_line": 314
+   },
+   "alternative_primary_locations": [
+    {
+     "file": "src/crewai_codeint_mini/tools/code_interpreter_tool/code_interpreter_tool.py",
+     "start_line": 357,
+     "end_line": 363,
+     "why": "run_code_in_restricted_sandbox is the fallback entry point that hands model code to the in-process sandbox. Refusing here also closes the path (upstream deprecated it in the same change)"
+    },
+    {
+     "file": "src/crewai_codeint_mini/tools/code_interpreter_tool/code_interpreter_tool.py",
+     "start_line": 360,
+     "end_line": 360,
+     "why": "sink: SandboxPython.exec call that runs model-written code in the helper process"
+    }
+   ],
+   "path": [
+    {
+     "step": 1,
+     "role": "model_decision",
+     "required": false,
+     "file": "src/crewai_codeint_mini/agent.py",
+     "start_line": 75,
+     "end_line": 75,
+     "note": "agent.run passes the model's tool arguments, including the code it wrote, straight to the Code Interpreter tool"
+    },
+    {
+     "step": 2,
+     "role": "model_decision",
+     "required": true,
+     "file": "src/crewai_codeint_mini/tools/code_interpreter_tool/code_interpreter_tool.py",
+     "start_line": 218,
+     "end_line": 226,
+     "note": "CodeInterpreterTool._run takes the code argument from the model's tool call. With unsafe_mode off it goes to run_code_safety"
+    },
+    {
+     "step": 3,
+     "role": "root_cause",
+     "required": true,
+     "file": "src/crewai_codeint_mini/tools/code_interpreter_tool/code_interpreter_tool.py",
+     "start_line": 312,
+     "end_line": 314,
+     "note": "When docker info fails (Docker missing or stopped), run_code_safety silently falls back to run_code_in_restricted_sandbox instead of failing closed"
+    },
+    {
+     "step": 4,
+     "role": "control_point",
+     "required": false,
+     "file": "src/crewai_codeint_mini/tools/code_interpreter_tool/code_interpreter_tool.py",
+     "start_line": 108,
+     "end_line": 127,
+     "note": "The only control on the fallback path is a module deny list and a trimmed builtins dict inside the same interpreter, which is not an isolation boundary"
+    },
+    {
+     "step": 5,
+     "role": "sink",
+     "required": true,
+     "file": "src/crewai_codeint_mini/tools/code_interpreter_tool/code_interpreter_tool.py",
+     "start_line": 137,
+     "end_line": 137,
+     "alternatives": [
+      {
+       "file": "src/crewai_codeint_mini/tools/code_interpreter_tool/code_interpreter_tool.py",
+       "start_line": 360,
+       "end_line": 360
+      }
+     ],
+     "note": "exec runs model-written code inside the helper process itself, next to the operator's environment and credentials"
+    }
+   ],
+   "controls": [
+    {
+     "name": "docker_isolation",
+     "status": "partial",
+     "at": {
+      "file": "src/crewai_codeint_mini/tools/code_interpreter_tool/code_interpreter_tool.py",
+      "start_line": 312,
+      "end_line": 313
+     },
+     "note": "Container isolation is used only when the docker probe answers. Otherwise the tool degrades silently"
+    },
+    {
+     "name": "in_process_sandbox",
+     "status": "partial",
+     "at": {
+      "file": "src/crewai_codeint_mini/tools/code_interpreter_tool/code_interpreter_tool.py",
+      "start_line": 60,
+      "end_line": 83
+     },
+     "note": "BLOCKED_MODULES and UNSAFE_BUILTINS are a deny list inside the same interpreter and do not form an isolation boundary"
+    },
+    {
+     "name": "fail_closed_without_isolation",
+     "status": "absent",
+     "expected_at": {
+      "file": "src/crewai_codeint_mini/tools/code_interpreter_tool/code_interpreter_tool.py",
+      "start_line": 314,
+      "end_line": 314
+     }
+    }
+   ],
+   "control_status": "partial",
+   "residual_risk": "high",
+   "recommendations": {
+    "required_any_of": [
+     "REC-LEAST-PRIVILEGE",
+     "REC-POLICY-GATE"
+    ],
+    "acceptable": [
+     "REC-MINIMIZE-TOOLS",
+     "REC-ACTION-BOUND-APPROVAL",
+     "REC-NARROW-TYPED-TOOLS"
+    ],
+    "complete_remediation": "Fail closed when Docker is unavailable. Upstream (fb2323b, PR #4791, 1.11.0) made run_code_safety raise RuntimeError instead of calling run_code_in_restricted_sandbox, marked SandboxPython and the restricted sandbox as insecure, and left host execution only behind the explicit unsafe_mode opt-in. The tool was later removed entirely in e64b37c."
+   },
+   "rationale": "The analysis helper is meant to run model-written Python inside the code-interpreter container, and the manifest says model code must never run in the helper process unless the operator sets unsafe_mode, which no deployment does. When Docker is missing or stopped, run_code_safety quietly runs the same code with exec in the helper's own process, guarded only by a module deny list and a trimmed builtins dict. Running code is the tool's job, but the place the code lands has the full reach of the host process and its credentials, so the tool's reach exceeds what its operation needs. LLM03.EA.PERMISSIONS, with EA.FUNCTIONALITY accepted because the end result is open-ended host code execution. CWE-749 from the advisory is primary and CWE-636 (not failing safely) is also accepted. The exec in SandboxPython.exec (line 137) is a path step only, because that line is identical in the negative twin.",
+   "evidence": {
+    "advisory": "https://github.com/advisories/GHSA-5w94-5wxp-rc42",
+    "cve": "CVE-2026-2275",
+    "upstream_fix_commit": "fb2323b3deb3ec62b3965526857e77a2264e4cd0",
+    "upstream_fix_summary": "fb2323b (PR #4791, 1.11.0) makes run_code_safety raise RuntimeError when Docker is unavailable instead of falling back to the in-process restricted sandbox, and marks SandboxPython and run_code_in_restricted_sandbox as not isolated and deprecated.",
+    "repro_test": "validation/repro_test.py::ReproPositive::test_docker_missing_runs_model_code_in_helper_process",
+    "control_test": "validation/repro_test.py::ReproPositive::test_control_docker_available_code_goes_to_container",
+    "canary_id": "CNRY-5c3e9a-run"
+   }
+  }
+ ],
+ "negative_analyses": [
+  {
+   "id": "N1",
+   "kind": "hard_negative_trap",
+   "file": "src/crewai_codeint_mini/tools/code_interpreter_tool/code_interpreter_tool.py",
+   "start_line": 366,
+   "end_line": 391,
+   "trap_rule_prefixes": [
+    "LLM03"
+   ],
+   "why_not_a_finding": "run_code_unsafe runs model code on the host and pip-installs model-named libraries with os.system, but it is reached only when unsafe_mode is true. That is an operator setting in config/agent.json that is false in every deployment, and nothing the model writes can change it."
+  },
+  {
+   "id": "N2",
+   "kind": "hard_negative_trap",
+   "file": "src/crewai_codeint_mini/tools/code_interpreter_tool/code_interpreter_tool.py",
+   "start_line": 281,
+   "end_line": 287,
+   "trap_rule_prefixes": [
+    "LLM03"
+   ],
+   "why_not_a_finding": "The docker info probe uses a fixed argv with no model input. It only checks availability, the weakness is what happens after it reports False."
+  }
+ ],
+ "scoring_weights": {
+  "detection": 0.35,
+  "classification": 0.05,
+  "path": 0.3,
+  "controls": 0.15,
+  "recommendations": 0.15
+ }
+}

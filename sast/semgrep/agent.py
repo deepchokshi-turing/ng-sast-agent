@@ -16,7 +16,6 @@ run; it is accepted and never called.
 
 from __future__ import annotations
 
-import fnmatch
 import json
 import shlex
 import time
@@ -26,21 +25,27 @@ from typing import Any, ClassVar
 from harbor.environments.base import BaseEnvironment
 
 from ..base import REPO_DIR, ScannerAgent
-from ..errors import ScannerError
+from ..errors import ScannerError, ToolOutcome
 from ..findings import Finding
-from ..task_config import TaskSettings, repo_relative
+from ..scope import ALWAYS_EXCLUDE, in_scope, task_scope
+from ..task_config import TaskSettings
 from . import pins
 from .normalise import normalise
 from .options import SemgrepOptions
+
+#: Semgrep exit codes that mean our own configuration is broken (4 unparseable
+#: pattern, 5 unparseable YAML, 7 missing config, 8 invalid language): an
+#: infrastructure failure. Any other non-zero exit (2 is Semgrep's generic fatal
+#: error) is Semgrep failing on this repository, a tool outcome.
+CONFIG_EXIT_CODES = (4, 5, 7, 8)
 
 _INSTALL_SCRIPT = Path(__file__).with_name("install.py")
 _MERGE_SCRIPT = Path(__file__).with_name("merge_rules.py")
 
 
-#: Always skipped: compiled bytecode is a build output, not source. Task images
-#: that run tests or compileall at build time are full of it, and the secrets
-#: rules would regex-scan the binaries.
-ALWAYS_EXCLUDE = ("__pycache__", "*.pyc", "*.pyo")
+#: ``in_scope`` and ``ALWAYS_EXCLUDE`` live in ``sast.scope`` now. They stay
+#: importable from here for older imports (``from sast.semgrep.agent import in_scope``).
+__all__ = ["ALWAYS_EXCLUDE", "SemgrepAgent", "in_scope", "scope_args"]
 
 
 def scope_args(roots: list[str], excludes: list[str]) -> list[str]:
@@ -59,25 +64,6 @@ def scope_args(roots: list[str], excludes: list[str]) -> list[str]:
     for path in [*excludes, *ALWAYS_EXCLUDE]:
         args += ["--exclude", ("/" + path.strip("/")) if "/" in path.strip("/") else path]
     return args
-
-
-def in_scope(file: str, roots: list[str], excludes: list[str]) -> bool:
-    """Whether a repo-relative file is inside the roots and outside the excludes."""
-    def under(path: str, prefix: str) -> bool:
-        prefix = prefix.strip("/")
-        return prefix in (".", "") or path == prefix or path.startswith(prefix + "/")
-
-    if not any(under(file, r) for r in roots):
-        return False
-    parts = file.split("/")
-    for ex in [*excludes, *ALWAYS_EXCLUDE]:
-        ex = ex.strip("/")
-        if "/" in ex:
-            if under(file, ex):
-                return False
-        elif any(fnmatch.fnmatchcase(part, ex) for part in parts):
-            return False
-    return True
 
 
 class SemgrepAgent(ScannerAgent):
@@ -120,8 +106,8 @@ class SemgrepAgent(ScannerAgent):
             raise ScannerError("setup() did not run: Semgrep is not installed")
         options: SemgrepOptions = self.options  # type: ignore[assignment]
 
-        roots = [repo_relative(p, "scan_roots") for p in (options.scan_roots or settings.scanner_roots)] or ["."]
-        excludes = [repo_relative(p, "exclude") for p in (options.exclude or settings.excluded_paths)]
+        roots, excludes = task_scope(options.scan_roots or settings.scanner_roots,
+                                     options.exclude or settings.excluded_paths, "scan_roots", "exclude")
         roots = await self._existing_roots(environment, roots, meta)
 
         jobs = options.jobs or settings.cpus or await self._nproc(environment)
@@ -140,6 +126,8 @@ class SemgrepAgent(ScannerAgent):
         command = [
             f"{work}/venv/bin/semgrep", "scan",
             "--metrics=off", "--disable-version-check", "--no-git-ignore", "--json", "--quiet",
+            # No --dataflow-traces: Semgrep OSS 1.179.0 puts no trace in its JSON
+            # without a login, so there is nothing to read (see normalise.py).
             # Merged per folder at install; ids already carry their original path.
             "--no-rewrite-rule-ids",
             *[arg for d in pins.RULES_DIRS for arg in ("--config", f"{work}/rules-merged/{d.replace('/', '_')}.yaml")],
@@ -168,7 +156,8 @@ class SemgrepAgent(ScannerAgent):
 
         started = time.monotonic()
         result = await self._exec(
-            environment, shell, timeout_sec=budget_sec, what="the Semgrep scan", cwd=REPO_DIR, env=env
+            environment, shell, timeout_sec=budget_sec, what="the Semgrep scan", cwd=REPO_DIR, env=env,
+            tool_step=True,
         )
         seconds = round(time.monotonic() - started, 1)
         self._write_log("command-1", shell, result, seconds)
@@ -178,9 +167,10 @@ class SemgrepAgent(ScannerAgent):
             # Without --error, findings exit 0; any other code is a failed scan
             # (2 missing target, 7 bad config, ...), even though Semgrep still
             # writes a JSON with "results": [] that would read as a clean scan.
-            raise ScannerError(
-                f"Semgrep exited {result.return_code}: {await self._semgrep_errors(environment, output_file)}"
-            )
+            message = f"Semgrep exited {result.return_code}: {await self._semgrep_errors(environment, output_file)}"
+            if result.return_code in CONFIG_EXIT_CODES:
+                raise ScannerError(message)
+            raise ToolOutcome("tool_crashed", message)
         raw = await self._download_bytes(environment, output_file)
         try:
             document = json.loads(raw)
@@ -194,9 +184,7 @@ class SemgrepAgent(ScannerAgent):
         meta.update(counts)
         # Belt and braces: Semgrep's include/exclude matching is gitignore-like;
         # anything it still reported outside the task's scope is dropped and counted.
-        kept = [f for f in findings if in_scope(f.file, roots, excludes)]
-        meta["findings_out_of_scope"] = len(findings) - len(kept)
-        return kept
+        return self._keep_in_scope(findings, roots, excludes, meta)
 
     def artifact_files(self) -> dict[str, str]:
         work = getattr(self, "_work_dir", None)
@@ -211,25 +199,3 @@ class SemgrepAgent(ScannerAgent):
         messages = [" ".join(str(e.get("message") or e.get("type") or "").split())[:300]
                     for e in document.get("errors") or [] if isinstance(e, dict)]
         return "; ".join(messages[:3]) or "no error details in its output"
-
-    async def _existing_roots(self, environment: BaseEnvironment, roots: list[str], meta: dict[str, Any]) -> list[str]:
-        if roots == ["."]:
-            return roots
-        checks = "; ".join(
-            f"if [ -e {shlex.quote(p)} ]; then echo OK {shlex.quote(p)}; else echo MISSING {shlex.quote(p)}; fi"
-            for p in roots
-        )
-        result = await self._exec(environment, checks, timeout_sec=60, what="checking scan roots", cwd=REPO_DIR)
-        present = [line[3:] for line in (result.stdout or "").splitlines() if line.startswith("OK ")]
-        missing = [p for p in roots if p not in present]
-        meta["scan_roots_missing"] = missing
-        if not present:
-            raise ScannerError(f"none of the scan roots exist in {REPO_DIR}: {', '.join(roots)}")
-        return [p for p in roots if p in present]
-
-    async def _nproc(self, environment: BaseEnvironment) -> int:
-        result = await self._exec(environment, "nproc 2>/dev/null || echo 1", timeout_sec=60, what="counting CPUs")
-        try:
-            return max(1, int((result.stdout or "1").strip().splitlines()[0]))
-        except (ValueError, IndexError):
-            return 1

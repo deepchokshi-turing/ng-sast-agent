@@ -1,0 +1,7 @@
+{
+  "manifest_version": "0.1",
+  "application": "calc_service",
+  "intended_task": "Answer GET /calc?expr=... with the value of an arithmetic expression.",
+  "actors": [{"id": "http_client", "description": "any caller of the HTTP endpoint, untrusted"}],
+  "authorized_actions": [{"actor": "http_client", "action": "calculate", "constraint": "arithmetic only"}]
+}

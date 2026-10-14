@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -12,14 +13,14 @@ from harbor.models.agent.context import AgentContext
 
 from sast.errors import ScannerError
 from sast.semgrep.agent import SemgrepAgent
-from tests.conftest import DEV_TASKS, FIXTURES
+from tests.conftest import SAMPLE_TASKS, FIXTURES
 
 
 class FakeSandbox:
     """Just enough of BaseEnvironment: a dict file system and scripted exec."""
 
     def __init__(self, task: str, semgrep_output: bytes | None, scan_exit: int = 0, install_exit: int = 0):
-        self.environment_dir = DEV_TASKS / task / "environment"
+        self.environment_dir = SAMPLE_TASKS / task / "environment"
         self.files: dict[str, bytes] = {}
         self.commands: list[tuple[str, dict | None]] = []
         self.semgrep_output = semgrep_output
@@ -80,12 +81,15 @@ def test_happy_path_writes_sarif_logs_and_metadata(tmp_path):
     scan_log = (tmp_path / "command-1" / "stdout.txt").read_text()
     assert "--exclude tests" in scan_log and "--include /src" in scan_log and "--jobs 1" in scan_log
     assert "--max-memory 1536" in scan_log
+    assert "--dataflow-traces" not in scan_log  # no JSON trace without login
     assert "--no-rewrite-rule-ids" in scan_log and "/opt/sast/rules-merged/generic_secrets.yaml" in scan_log
 
     meta = context.metadata
     assert meta["status"] == "ok"
     assert meta["model_ignored"] == "openai/gpt-5"
-    assert meta["cwe_map"] == "cwe-map-2"
+    assert meta["cwe_map"] == "cwe-map-5"
+    assert meta["heuristics"] == "heuristics-1"
+    assert meta["agent_version"] == "0.5.0+semgrep-1.179.0"
     assert meta["scan_budget_sec"] == 780
     assert meta["results_emitted"] == 2  # the eval() and the merged shell=True pair
     assert meta["findings_compact"][0][-1] == "LLM03.EA.FUNCTIONALITY"
@@ -101,6 +105,14 @@ def test_happy_path_writes_sarif_logs_and_metadata(tmp_path):
     assert "/logs/artifacts/sast/findings.sarif" in sandbox.files
     assert any("cp /opt/sast/out/semgrep.json /logs/artifacts/sast/semgrep.json" in c for c, _ in sandbox.commands)
 
+    # What the agent dropped on the way is in runs[0].properties, never in the results.
+    sarif = json.loads(sandbox.files["/app/output/findings.sarif"])
+    agent_props = sarif["runs"][0]["properties"]["sastAgent"]
+    assert agent_props["agent"] == "semgrep-sast" and agent_props["cweMap"] == "cwe-map-5"
+    assert set(agent_props["dropped"]) == {"unmappedCwe", "ambiguousCwe", "outOfScope", "badLocation"}
+    assert agent_props["dropped"]["outOfScope"] == {"count": 0, "items": []}
+    assert agent_props["dropped"]["unmappedCwe"]["count"] == meta["findings_unmapped"]
+
 
 def test_install_failure_is_an_error_not_a_zero(tmp_path):
     sandbox = FakeSandbox("smoke_eval", None, install_exit=2)
@@ -114,13 +126,9 @@ def test_install_failure_is_an_error_not_a_zero(tmp_path):
     (None, 0, "could not read"),
     (b"{not json", 0, "unreadable"),
     (b'{"errors": []}', 0, "no results list"),
-    (b'{"results": []}', 124, "ran out of time"),
-    (b'{"results": []}', 137, "was killed"),
-    # Semgrep writes "results": [] even when it fails: never a clean scan.
+    # Semgrep writes "results": [] even when it fails: never a clean scan. Exit 7 is our own config.
     (b'{"results": [], "errors": [{"type": "SemgrepError", "message": "invalid configuration"}]}', 7,
      "exited 7: invalid configuration"),
-    (b'{"results": [], "errors": []}', 2, "exited 2: no error details"),
-    (None, 2, "exited 2: no readable output"),
 ])
 def test_untrustworthy_scans_are_errors(tmp_path, output, exit_code, message):
     sandbox = FakeSandbox("smoke_eval", output, scan_exit=exit_code)
@@ -131,6 +139,28 @@ def test_untrustworthy_scans_are_errors(tmp_path, output, exit_code, message):
     assert "/app/output/findings.sarif" not in sandbox.files
     # The diagnosis is still kept.
     assert "/logs/artifacts/sast/metadata.json" in sandbox.files
+
+
+@pytest.mark.parametrize("output, exit_code, reason, message", [
+    (b'{"results": []}', 124, "deadline", "ran out of time"),
+    (b'{"results": []}', 137, "tool_killed", "was killed"),
+    # Semgrep failing on the repository: scored 0, not re-run. Still never a clean scan.
+    (b'{"results": [], "errors": []}', 2, "tool_crashed", "exited 2: no error details"),
+    (None, 2, "tool_crashed", "exited 2: no readable output"),
+])
+def test_tool_outcomes_return_without_a_sarif(tmp_path, output, exit_code, reason, message):
+    """The verifier must run (a normal return) and find no SARIF, so the grader scores 0 on both twins."""
+    sandbox = FakeSandbox("smoke_eval", output, scan_exit=exit_code)
+    _, context, go = run_agent(tmp_path, sandbox)
+    asyncio.run(go())
+    meta = context.metadata
+    assert meta["status"] == "tool_outcome" and meta["sarif_written"] is False
+    assert meta["tool_outcome"]["reason"] == reason and re.search(message, meta["tool_outcome"]["message"])
+    assert "error" not in meta
+    assert "/app/output/findings.sarif" not in sandbox.files and not (tmp_path / "findings.sarif").exists()
+    assert "/logs/artifacts/sast/metadata.json" in sandbox.files
+    saved = json.loads(sandbox.files["/logs/artifacts/sast/metadata.json"])
+    assert saved["tool_outcome"]["reason"] == reason
 
 
 def test_resources_come_from_the_sandbox_config(tmp_path):
@@ -205,3 +235,19 @@ def test_in_scope():
     assert in_scope("lib/a.py", ["."], [])
     assert not in_scope("src/calc_agent/__pycache__/agent.cpython-311.pyc", roots, excludes)
     assert not in_scope("src/old.pyc", ["."], [])
+
+
+def test_scope_module_is_shared_and_old_imports_keep_working():
+    import sast.scope as scope
+    from sast.codeql import agent as codeql_agent
+    from sast.semgrep import agent as semgrep_agent
+
+    assert semgrep_agent.in_scope is scope.in_scope is codeql_agent.in_scope
+    assert semgrep_agent.ALWAYS_EXCLUDE is scope.ALWAYS_EXCLUDE
+    assert scope.task_scope([], []) == (["."], [])
+    assert scope.task_scope(["src/", "config"], ["tests"]) == (["src", "config"], ["tests"])
+    for bad in (["/etc"], ["../x"], ["-rf"]):
+        with pytest.raises(ScannerError, match="relative path inside the repository"):
+            scope.task_scope(bad, [])
+    assert scope.repo_path("/app/repo/./src/a.py") == "src/a.py"
+    assert scope.repo_path("./src\\b.py") == "src/b.py"

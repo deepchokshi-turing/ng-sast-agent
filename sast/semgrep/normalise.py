@@ -2,6 +2,10 @@
 
 Only ``metadata.category == "security"`` results are kept, the same filter as the
 earlier SAST sheet. It covers audit, secure-default and secrets rules.
+
+No dataflow trace is read. Semgrep OSS 1.179.0 writes no ``dataflow_trace`` in
+its JSON output without a login (``extra.lines`` reads "requires login"), and
+only its plain-text output prints a trace, so the agent does not ask for one.
 """
 
 from __future__ import annotations
@@ -9,6 +13,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from .. import heuristics
 from ..findings import Finding
 
 _CWE = re.compile(r"\bCWE-(\d+)\b", re.IGNORECASE)
@@ -77,6 +82,7 @@ def normalise(output: dict[str, Any]) -> tuple[list[Finding], dict[str, Any]]:
             end_line=max(end, start),
             message=" ".join(str(extra.get("message") or "").split())[:1000],
             level=_LEVELS.get(str(extra.get("severity") or "").upper(), "warning"),
+            residual_risk=heuristics.residual_risk(extra.get("severity"), metadata.get("impact")),
         ))
 
     errors = output.get("errors") or []

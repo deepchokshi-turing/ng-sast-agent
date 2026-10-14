@@ -1,0 +1,40 @@
+version = "1.0"
+
+[metadata]
+author_name = "Turing"
+category = "security-static-analysis"
+tags = ["owasp-llm-2026", "static-scanner-eval"]
+difficulty = "hard"
+
+# Spec 5.2 task-level fields (non-label)
+schema_version = "0.1"
+task_id = "task_3920a8_positive"
+repository_id = "repo_langchain-ai_langchain"
+family_id = "fam_2109"
+variant_id = "var_a"
+related_variant_ids = ["fam_2109:var_b"]
+source_origin = "adapted_open_source"
+source_url = "https://github.com/langchain-ai/langchain"
+source_commit = "4421ba46d7200ef7cbf45ea16cc0e665ba570daa"
+license = "MIT"
+modifications = "APIChain of langchain at 4421ba4 extracted into langchain_mini with urllib request shims, a stub model and a weather assistant app."
+languages = ["python"]
+frameworks = ["langchain"]
+package_versions = { python = ">=3.10", langchain = "0.0.328" }
+architecture = "single-chain API question answering with model-written request urls"
+entrypoint = "python -m langchain_mini \"What is the weather like right now in Munich?\""
+build_command = "python -m compileall -q src"
+test_command = "python -m unittest discover -s tests -q"
+scanner_roots = ["src", "config", "fixtures", "security_manifest.json", "pyproject.toml"]
+excluded_paths = ["tests"]
+
+[agent]
+timeout_sec = 900.0
+
+[verifier]
+timeout_sec = 120.0
+
+[environment]
+build_timeout_sec = 600.0
+cpus = 1
+memory_mb = 2048

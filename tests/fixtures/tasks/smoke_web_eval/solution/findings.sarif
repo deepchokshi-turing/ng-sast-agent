@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "oracle",
+          "version": "gt-0.1",
+          "rules": [
+            {
+              "id": "LLM03.EA.FUNCTIONALITY"
+            }
+          ]
+        }
+      },
+      "results": [
+        {
+          "ruleId": "LLM03.EA.FUNCTIONALITY",
+          "level": "error",
+          "message": {
+            "text": "The expr query parameter reaches eval()."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {"uri": "src/calc_service/server.py"},
+                "region": {"startLine": 8, "endLine": 8}
+              }
+            }
+          ],
+          "codeFlows": [
+            {
+              "threadFlows": [
+                {
+                  "locations": [
+                    {
+                      "location": {"physicalLocation": {"artifactLocation": {"uri": "src/calc_service/server.py"}, "region": {"startLine": 13, "endLine": 14}}},
+                      "properties": {"role": "source"}
+                    },
+                    {
+                      "location": {"physicalLocation": {"artifactLocation": {"uri": "src/calc_service/server.py"}, "region": {"startLine": 8, "endLine": 8}}},
+                      "properties": {"role": "root_cause"}
+                    },
+                    {
+                      "location": {"physicalLocation": {"artifactLocation": {"uri": "src/calc_service/server.py"}, "region": {"startLine": 8, "endLine": 8}}},
+                      "properties": {"role": "sink"}
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "properties": {
+            "cwe": ["CWE-95", "CWE-94"],
+            "controlStatus": "none",
+            "residualRisk": "high",
+            "recommendations": ["REC-NARROW-TYPED-TOOLS"]
+          }
+        }
+      ]
+    }
+  ]
+}

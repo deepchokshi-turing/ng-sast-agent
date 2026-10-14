@@ -1,0 +1,12 @@
+{
+  "manifest_version": "0.1",
+  "application": "notes_agent",
+  "intended_task": "Answer questions about the user's own notes. The model may look a note up by title and count its words.",
+  "actors": [{"id": "user"}, {"id": "llm", "description": "untrusted with respect to which commands, queries and files it touches"}],
+  "authorized_actions": [
+    {"actor": "llm", "action": "find_note", "constraint": "read one note of the current user by exact title"},
+    {"actor": "llm", "action": "word_count", "constraint": "count the words of one note"}
+  ],
+  "authorized_recipients": [{"id": "user"}],
+  "data": [{"id": "notes", "classification": "personal", "owner": "user"}]
+}

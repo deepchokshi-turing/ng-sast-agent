@@ -10,31 +10,73 @@
 # CPU of the machine that runs Harbor. It only helps local runs: Daytona pulls
 # images from a registry.
 #
-# The tag is sast.__version__, so a task image always copies tools that match
-# the agent version that will check them.
+# The tag is the agent version from pyproject.toml (it must equal
+# sast.__version__), so a task image always copies tools that match the agent
+# version that will check them. Task Dockerfiles pin the same tag, for example
+# ARG SAST_TOOLS_IMAGE=sast-tools:0.5.0.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-VERSION="$(PYTHONPATH="$ROOT" python3 -c 'import sast; print(sast.__version__)')"
+VERSION="$(python3 -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["project"]["version"])' "$ROOT/pyproject.toml")"
+PKG_VERSION="$(PYTHONPATH="$ROOT" python3 -c 'import sast; print(sast.__version__)')"
+if [[ "$VERSION" != "$PKG_VERSION" ]]; then
+  echo "pyproject.toml says $VERSION but sast.__version__ is $PKG_VERSION: make them equal first" >&2
+  exit 1
+fi
 CONTEXT="$(mktemp -d)"
 trap 'rm -rf "$CONTEXT"' EXIT
 
-cp "$ROOT/images/sast-tools/Dockerfile" "$ROOT/sast/semgrep/install.py" "$ROOT/sast/semgrep/merge_rules.py" "$CONTEXT/"
+cp "$ROOT/images/sast-tools/Dockerfile" "$ROOT/images/sast-tools/fetch_archive.py" \
+   "$ROOT/sast/semgrep/install.py" "$ROOT/sast/semgrep/merge_rules.py" "$CONTEXT/"
 PYTHONPATH="$ROOT" python3 -c "import json, sast.semgrep.pins as p; print(json.dumps(p.as_dict()))" > "$CONTEXT/pins.json"
+# The manifest writer and every tool's pins, for /opt/sast/MANIFEST.json.
+cp "$ROOT/sast/manifest.py" "$CONTEXT/sast_manifest.py"
+PYTHONPATH="$ROOT" python3 -c "import json, sast.semgrep.pins as s, sast.codeql.pins as c, sast.sonarqube.pins as q, sast.claude_review.pins as r; print(json.dumps({'semgrep': s.as_dict(), 'codeql': c.as_dict(), 'sonar-scanner': q.as_dict(), 'claude-review': r.as_dict()}))" > "$CONTEXT/manifest_pins.json"
+# The Claude Code security review part: its installer, pins and hash-pinned Python requirements.
+cp "$ROOT/sast/claude_review/install.py" "$CONTEXT/claude_review_install.py"
+cp "$ROOT/sast/claude_review/requirements.lock" "$CONTEXT/requirements.lock"
+PYTHONPATH="$ROOT" python3 -c "import json, sast.claude_review.pins as r; print(json.dumps(r.as_dict()))" > "$CONTEXT/claude_review_pins.json"
+
+# CodeQL and sonar-scanner pins, passed as build arguments. A missing sha256 stops here.
+PYTHONPATH="$ROOT" python3 - > "$CONTEXT/build-args.txt" <<'PY'
+import sast.codeql.pins as c, sast.sonarqube.pins as s
+values = {
+    "CODEQL_URL_AMD64": c.bundle_url("amd64"),
+    "CODEQL_SHA256_AMD64": c.BUNDLES["amd64"][1],
+    "CODEQL_URL_ARM64": c.bundle_url("arm64"),
+    "CODEQL_SHA256_ARM64": c.BUNDLES["arm64"][1],
+    "SONAR_SCANNER_VERSION": s.SONAR_SCANNER_VERSION,
+    "SONAR_SCANNER_SHA256_AMD64": s.SONAR_SCANNER_SHA256["x86_64"],
+    "SONAR_SCANNER_SHA256_ARM64": s.SONAR_SCANNER_SHA256["aarch64"],
+}
+missing = [k for k, v in values.items() if not v]
+if missing:
+    raise SystemExit("missing pins: " + ", ".join(missing))
+for k, v in values.items():
+    print("--build-arg")
+    print(f"{k}={v}")
+PY
+TOOL_ARGS=()
+# Python on Windows writes CRLF, so drop a trailing carriage return from each line.
+while IFS= read -r line; do TOOL_ARGS+=("$line"); done < <(tr -d '\r' < "$CONTEXT/build-args.txt")
+if [[ ${#TOOL_ARGS[@]} -ne 14 ]]; then
+  echo "could not read the CodeQL and sonar-scanner pins" >&2
+  exit 1
+fi
 
 if [[ $# -eq 0 ]]; then
-  docker build -t "sast-tools:$VERSION" "$CONTEXT"
+  docker build "${TOOL_ARGS[@]}" -t "sast-tools:$VERSION" "$CONTEXT"
   echo "built sast-tools:$VERSION"
 elif [[ "$1" == "--save" ]]; then
   ARCH="${2:?usage: --save amd64|arm64}"
   OUT="$ROOT/handoff/sast-tools_${VERSION}_${ARCH}.tar"
   mkdir -p "$ROOT/handoff"
-  docker build --platform "linux/$ARCH" -t "sast-tools:$VERSION" "$CONTEXT"
+  docker build "${TOOL_ARGS[@]}" --platform "linux/$ARCH" -t "sast-tools:$VERSION" "$CONTEXT"
   docker save "sast-tools:$VERSION" | gzip > "$OUT.gz"
   # Put this machine's own build back under the tag (cached, so quick).
-  docker build -t "sast-tools:$VERSION" "$CONTEXT" >/dev/null
+  docker build "${TOOL_ARGS[@]}" -t "sast-tools:$VERSION" "$CONTEXT" >/dev/null
   echo "saved $OUT.gz (load with: docker load -i $(basename "$OUT").gz)"
 else
-  docker buildx build --platform linux/amd64,linux/arm64 -t "$1:$VERSION" --push "$CONTEXT"
+  docker buildx build "${TOOL_ARGS[@]}" --platform linux/amd64,linux/arm64 -t "$1:$VERSION" --push "$CONTEXT"
   echo "pushed $1:$VERSION"
 fi

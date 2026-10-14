@@ -1,0 +1,18 @@
+# Harbor Docker Compose overlay for the Codex security review agent (sast.codex_security).
+#
+# Codex runs the model's shell commands inside its own read-only sandbox (bubblewrap). bubblewrap
+# needs unprivileged user namespaces, which Docker's default seccomp profile blocks, so in a default
+# Harbor container the agent stops with sandbox_unavailable. This overlay turns the container's seccomp
+# filter off for the task container ("main") only, so Codex's own sandbox can start and confine every
+# command to the in-scope copy. Use it only for Codex runs:
+#
+#   harbor run ... -a sast.codex_security.agent:CodexSecurityAgent \
+#     --extra-docker-compose harbor/codex-sandbox.compose.yaml
+#
+# Trade-off: the container loses Docker's syscall filter; in exchange each model command runs in a
+# read-only bubblewrap sandbox that can see only the in-scope copy (the repo, the key folder, CODEX_HOME
+# and the output folders are denied). See docs/codex-security-agent.md.
+services:
+  main:
+    security_opt:
+      - seccomp=unconfined

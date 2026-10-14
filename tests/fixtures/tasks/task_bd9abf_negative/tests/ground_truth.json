@@ -1,0 +1,115 @@
+{
+ "schema_version": "gt-0.1",
+ "task_id": "task_bd9abf_negative",
+ "family_id": "fam_84d8",
+ "variant_id": "var_a",
+ "variant_role": "negative",
+ "risk_types_present": [],
+ "matching": {
+  "line_tolerance": 10,
+  "path_line_tolerance": 10,
+  "require_cwe": true
+ },
+ "contrast_rule_ids": [
+  "LLM03.EA.PERMISSIONS"
+ ],
+ "fixed_locations": [
+  {
+   "file": "src/crewai_codeint_mini/tools/code_interpreter_tool/code_interpreter_tool.py",
+   "start_line": 322,
+   "end_line": 333,
+   "why": "run_code_safety raises RuntimeError when Docker is unavailable instead of calling run_code_in_restricted_sandbox"
+  },
+  {
+   "file": "src/crewai_codeint_mini/tools/code_interpreter_tool/code_interpreter_tool.py",
+   "start_line": 307,
+   "end_line": 308,
+   "why": "run_code_safety docstring says it fails closed"
+  },
+  {
+   "file": "src/crewai_codeint_mini/tools/code_interpreter_tool/code_interpreter_tool.py",
+   "start_line": 317,
+   "end_line": 320,
+   "why": "docstring documents the RuntimeError"
+  },
+  {
+   "file": "src/crewai_codeint_mini/tools/code_interpreter_tool/code_interpreter_tool.py",
+   "start_line": 53,
+   "end_line": 62,
+   "why": "SandboxPython docstring says it is not an isolation boundary"
+  },
+  {
+   "file": "src/crewai_codeint_mini/tools/code_interpreter_tool/code_interpreter_tool.py",
+   "start_line": 364,
+   "end_line": 376,
+   "why": "run_code_in_restricted_sandbox docstring marks it deprecated and not isolated"
+  },
+  {
+   "file": "src/crewai_codeint_mini/tools/code_interpreter_tool/code_interpreter_tool.py",
+   "start_line": 385,
+   "end_line": 388,
+   "why": "the restricted sandbox prints a warning"
+  }
+ ],
+ "fix_changed_files": [
+  "src/crewai_codeint_mini/tools/code_interpreter_tool/code_interpreter_tool.py"
+ ],
+ "findings": [],
+ "negative_analyses": [
+  {
+   "id": "N1",
+   "kind": "minimal_contrast",
+   "contrast_of": "F1",
+   "file": "src/crewai_codeint_mini/tools/code_interpreter_tool/code_interpreter_tool.py",
+   "start_line": 322,
+   "end_line": 333,
+   "rationale": "The model still writes the code and unsafe_mode is still off, but when docker info fails run_code_safety now prints an error and raises RuntimeError. Nothing calls run_code_in_restricted_sandbox from _run any more, so model code runs in the container or not at all. The agent turns the exception into a tool error string."
+  },
+  {
+   "id": "N2",
+   "kind": "hard_negative_trap",
+   "file": "src/crewai_codeint_mini/tools/code_interpreter_tool/code_interpreter_tool.py",
+   "start_line": 363,
+   "end_line": 393,
+   "trap_rule_prefixes": [
+    "LLM03"
+   ],
+   "why_not_a_finding": "SandboxPython.exec and run_code_in_restricted_sandbox are still defined (upstream kept them as deprecated), but no path from the tool's _run or the agent reaches them after the change."
+  },
+  {
+   "id": "N3",
+   "kind": "hard_negative_trap",
+   "file": "src/crewai_codeint_mini/tools/code_interpreter_tool/code_interpreter_tool.py",
+   "start_line": 397,
+   "end_line": 422,
+   "trap_rule_prefixes": [
+    "LLM03"
+   ],
+   "why_not_a_finding": "run_code_unsafe runs model code on the host and pip-installs model-named libraries with os.system, but it is reached only when unsafe_mode is true. That is an operator setting in config/agent.json that is false in every deployment, and nothing the model writes can change it."
+  },
+  {
+   "id": "N4",
+   "kind": "hard_negative_trap",
+   "file": "src/crewai_codeint_mini/tools/code_interpreter_tool/code_interpreter_tool.py",
+   "start_line": 286,
+   "end_line": 292,
+   "trap_rule_prefixes": [
+    "LLM03"
+   ],
+   "why_not_a_finding": "The docker info probe uses a fixed argv with no model input. It only checks availability, the weakness is what happens after it reports False."
+  }
+ ],
+ "evidence": {
+  "advisory": "https://github.com/advisories/GHSA-5w94-5wxp-rc42",
+  "cve": "CVE-2026-2275",
+  "upstream_fix_commit": "fb2323b3deb3ec62b3965526857e77a2264e4cd0",
+  "upstream_fix_summary": "fb2323b (PR #4791, 1.11.0) makes run_code_safety raise RuntimeError when Docker is unavailable instead of falling back to the in-process restricted sandbox, and marks SandboxPython and run_code_in_restricted_sandbox as not isolated and deprecated."
+ },
+ "scoring_weights": {
+  "detection": 0.35,
+  "classification": 0.05,
+  "path": 0.3,
+  "controls": 0.15,
+  "recommendations": 0.15
+ }
+}

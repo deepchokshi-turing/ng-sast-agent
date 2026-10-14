@@ -3,11 +3,11 @@ import pytest
 from sast import task_config
 from sast.errors import ScannerError
 from sast.semgrep.agent import SemgrepAgent
-from tests.conftest import DEV_TASKS
+from tests.conftest import SAMPLE_TASKS
 
 
 def test_reads_the_reference_task():
-    s = task_config.load(DEV_TASKS / "task_7f3a91" / "environment")
+    s = task_config.load(SAMPLE_TASKS / "task_7f3a91" / "environment")
     assert s.scanner_roots == ("src", "config", "fixtures", "security_manifest.json", "pyproject.toml")
     assert s.excluded_paths == ("tests",)
     assert (s.cpus, s.memory_mb, s.agent_timeout_sec) == (1, 2048, 900.0)
@@ -36,7 +36,10 @@ def test_options_split_strings_and_keep_unknown_keys(tmp_path):
 
 
 def test_preflight_never_fails_a_job_on_an_unknown_key():
-    SemgrepAgent.preflight({"something_new": "1"})
+    assert SemgrepAgent.preflight({"something_new": "1"}) is None
+    # The key is kept and recorded, not silently lost.
+    options = SemgrepAgent.parse_options({"something_new": "1"}, {})
+    assert options.model_extra == {"something_new": "1"}
 
 
 def test_preflight_still_rejects_a_bad_value():
