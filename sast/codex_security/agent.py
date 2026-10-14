@@ -48,7 +48,7 @@ from typing import Any, ClassVar
 from harbor.environments.base import BaseEnvironment, ExecResult
 from harbor.models.trial.result import AgentInfo, ModelInfo
 
-from .. import sarif
+from .. import pricing, sarif
 from ..base import REPO_DIR, TIMEOUT_MARGIN_SEC, ScannerAgent, run_entry
 from ..claude_review import contract
 from ..claude_review.agent import (
@@ -197,7 +197,13 @@ class CodexSecurityAgent(ScannerAgent):
         return self.options  # type: ignore[return-value]
 
     def review_model(self) -> str:
-        return self.review_options.model or pins.DEFAULT_MODEL
+        """--ak model, else Harbor's -m when it names an OpenAI model, else Codex Security's default."""
+        return self.review_options.model or self.harbor_model("openai", ("gpt-", "codex-")) or pins.DEFAULT_MODEL
+
+    def model_source(self) -> str:
+        if self.review_options.model:
+            return "option"
+        return "harbor_model_name" if self.harbor_model("openai", ("gpt-", "codex-")) else "default"
 
     def to_agent_info(self) -> AgentInfo:
         """The model this agent really calls, not Harbor's ``-m``."""
@@ -209,12 +215,42 @@ class CodexSecurityAgent(ScannerAgent):
         return {
             "engine": ENGINE,
             "model": self.review_model(),
-            "model_source": "option" if options.model else "default",
+            "model_source": self.model_source(),
             "reasoning_effort": options.reasoning_effort,
             "mode": options.mode,
             "sandbox": options.sandbox,
             "auth_source": choose_auth(options.auth)[0],
-            "harbor_model_name_ignored": self.model_name,
+            "harbor_model_name": self.model_name,
+            "harbor_model_name_used": self.model_source() == "harbor_model_name",
+        }
+
+    def usage_summary(self, meta: dict[str, Any]) -> dict[str, Any] | None:
+        """Codex reports tokens, not money: every attempt's usage, priced from the list table."""
+        review = meta.get("codex_security") if isinstance(meta.get("codex_security"), dict) else None
+        if not review:
+            return None
+        usages = [a.get("usage") for a in review.get("attempt_outcomes") or []
+                  if isinstance(a, dict) and isinstance(a.get("usage"), dict)]
+        if not usages and isinstance(review.get("usage"), dict):
+            usages = [review["usage"]]
+        if not usages:
+            return None
+        model = review.get("model") or self.review_model()
+        tokens = {"input": 0, "cache_read": 0, "cache_write": 0, "output": 0}
+        cost: float | None = 0.0
+        for usage in usages:
+            part, c = pricing.openai_usage_cost(model, usage)
+            for k in tokens:
+                tokens[k] += part[k]
+            if any(part.values()):
+                cost = None if c is None or cost is None else cost + c
+        return {
+            "n_input_tokens": tokens["input"],
+            "n_cache_tokens": tokens["cache_read"],
+            "n_output_tokens": tokens["output"],
+            "cost_usd": round(cost, 6) if cost is not None else None,
+            "cost_source": "estimate: Codex token usage (all attempts) x {} list price as of {}{}".format(
+                model, pricing.PRICES_AS_OF, "" if cost is not None else " (model not in the price table)"),
         }
 
     def sarif_driver_properties(self) -> dict[str, Any]:
@@ -308,6 +344,7 @@ class CodexSecurityAgent(ScannerAgent):
             "attempts_allowed": options.attempts,
             "normaliser": normalise_module.VERSION,
             # Codex reports tokens, not money, and has no cost or turn cap: only the time limit bounds a run.
+            # The estimate from the tokens is in usage_summary (and Harbor's cost_usd).
             "cost_usd": None,
         }
         meta["codex_security"] = review

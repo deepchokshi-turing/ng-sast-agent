@@ -302,7 +302,7 @@ def test_happy_path_maps_findings_and_keeps_the_key_in_a_file(tmp_path, api_key)
     assert meta["engine"] == ENGINE == "codex exec security review"
     assert meta["model"] == MODEL and meta["model_source"] == "option" and meta["mode"] == "stock"
     assert meta["auth_source"] == "OPENAI_API_KEY" and meta["sandbox"] == "read-only"
-    assert meta["harbor_model_name_ignored"] == "anthropic/claude-x"
+    assert meta["harbor_model_name"] == "anthropic/claude-x" and meta["harbor_model_name_used"] is False
     info = agent.to_agent_info()
     assert info.model_info.name == MODEL and info.model_info.provider == "openai"
     assert meta["agent_version"] == f"{sast.__version__}+codex-exec-security-review-codex-cli-{pins.CODEX_VERSION}"

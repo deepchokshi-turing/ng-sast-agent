@@ -935,7 +935,7 @@ Every option is `--ak key=value` or the host variable `CLAUDE_REVIEW_<KEY>`
 
 | Option | Default | Meaning |
 |---|---|---|
-| `model` | upstream default, `claude-opus-4-1-20250805` (may be retired, see above) | model for the review and, unless `filter_model` is set, the filter. Harbor's `-m` is recorded and not used |
+| `model` | upstream default, `claude-opus-4-1-20250805` (may be retired, see above) | model for the review and, unless `filter_model` is set, the filter. Without it, Harbor's `-m` is used when it names an Anthropic model (`anthropic/<id>` or a bare `claude-*` id); any other `-m` is ignored and recorded (`harbor_model_name`, `model_source`) |
 | `filter_model` | `model` | model for the per-finding filter |
 | `mode` | `scoped` | `stock`: upstream prompts and filter unchanged. `scoped`: builds custom scan instructions from the task's own output contract (the Scope table, the field vocabularies and the Recommendation catalogue of the instruction Harbor passes to the agent), tells the reviewer to read `security_manifest.json` first, asks for a `rule_id`, CWE list, path, control status, residual risk and catalogue recommendation ids per finding, and uses the upstream filter text without hard exclusions 7 ("lack of hardening") and 14 ("user content in AI prompts is not a vulnerability"). See [Scoped mode](#scoped-mode) |
 | `auth` | `auto` | `api_key` (`ANTHROPIC_API_KEY`), `oauth` (`CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`), or `auto`: the API key when it is set, else the token |
@@ -1091,7 +1091,7 @@ PYTHONPATH=$PWD .venv/bin/harbor run -y -p ../harbor-tasks -n 1 \
 
 | Option | Default | Meaning |
 |---|---|---|
-| `model` | `gpt-5.6-sol` (Codex Security's default scan model) | `codex exec -m`. Harbor's `-m` is recorded and not used |
+| `model` | `gpt-5.6-sol` (Codex Security's default scan model) | `codex exec -m`. Without it, Harbor's `-m` is used when it names an OpenAI model (`openai/<id>` or a bare `gpt-*`/`codex-*` id); any other `-m` is ignored and recorded (`harbor_model_name`, `model_source`) |
 | `reasoning_effort` | the model's own default | Codex `model_reasoning_effort` (Codex Security uses `xhigh`) |
 | `mode` | `scoped` | `stock`: fixed security review prompt, Codex's own review finding shape plus category and CWE. `scoped`: adds the task's output contract (ruleIds, path roles, control status, residual risk, catalogue) to the prompt and, as enums, to the output schema |
 | `sandbox` | `read-only` | `read-only` or `container` (see above) |

@@ -60,7 +60,7 @@ from typing import Any, ClassVar
 from harbor.environments.base import BaseEnvironment, ExecResult
 from harbor.models.trial.result import AgentInfo, ModelInfo
 
-from .. import sarif
+from .. import pricing, sarif
 from ..base import REPO_DIR, TIMEOUT_MARGIN_SEC, ScannerAgent, run_entry
 from ..errors import ScannerError, ToolOutcome
 from ..findings import Finding
@@ -273,7 +273,13 @@ class ClaudeReviewAgent(ScannerAgent):
         return self.options  # type: ignore[return-value]
 
     def review_model(self) -> str:
-        return self.review_options.model or pins.UPSTREAM_DEFAULT_MODEL
+        """--ak model, else Harbor's -m when it names an Anthropic model, else upstream's default."""
+        return self.review_options.model or self.harbor_model("anthropic", ("claude-",))             or pins.UPSTREAM_DEFAULT_MODEL
+
+    def model_source(self) -> str:
+        if self.review_options.model:
+            return "option"
+        return "harbor_model_name" if self.harbor_model("anthropic", ("claude-",)) else "upstream_default"
 
     def filter_model(self) -> str:
         return self.review_options.filter_model or self.review_model()
@@ -303,15 +309,50 @@ class ClaudeReviewAgent(ScannerAgent):
         options = self.review_options
         return {
             "model": self.review_model(),
-            "model_source": "option" if options.model else "upstream_default",
+            "model_source": self.model_source(),
             "filter_model": self.filter_model() if self.filter_mode() == "claude" else None,
             "mode": options.mode,
             "filter_mode": self.filter_mode(),
             "auth": self.auth_mode(),
             # Harbor's -m: recorded, never used (the platform makes every run name one).
-            "harbor_model_name_ignored": self.model_name,
+            "harbor_model_name": self.model_name,
+            "harbor_model_name_used": self.model_source() == "harbor_model_name",
             # None: the CLI's own default, as upstream; a value is passed as --effort (a deviation).
             "reasoning_effort": options.reasoning_effort,
+        }
+
+    def usage_summary(self, meta: dict[str, Any]) -> dict[str, Any] | None:
+        """The CLI's own reported cost (every attempt) plus the filter's direct API calls,
+        priced from the list table; tokens from the CLI's final attempt plus the API calls."""
+        review = meta.get("claude_review") if isinstance(meta.get("claude_review"), dict) else None
+        if not review:
+            return None
+        cli_costs = [c for c in review.get("attempt_cost_usd") or [] if isinstance(c, (int, float))]
+        cli_tokens = {"input": 0, "cache_read": 0, "cache_write": 0, "output": 0}
+        for row in (review.get("model_usage") or {}).values():
+            if isinstance(row, dict):
+                cli_tokens["input"] += int(row.get("inputTokens") or 0)
+                cli_tokens["cache_read"] += int(row.get("cacheReadInputTokens") or 0)
+                cli_tokens["cache_write"] += int(row.get("cacheCreationInputTokens") or 0)
+                cli_tokens["output"] += int(row.get("outputTokens") or 0)
+        api_tokens, api_cost = pricing.anthropic_usage_cost(review.get("api_usage"))
+        tokens = {k: cli_tokens[k] + api_tokens[k] for k in cli_tokens}
+        if not cli_costs and not any(tokens.values()):
+            return None
+        has_api = any(api_tokens.values())
+        # No CLI cost and no API tokens: nothing to price. An API model without a price: no estimate.
+        cost = None
+        if (cli_costs or has_api) and not (has_api and api_cost is None):
+            cost = round(sum(cli_costs) + (api_cost or 0.0), 6)
+        return {
+            "n_input_tokens": tokens["input"] + tokens["cache_read"] + tokens["cache_write"],
+            "n_cache_tokens": tokens["cache_read"],
+            "n_output_tokens": tokens["output"],
+            "cost_usd": cost,
+            "cost_cli_usd": round(sum(cli_costs), 6) if cli_costs else None,
+            "cost_api_estimate_usd": api_cost if has_api else 0.0,
+            "cost_source": "Claude Code CLI reported cost (all attempts) + filter API calls at list prices "
+                           "as of {} (tokens: final CLI attempt + API calls)".format(pricing.PRICES_AS_OF),
         }
 
     def sarif_driver_properties(self) -> dict[str, Any]:

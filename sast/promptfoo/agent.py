@@ -74,6 +74,15 @@ _HERE = Path(__file__).parent
 
 #: The host variable with the API key, and the one promptfoo reads (``resolveBaseAuthCredentials``).
 KEY_ENV = "PROMPTFOO_API_KEY"
+#: Host variables read for the key, first set wins. PROMPTFOO_TOKEN is the name the platform
+#: project uses; the key still reaches promptfoo only as PROMPTFOO_API_KEY in its own process.
+KEY_ENVS = (KEY_ENV, "PROMPTFOO_TOKEN")
+
+
+def key_source(environ: Any = None) -> str | None:
+    """The first host variable in KEY_ENVS that holds a key (its name, never the value)."""
+    environ = os.environ if environ is None else environ
+    return next((n for n in KEY_ENVS if str(environ.get(n, "") or "").strip()), None)
 KEY_DIR = "secret"
 KEY_FILE = "promptfoo-key"
 #: Under the work dir.
@@ -126,10 +135,9 @@ OUTCOME_CODES = {
 
 def key_problem(environ: Any = None) -> str | None:
     """Why the host's credential is unusable, else None. Only the name is looked at."""
-    environ = os.environ if environ is None else environ
-    if str(environ.get(KEY_ENV, "") or "").strip():
+    if key_source(environ):
         return None
-    return (f"{KEY_ENV} is not set on the host: the Promptfoo Code Scanning agent needs a Promptfoo API key "
+    return (f"neither {' nor '.join(KEY_ENVS)} is set on the host: the Promptfoo Code Scanning agent needs a Promptfoo API key "
             "(see README.md)")
 
 
@@ -170,7 +178,7 @@ class PromptfooCodeScanAgent(ScannerAgent):
             "model": None,
             "model_source": "chosen by the Promptfoo Code Scanning service, not reported",
             "mode": options.mode,
-            "auth_source": KEY_ENV,
+            "auth_source": key_source() or KEY_ENV,
             "harbor_model_name_ignored": self.model_name,
         }
 
@@ -219,7 +227,7 @@ class PromptfooCodeScanAgent(ScannerAgent):
         problem = key_problem()
         if problem:
             raise ScannerError(problem)
-        return os.environ[KEY_ENV].strip()
+        return os.environ[key_source()].strip()
 
     async def scan(
         self,
@@ -242,7 +250,7 @@ class PromptfooCodeScanAgent(ScannerAgent):
             "git_version": pins.GIT_DEB_VERSION,
             "min_severity": options.min_severity,
             "diffs_only": options.diffs_only,
-            "auth_source": KEY_ENV,
+            "auth_source": key_source() or KEY_ENV,
             "api_host": "https://api.promptfoo.app (promptfoo default)",
             "header_format": guidance.HEADER_FORMAT,
             # Promptfoo's response reports no cost, token count or model.
@@ -438,7 +446,7 @@ class PromptfooCodeScanAgent(ScannerAgent):
         cwd: str | None = None,
     ) -> ExecResult:
         """The scan exec (a tool step), logged with the key scrubbed. It is in neither the command nor the env."""
-        if key in command or any(key in value for value in env.values()) or KEY_ENV in env:  # a programming error
+        if key in command or any(key in value for value in env.values()) or any(n in env for n in KEY_ENVS):
             raise ScannerError(f"refusing to run a command whose command line or env contains {KEY_ENV}")
         started = time.monotonic()
         try:

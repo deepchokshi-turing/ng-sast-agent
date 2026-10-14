@@ -247,7 +247,7 @@ def test_happy_path_maps_findings_and_keeps_the_key_in_a_file(tmp_path, api_key)
 
     # The model it really uses, not Harbor's -m.
     assert meta["model"] == MODEL and meta["model_source"] == "option"
-    assert meta["harbor_model_name_ignored"] == "openai/gpt-5" and "model_ignored" not in meta
+    assert meta["harbor_model_name"] == "openai/gpt-5" and meta["harbor_model_name_used"] is False
     assert meta["mode"] == "stock" and meta["filter_mode"] == "claude"
     info = agent.to_agent_info()
     assert info.model_info.name == MODEL and info.model_info.provider == "anthropic"
