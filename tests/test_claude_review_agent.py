@@ -195,6 +195,7 @@ def api_key(monkeypatch):
 
 def run_agent(tmp_path, sandbox, instruction="instruction text", **options):
     options.setdefault("model", MODEL)
+    options.setdefault("mode", "stock")  # these tests were written for stock; scoped is the default now
     agent = ClaudeReviewAgent(logs_dir=tmp_path, model_name="openai/gpt-5", **options)
     context = AgentContext()
 
@@ -807,3 +808,7 @@ def test_record_survives_an_early_driver_error_with_scalar_fields():
     assert review["filter_summary"] is None and review["filter_calls"] == 0
     assert review["attempts"] == 0 and review["pr"] == {} and review["findings_raw"] == 0
     assert review["request_options"]["auth"] == "oauth"
+
+
+def test_scoped_is_the_default_mode(tmp_path):
+    assert ClaudeReviewAgent(logs_dir=tmp_path).options.mode == "scoped"

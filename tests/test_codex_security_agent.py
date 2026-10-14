@@ -182,6 +182,7 @@ def api_key(monkeypatch):
 
 
 def run_agent(tmp_path, box, instruction="instruction text", **options):
+    options.setdefault("mode", "stock")  # these tests were written for stock; scoped is the default now
     agent = CodexSecurityAgent(logs_dir=tmp_path, model_name="anthropic/claude-x", **options)
     context = AgentContext()
 
@@ -604,3 +605,7 @@ def test_agent_imports_only_stdlib_and_harbor():
         if not dists & allowed:
             offenders.append((module, sorted(dists)))
     assert offenders == []
+
+
+def test_scoped_is_the_default_mode(tmp_path):
+    assert CodexSecurityAgent(logs_dir=tmp_path).options.mode == "scoped"

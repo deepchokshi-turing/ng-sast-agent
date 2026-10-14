@@ -43,8 +43,8 @@ class CodexSecurityOptions(AgentOptions):
         "none set, so the model's own default from Codex's catalog applies (low for gpt-5.6-sol).",
     )
     mode: Annotated[Literal["stock", "scoped"], _env("mode")] = Field(
-        default="stock",
-        description="stock: a fixed security review prompt and Codex's own review finding shape (plus category and "
+        default="scoped",
+        description="scoped is the default (the benchmark's output contract); stock: a fixed security review prompt and Codex's own review finding shape (plus category and "
         "CWE). scoped: adds the task's output contract (ruleIds, path roles, control status, residual risk, "
         "recommendation catalogue) to the prompt and to the output schema.",
     )

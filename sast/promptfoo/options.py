@@ -36,8 +36,8 @@ class PromptfooOptions(AgentOptions):
     model_config = ConfigDict(extra="allow", coerce_numbers_to_str=True)
 
     mode: Annotated[Literal["stock", "scoped"], _env("mode")] = Field(
-        default="stock",
-        description="stock: promptfoo's own prompt, no guidance. Its findings carry no task ruleId, so none can be "
+        default="scoped",
+        description="scoped is the default (the benchmark's output contract); stock: promptfoo's own prompt, no guidance. Its findings carry no task ruleId, so none can be "
         "scored: they are kept in the SARIF run properties and the metadata only. scoped: the task's output "
         "contract is given as --guidance-file, asking for a parseable header (ruleId, CWEs, path, controls, "
         "recommendations) at the start of every finding.",

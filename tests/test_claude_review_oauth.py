@@ -164,8 +164,9 @@ def test_default_filter_follows_the_credential(tmp_path, monkeypatch):
     _clean(monkeypatch)
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", OAUTH_TOKEN)
     agent = ClaudeReviewAgent(logs_dir=tmp_path)
-    assert agent.filter_mode() == "hard_rules" and agent.results_label() == "stock CLI + hard-rule filter"
-    assert ClaudeReviewAgent(logs_dir=tmp_path, mode="scoped").results_label() == "scoped CLI + hard-rule filter"
+    # scoped is the default mode.
+    assert agent.filter_mode() == "hard_rules" and agent.results_label() == "scoped CLI + hard-rule filter"
+    assert ClaudeReviewAgent(logs_dir=tmp_path, mode="stock").results_label() == "stock CLI + hard-rule filter"
 
 
 # ---------------------------------------------------------------- the agent with a token

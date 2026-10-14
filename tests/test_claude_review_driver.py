@@ -140,6 +140,9 @@ def test_cli_argv_is_the_upstream_command_plus_our_flags():
                         "--strict-mcp-config", "--no-session-persistence"]
     limited = driver.cli_argv("claude", "m", "s.json", max_turns=40, max_budget_usd=2.5)
     assert limited[-4:] == ["--max-turns", "40", "--max-budget-usd", "2.5"]
+    # --effort only when the option is set (upstream sets none).
+    assert "--effort" not in argv
+    assert driver.cli_argv("claude", "m", "s.json", effort="xhigh")[-2:] == ["--effort", "xhigh"]
 
 
 def test_settings_name_the_key_file_only_and_deny_the_risky_tools():

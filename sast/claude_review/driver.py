@@ -388,7 +388,7 @@ def cli_settings(keyfile, home, cli_auth, deny_dirs=()):
     return settings
 
 
-def cli_argv(claude, model, settings_file, max_turns=None, max_budget_usd=None):
+def cli_argv(claude, model, settings_file, max_turns=None, max_budget_usd=None, effort=None):
     """The upstream command (github_action_audit.py:224-229) plus our flags.
 
     Upstream: ``claude --output-format json --model <m> --disallowed-tools
@@ -400,7 +400,7 @@ def cli_argv(claude, model, settings_file, max_turns=None, max_budget_usd=None):
     pipe), ``--settings`` with our settings and ``--setting-sources user`` so the
     repository's own .claude settings are not loaded, ``--strict-mcp-config`` so
     its .mcp.json is not either, ``--no-session-persistence``, and the optional
-    limits.
+    limits and ``--effort`` (upstream sets no effort; only when the option is set).
     """
     argv = [claude, "--output-format", "stream-json", "--verbose", "--model", model, "--disallowed-tools",
             "Bash(ps:*)", "-p", "--settings", settings_file, "--setting-sources", "user", "--strict-mcp-config",
@@ -409,6 +409,8 @@ def cli_argv(claude, model, settings_file, max_turns=None, max_budget_usd=None):
         argv += ["--max-turns", str(int(max_turns))]
     if max_budget_usd:
         argv += ["--max-budget-usd", "{:g}".format(float(max_budget_usd))]
+    if effort:
+        argv += ["--effort", str(effort)]
     return argv
 
 
@@ -1138,7 +1140,8 @@ def execute(request, key, keyfile, document, started, private_dirs=()):
     env = cli_environment(home, key, cli_auth, os.path.dirname(claude))
     document["cli_environment"] = sorted(env)   # names only
     document["claude_code_version"] = claude_version(claude, env)
-    argv = cli_argv(claude, model, settings_file, request.get("max_turns"), request.get("max_budget_usd"))
+    argv = cli_argv(claude, model, settings_file, request.get("max_turns"), request.get("max_budget_usd"),
+                    request.get("effort"))
     document["cli_argv"] = argv
     cli_record = document["cli"] = {}
     review, _ = run_review(argv, prompt_for, cli_cwd, env, int(request.get("cli_attempts") or 3),

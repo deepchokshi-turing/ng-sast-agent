@@ -937,11 +937,12 @@ Every option is `--ak key=value` or the host variable `CLAUDE_REVIEW_<KEY>`
 |---|---|---|
 | `model` | upstream default, `claude-opus-4-1-20250805` (may be retired, see above) | model for the review and, unless `filter_model` is set, the filter. Harbor's `-m` is recorded and not used |
 | `filter_model` | `model` | model for the per-finding filter |
-| `mode` | `stock` | `stock`: upstream prompts and filter unchanged. `scoped`: builds custom scan instructions from the task's own output contract (the Scope table, the field vocabularies and the Recommendation catalogue of the instruction Harbor passes to the agent), tells the reviewer to read `security_manifest.json` first, asks for a `rule_id`, CWE list, path, control status, residual risk and catalogue recommendation ids per finding, and uses the upstream filter text without hard exclusions 7 ("lack of hardening") and 14 ("user content in AI prompts is not a vulnerability"). See [Scoped mode](#scoped-mode) |
+| `mode` | `scoped` | `stock`: upstream prompts and filter unchanged. `scoped`: builds custom scan instructions from the task's own output contract (the Scope table, the field vocabularies and the Recommendation catalogue of the instruction Harbor passes to the agent), tells the reviewer to read `security_manifest.json` first, asks for a `rule_id`, CWE list, path, control status, residual risk and catalogue recommendation ids per finding, and uses the upstream filter text without hard exclusions 7 ("lack of hardening") and 14 ("user content in AI prompts is not a vulnerability"). See [Scoped mode](#scoped-mode) |
 | `auth` | `auto` | `api_key` (`ANTHROPIC_API_KEY`), `oauth` (`CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`), or `auto`: the API key when it is set, else the token |
 | `filter` | `claude` with an API key, `hard_rules` with a token | `claude`: the upstream regex rules plus the per-finding API check (needs an API key). `hard_rules`: the regex rules only |
 | `max_turns` | none | Claude Code `--max-turns` |
 | `max_budget_usd` | none | Claude Code `--max-budget-usd` for the review (the filter is not counted) |
+| `reasoning_effort` | none (the CLI's default, as upstream) | Claude Code `--effort` for the review: `low`, `medium`, `high`, `xhigh` or `max`. Upstream sets no effort, so a value is a recorded deviation (metadata `reasoning_effort`, SARIF `reasoningEffort`). The filter's API calls are not affected |
 | `timeout_sec` | task timeout minus 120 s | wall-clock limit for the whole review |
 | `cli_share` | 0.6 | share of that limit the CLI may use, the filter gets the rest |
 | `cli_attempts` | 3 | CLI attempts, as upstream |
@@ -1084,14 +1085,15 @@ PYTHONPATH=$PWD .venv/bin/harbor run -y -p ../harbor-tasks -n 1 \
   -a sast.codex_security.agent:CodexSecurityAgent -o jobs/codex-security \
   --include-task-name crewai-code-interpreter-a \
   --agent-timeout-multiplier 3 \
-  --ak timeout_sec=2400 --ak mode=scoped \n  --extra-docker-compose harbor/codex-sandbox.compose.yaml
+  --ak timeout_sec=2400 --ak mode=scoped \
+  --extra-docker-compose harbor/codex-sandbox.compose.yaml
 ```
 
 | Option | Default | Meaning |
 |---|---|---|
 | `model` | `gpt-5.6-sol` (Codex Security's default scan model) | `codex exec -m`. Harbor's `-m` is recorded and not used |
 | `reasoning_effort` | the model's own default | Codex `model_reasoning_effort` (Codex Security uses `xhigh`) |
-| `mode` | `stock` | `stock`: fixed security review prompt, Codex's own review finding shape plus category and CWE. `scoped`: adds the task's output contract (ruleIds, path roles, control status, residual risk, catalogue) to the prompt and, as enums, to the output schema |
+| `mode` | `scoped` | `stock`: fixed security review prompt, Codex's own review finding shape plus category and CWE. `scoped`: adds the task's output contract (ruleIds, path roles, control status, residual risk, catalogue) to the prompt and, as enums, to the output schema |
 | `sandbox` | `read-only` | `read-only` or `container` (see above) |
 | `auth` | `auto` | `openai_api_key`, `codex_api_key`, or `auto` (`OPENAI_API_KEY` first) |
 | `timeout_sec` | task timeout minus 120 s | wall-clock limit for the whole review; keep Harbor's limit 120 s above it |
@@ -1121,7 +1123,7 @@ PYTHONPATH=$PWD .venv/bin/harbor run -y -p ../harbor-tasks -n 1 \
 
 | Option | Default | Meaning |
 |---|---|---|
-| `mode` | `stock` | `stock`: promptfoo's own prompt, nothing scorable. `scoped`: the task's contract as guidance, findings scored from their header |
+| `mode` | `scoped` | `stock`: promptfoo's own prompt, nothing scorable. `scoped`: the task's contract as guidance, findings scored from their header |
 | `timeout_sec` | task timeout minus 120 s | wall-clock limit for the whole scan; keep Harbor's limit 120 s above it |
 | `min_severity` | not passed (promptfoo: medium) | `--min-severity` (`low`, `medium`, `high`, `critical`) |
 | `diffs_only` | `false` (promptfoo's default) | `--diffs-only`: the service gets the change set only, no filesystem MCP access to the copy |
