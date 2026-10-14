@@ -230,8 +230,46 @@ class ScannerAgent(BaseAgent):
             meta["error"] = f"{type(exc).__name__}: {exc}"
             raise ScannerError(f"{self.tool_name} agent failed: {type(exc).__name__}: {exc}") from exc
         finally:
+            self._report_usage(context, meta)
             context.metadata = meta
             await self._save_artifacts(environment, meta, document)
+
+    def harbor_model(self, provider: str, bare_prefixes: tuple[str, ...]) -> str | None:
+        """Harbor's ``-m`` as a model id this tool can call, else None.
+
+        ``<provider>/<model>`` gives ``<model>`` when the provider is this tool's;
+        a bare name is used when it starts with one of ``bare_prefixes``. Any
+        other value (the platform names a model on every run, often another
+        provider's) is ignored and recorded by the agent, never passed on."""
+        name = (getattr(self, "model_name", None) or "").strip()
+        if not name:
+            return None
+        if "/" in name:
+            prefix, _, model = name.partition("/")
+            if prefix.strip().lower() != provider:
+                return None
+            return model.strip() or None
+        return name if name.startswith(bare_prefixes) else None
+
+    def usage_summary(self, meta: dict[str, Any]) -> dict[str, Any] | None:
+        """Tokens and cost of a model-backed scan, for Harbor's result fields:
+        {n_input_tokens (cache included), n_cache_tokens, n_output_tokens,
+        cost_usd, cost_source}. None for tools that call no model (the default)."""
+        return None
+
+    def _report_usage(self, context: AgentContext, meta: dict[str, Any]) -> None:
+        """Copy usage_summary into the AgentContext (Harbor's agent_result) and the metadata."""
+        try:
+            usage = self.usage_summary(meta)
+        except Exception as exc:  # reporting never fails a run
+            meta["usage_summary_error"] = f"{type(exc).__name__}: {exc}"
+            return
+        if not usage:
+            return
+        meta["usage_summary"] = usage
+        for field in ("n_input_tokens", "n_cache_tokens", "n_output_tokens", "cost_usd"):
+            if usage.get(field) is not None:
+                setattr(context, field, usage[field])
 
     # ------------------------------------------------------------ helpers
 

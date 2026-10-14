@@ -206,8 +206,11 @@ def toml_twin_problems(a: Path, b: Path) -> list[str]:
         tb = _flatten(tomllib.loads(fb.read_text(encoding="utf-8")))
     except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
         return [f"cannot parse task.toml: {exc}"]
+    # task.name is the platform package name, "<org>/<folder name>": harness-side, never shown to the
+    # scanner, and different between twins by construction.
     differing = sorted(k for k in set(ta) | set(tb)
-                       if ta.get(k) != tb.get(k) and k.rsplit(".", 1)[-1] not in TOML_TWIN_KEYS)
+                       if ta.get(k) != tb.get(k) and k.rsplit(".", 1)[-1] not in TOML_TWIN_KEYS
+                       and k != "task.name")
     return [f"task.toml differs between twins in {k}" for k in differing]
 
 
