@@ -25,6 +25,9 @@ PRICES: dict[str, tuple[float, float, float]] = {
     "claude-haiku-5-5": (0.10, 0.01, 0.50),
     # OpenAI (developers.openai.com model page; promotional rate through 2026-11-21).
     "gpt-5.6-sol": (4.00, 0.40, 20.00),
+    # OpenAI standard tier (developers.openai.com/api/docs/pricing, read 2026-10-14), for datadog-saist.
+    "gpt-5-mini": (0.25, 0.025, 2.00),
+    "gpt-5.2": (1.75, 0.175, 14.00),
 }
 CACHE_WRITE_FACTOR = 1.25
 
