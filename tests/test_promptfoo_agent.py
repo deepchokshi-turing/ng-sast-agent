@@ -365,20 +365,24 @@ def test_bad_options_are_refused(tmp_path, bad):
 
 def test_preflight_needs_the_key_on_the_host(monkeypatch):
     monkeypatch.delenv("PROMPTFOO_API_KEY", raising=False)
-    with pytest.raises(ValueError, match="PROMPTFOO_API_KEY is not set on the host"):
+    monkeypatch.delenv("PROMPTFOO_TOKEN", raising=False)
+    with pytest.raises(ValueError, match="neither PROMPTFOO_API_KEY nor PROMPTFOO_TOKEN is set on the host"):
         PromptfooCodeScanAgent.preflight({}, {})
     # Never from Harbor's --ae env.
     with pytest.raises(ValueError):
         PromptfooCodeScanAgent.preflight({}, {"PROMPTFOO_API_KEY": KEY})
+    monkeypatch.setenv("PROMPTFOO_TOKEN", KEY)  # the platform's name for the same key
+    PromptfooCodeScanAgent.preflight({"mode": "scoped"}, {})
     monkeypatch.setenv("PROMPTFOO_API_KEY", KEY)
     PromptfooCodeScanAgent.preflight({"mode": "scoped"}, {})
 
 
 def test_missing_key_fails_before_anything_runs(tmp_path, monkeypatch):
     monkeypatch.delenv("PROMPTFOO_API_KEY", raising=False)
+    monkeypatch.delenv("PROMPTFOO_TOKEN", raising=False)
     sandbox = FakeSandbox()
     _, context, go = run_agent(tmp_path, sandbox)
-    with pytest.raises(ScannerError, match="PROMPTFOO_API_KEY is not set"):
+    with pytest.raises(ScannerError, match="neither PROMPTFOO_API_KEY nor PROMPTFOO_TOKEN is set"):
         asyncio.run(go())
     assert context.metadata["status"] == "error" and not sandbox.commands_with("scan.py")
 

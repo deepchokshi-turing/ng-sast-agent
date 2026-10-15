@@ -1042,6 +1042,8 @@ TOOL_KINDS = {
     "claude-code-security-review": ("Claude", "an AI reviewer"),
     "promptfoo-code-scan": ("Promptfoo", "an AI code scanner (Promptfoo Code Scanning, a cloud service)"),
     "codex-exec-security-review": ("Codex", "an AI reviewer (OpenAI Codex, run as codex exec with a security-review prompt)"),
+    "cloudflare-security-audit-skill": ("Cloudflare", "an AI auditor (Cloudflare's security-audit skill, run in Claude Code)"),
+    "datadog-saist": ("Datadog SAIST", "an AI code scanner (Datadog's open-source datadog-saist, run locally)"),
 }
 NOT_PROVIDED = "not provided by this tool"
 FREE_TEXT = "given as free text, not scorable"

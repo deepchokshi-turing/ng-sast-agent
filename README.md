@@ -1131,6 +1131,71 @@ PYTHONPATH=$PWD .venv/bin/harbor run -y -p ../harbor-tasks -n 1 \
 
 Every option is also a host variable `PROMPTFOO_SCAN_<KEY>`. There is no model, cost, turn or API host option: promptfoo has none, and the key only goes to promptfoo's default host.
 
+## Cloudflare security-audit skill agent
+
+`sast.cloudflare_audit.agent:CloudflareAuditAgent` runs Cloudflare's open-source security-audit agent skill (cloudflare/security-audit-skill at commit `c1c8a8c`) in the pinned Claude Code CLI 2.1.296: a full audit with reconnaissance, hunter and verifier sub-agents, whose `findings.json` records (`confirmed`, `needs_validation`, `rejected`, each with an `entrypoint -> propagation -> sink` trace, and a remediation for confirmed ones) become the SARIF. Design, mapping, deviations from the skill's defaults, and what is and is not verified: [docs/cloudflare-audit-agent.md](docs/cloudflare-audit-agent.md).
+
+Setup installs Claude Code (npm, sha256 and integrity), Node.js 24.21.0 (nodejs.org, sha256; for the skill's validators) and the 19 skill files (raw.githubusercontent.com, sha256 each) into the work dir, so the sandbox needs HTTPS egress to those hosts and to api.anthropic.com. Not baked into the tools image yet.
+
+Set the credential on the host, never in a job config: `CLAUDE_CODE_OAUTH_TOKEN` (a subscription token from `claude setup-token`) or `ANTHROPIC_API_KEY`. It reaches only the Claude Code process, from a mode 600 file that is deleted after the audit.
+
+The audit runs in a copy of the in-scope files plus `security_manifest.json`, with `--permission-mode dontAsk` and rules that allow reading the copy, the skill and the output folder, writing the output folder, and only read-only shell commands plus the two validators. The skill's schema has no CWE, ruleId or contract fields, so the request also asks for a side file `sast-annotations.json` per fingerprint: CWEs only in `stock` mode; in `scoped` mode (the default) the task's contract is added as guidance and the side file also carries ruleId, location, trace roles, control status, residual risk and REC ids. The skill's own fix text is kept verbatim under `properties.toolProperties` for a later judge.
+
+```bash
+export CLAUDE_CODE_OAUTH_TOKEN=...   # on the host that runs Harbor
+PYTHONPATH=$PWD .venv/bin/harbor run -y -p ../harbor-tasks -n 1 -e docker \
+  -a sast.cloudflare_audit.agent:CloudflareAuditAgent -o jobs/cloudflare-audit \
+  --include-task-name crewai-code-interpreter-a \
+  --agent-timeout-multiplier 4 \
+  --ak auth=oauth --ak model=claude-opus-5-5 --ak timeout_sec=3300 --ak mode=scoped
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `model` | `claude-opus-5-5` | Claude Code `--model` (Harbor's `-m` when it names an Anthropic model); checked in the CLI's init message |
+| `mode` | `scoped` | `stock`: the skill's audit plus a CWE side file. `scoped`: plus the task's contract and the full side file |
+| `auth` | `auto` | `oauth`, `api_key`, or `auto` (`ANTHROPIC_API_KEY` first) |
+| `profile` | `quick` | the skill's run profile (`quick`, `standard`, `deep`; the skill's own default is `standard`) |
+| `agent_budget` | none | the skill's strict budget of agent invocations |
+| `include_needs_validation` | `true` | report `needs_validation` records (no target code is executed, so most leads end there) |
+| `max_turns`, `max_budget_usd`, `reasoning_effort` | none | Claude Code limits and `--effort` |
+| `timeout_sec` | task timeout minus 120 s | wall-clock limit for the audit; keep Harbor's limit 120 s above it |
+| `attempts` | 1 | CLI runs when a run ends without `findings.json` |
+| `scan_roots`, `exclude` | the task's | as for the other agents |
+
+Every option is also a host variable `CLOUDFLARE_AUDIT_<KEY>`. A run whose `run-metadata.json` does not say `run_status: complete` is a tool outcome (no SARIF, scored 0).
+
+## Datadog SAIST agent
+
+`sast.datadog_saist.agent:DatadogSaistAgent` runs Datadog's open-source AI SAST engine, datadog-saist v0.0.32 (DataDog/datadog-saist, Apache-2.0, preview), locally in the sandbox: for each (file, rule) pair its keyword prefilter selects, a detection model reports violations and a validation model confirms them, and it writes SARIF. Its rules come from Datadog's public endpoint at run time (no Datadog account, not pinnable; a digest of the rules used is recorded). Design, the frozen rule mapping, deviations from the tool's defaults, and what is and is not verified: [docs/datadog-saist-agent.md](docs/datadog-saist-agent.md).
+
+Setup downloads the pinned release zip from github.com (zip and executable sha256-checked) into the work dir, so the sandbox needs HTTPS egress to github.com, api.datadoghq.com and the model provider. Not baked into the tools image yet.
+
+Set the provider's key on the host, never in a job config: `OPENAI_API_KEY` for the default models (`ANTHROPIC_API_KEY` or `GOOGLE_API_KEY` for those providers' models). It reaches only the datadog-saist process's own environment, from a mode 600 file that is deleted after the scan.
+
+datadog-saist takes no extra instructions and its answer is fixed (rule id, one location, the model's reason), so there is no scoped mode: `--ak mode=scoped` is accepted and runs as stock, recording `mode_effective: stock`. Its rule ids are mapped to the task ruleIds by a frozen table (`datadog-map-1`, in the docs); there are never `codeFlows`, `controlStatus`, `residualRisk` or `recommendations`. The model's reason and the rule's generic remediation text are kept verbatim under `properties.toolProperties` for a later judge.
+
+```bash
+export OPENAI_API_KEY=...   # on the host that runs Harbor
+PYTHONPATH=$PWD .venv/bin/harbor run -y -p ../harbor-tasks -n 1 -e docker \
+  -a sast.datadog_saist.agent:DatadogSaistAgent -o ../harbor-jobs/datadog-saist-test \
+  --include-task-name crewai-code-interpreter-a
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `model` | `openai-gpt5.2` (Harbor's `-m` when it names a supported OpenAI model) | `--detection-model`: a name the binary knows or its API id (`gpt-5.2`, `gpt-5-mini`, `claude-sonnet-4-5`, ...) |
+| `validation_model` | the detection model | `--validation-model`, same provider |
+| `mode` | `stock` | `scoped` is accepted and runs as stock (see above) |
+| `rules` | `api` | `api`: Datadog's rule endpoint (the tool's default). `embedded`: `--local-prompts`, the 12 rules compiled into the binary, none of them an LLM rule |
+| `request_timeout_sec` | 120 (tool: 30) | `--request-timeout-sec`, per model call |
+| `file_concurrency` | 20 | `--file-concurrency` |
+| `skip_indexing` | `false` | `--skip-indexing` |
+| `timeout_sec` | task timeout minus 120 s | wall-clock limit for the whole scan |
+| `scan_roots`, `exclude` | the task's | as for the other agents |
+
+Every option is also a host variable `DATADOG_SAIST_<KEY>`. The tool reports total input and output tokens; the cost estimate prices them all as uncached input (an upper bound). A refused key makes datadog-saist exit 0 with every scan tagged `RULE_FAILURE`; the agent turns that into an infrastructure error instead of an empty result.
+
 ## Development
 
 ```bash
