@@ -245,7 +245,9 @@ EXPECTED = {
     "smoke_eval": {"reward": 0.0, "tp": 0, "fp": 0, "fn": 1, "results": 0},
     # CodeQL's py/code-injection with its own path from the HTTP request to eval():
     # detection 0.35 + classification 0.05 + path 0.30, no controls or recommendations.
-    "smoke_web_eval": {"reward": 0.7, "tp": 1, "fp": 0, "fn": 0, "results": 1},
+    # Grader v3.2 scores path roles: CodeQL names only the first (source) and last (sink) step, so its path
+    # earns partial credit (0.3056), not 1.0.
+    "smoke_web_eval": {"reward": 0.4917, "tp": 1, "fp": 0, "fn": 0, "results": 1},
     # A clean twin with nothing reported passes.
     "task_3920a8_negative": {"reward": 1.0, "tp": 0, "fp": 0, "fn": 0, "results": 0},
     "task_4da5ab_negative": {"reward": 1.0, "tp": 0, "fp": 0, "fn": 0, "results": 0},
@@ -285,8 +287,9 @@ def test_grader_gives_path_credit_only_for_a_real_path(tmp_path):
     doc, _, _ = agent_sarif("smoke_web_eval", recorded("smoke_web_eval"))
     (tmp_path / "with").mkdir()
     score = grade("smoke_web_eval", doc, tmp_path / "with")
-    assert (score["tp"], score["fp"], score["fn"], score["path"]) == (1, 0, 0, 1.0)
-    assert score["reward"] == 0.7
+    # v3.2: coverage is full but only the source and sink roles are named, so path credit is partial.
+    assert (score["tp"], score["fp"], score["fn"], score["path"]) == (1, 0, 0, 0.3056)
+    assert score["reward"] == 0.4917
     for result in doc["runs"][0]["results"]:
         result.pop("codeFlows")
     (tmp_path / "without").mkdir()
@@ -345,11 +348,14 @@ def test_codeql_tags_are_decided_as_an_unordered_set(rule_id, rule):
 
 
 def test_a_rule_whose_tags_span_two_families_is_dropped_and_counted():
-    findings, counts = normalise(_retargeted("py/path-injection", tags=["200", "22"]))
+    # Two specific CWEs (cwe-map-5: a generic CWE such as 200 would give way to 22).
+    findings, counts = normalise(_retargeted("py/path-injection", tags=["532", "22"]))
     assert findings == []
     assert counts["results_by_cwe_decision"] == {"none": 0, "unmapped": 0, "mapped": 0, "ambiguous": 1}
     assert counts["results_cwe_ambiguous"] == [
-        ["py/path-injection", ["CWE-22", "CWE-200"], "src/pydantic_ai_mini/_compat/httpx2.py", 146]]
+        ["py/path-injection", ["CWE-22", "CWE-532"], "src/pydantic_ai_mini/_compat/httpx2.py", 146]]
+    findings, counts = normalise(_retargeted("py/path-injection", tags=["200", "22"]))
+    assert counts["results_by_cwe_decision"]["mapped"] == 1 and sarif.emitted_rules(findings) == ["LLM03.EA.FUNCTIONALITY"]
 
 
 def test_tag_order_does_not_change_the_result():

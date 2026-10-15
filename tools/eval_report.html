@@ -14,6 +14,10 @@
   next to the page (works when the folder is served over HTTP), then a file
   picker. Self-contained: no external scripts, fonts or styles.
 
+  Most figures are computed in tools/eval_report.py and tools/report.py and
+  read from the payload (scoreboard rows, measurement rows, dataset, method
+  text), so this page and eval_report.md always show the same metric set.
+
   Layout follows the client requirement (Sensitive Data and Excessive Agency
   Detector, eval data requirement v3): the four measurements each task must
   support (1 risk detection, 2 reachability and path tracing, 3 mitigation
@@ -33,10 +37,16 @@
   --grid: #e1e0d9;
   --axis: #c3c2b7;
   --border: rgba(11, 11, 11, 0.10);
+  --bar: #2a78d6;
+  --bar-bad: #eb6834;
   --tool-1: #2a78d6;
   --tool-2: #eb6834;
   --tool-3: #1baf7a;
   --tool-4: #4a3aa7;
+  --tool-5: #c23f8e;
+  --tool-6: #9a7400;
+  --tool-7: #0f8aa6;
+  --tool-8: #7a4f2a;
   --good: #0ca30c;
   --good-ink: #006300;
   --warning: #fab219;
@@ -57,10 +67,16 @@
     --grid: #2c2c2a;
     --axis: #383835;
     --border: rgba(255, 255, 255, 0.10);
+    --bar: #3987e5;
+    --bar-bad: #d95926;
     --tool-1: #3987e5;
     --tool-2: #d95926;
     --tool-3: #199e70;
     --tool-4: #9085e9;
+    --tool-5: #e06aaf;
+    --tool-6: #d1a52a;
+    --tool-7: #3bb5d1;
+    --tool-8: #b88a62;
     --good-ink: #0ca30c;
     --critical-ink: #e66767;
     --track: #2a2a28;
@@ -78,10 +94,16 @@
   --grid: #2c2c2a;
   --axis: #383835;
   --border: rgba(255, 255, 255, 0.10);
+  --bar: #3987e5;
+  --bar-bad: #d95926;
   --tool-1: #3987e5;
   --tool-2: #d95926;
   --tool-3: #199e70;
   --tool-4: #9085e9;
+  --tool-5: #e06aaf;
+  --tool-6: #d1a52a;
+  --tool-7: #3bb5d1;
+  --tool-8: #b88a62;
   --good-ink: #0ca30c;
   --critical-ink: #e66767;
   --track: #2a2a28;
@@ -148,7 +170,8 @@ th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--gri
 th { font-size: 12px; font-weight: 600; color: var(--ink-2); white-space: nowrap; }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 tbody tr:last-child td { border-bottom: 0; }
-.toolhead { display: inline-flex; align-items: center; gap: 6px; }
+.toolhead { display: inline-flex; align-items: center; gap: 4px 6px; flex-wrap: wrap; }
+.toolhead .badge { margin-left: 0; }
 .meter { display: flex; align-items: center; gap: 8px; min-width: 150px; }
 .meter .bar { flex: 1; height: 8px; background: var(--track); border-radius: 4px; position: relative; min-width: 70px; }
 .meter .fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 4px; }
@@ -159,6 +182,9 @@ tbody tr:last-child td { border-bottom: 0; }
 .status.ok { color: var(--good-ink); }
 .status.bad .ic { background: var(--critical); }
 .status.bad { color: var(--critical-ink); }
+.status.mixed .ic { background: var(--axis); color: var(--ink); }
+.status.mixed { color: var(--ink-2); }
+.fam .status { white-space: normal; }
 .status.na { color: var(--muted); }
 .status.na .ic { background: var(--axis); color: var(--ink); }
 .note { font-size: 13px; color: var(--ink-2); margin: 10px 0 0; }
@@ -176,9 +202,14 @@ details.fam > summary::-webkit-details-marker { display: none; }
 details.fam > summary:hover { background: var(--surface-2); }
 details.fam .body { padding: 4px 4px 14px 24px; }
 .caret { display: inline-block; transition: transform .15s; color: var(--muted); }
-details[open] .caret { transform: rotate(90deg); }
+details[open] > summary .caret { transform: rotate(90deg); }
 .tag { display: inline-block; font-size: 12px; padding: 1px 8px; border-radius: 999px; background: var(--surface-2); color: var(--ink-2); border: 1px solid var(--border); margin: 1px 4px 1px 0; white-space: nowrap; }
-code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; word-break: break-all; }
+code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; overflow-wrap: anywhere; }
+.badge { display: inline-block; font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 999px; white-space: nowrap;
+  background: var(--surface-2); color: var(--critical-ink); border: 1px solid var(--critical); margin-left: 6px; line-height: 1.5; }
+.ns { color: var(--muted); font-style: italic; font-size: 13px; white-space: normal; }
+.callout.warn { border-left-color: var(--critical); }
+.swatch.striped { background-image: repeating-linear-gradient(45deg, transparent 0 2px, rgba(255,255,255,.75) 2px 4px); }
 .empty { color: var(--muted); font-style: italic; }
 #tip {
   position: fixed; pointer-events: none; z-index: 20; background: var(--ink); color: var(--page);
@@ -187,6 +218,53 @@ code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monosp
 .loader { max-width: 560px; margin: 80px auto; text-align: center; }
 .loader input { margin-top: 12px; }
 footer { color: var(--muted); font-size: 13px; padding: 8px 0 40px; }
+/* Plain-English summary at the top, then the reviewer views folded away below it. */
+.sumtable th:first-child, .sumtable td:first-child { position: sticky; left: 0; z-index: 1; background: var(--surface); }
+.sumtable td:first-child { min-width: 150px; max-width: 220px; color: var(--ink-2); }
+.sumtable td { min-width: 96px; }
+.tiles.sumtiles { grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); }
+.plain-list { margin: 6px 0 0; padding-left: 18px; }
+.plain-list li { margin: 6px 0; max-width: 860px; }
+.plain-list .swatch { margin-right: 6px; vertical-align: baseline; }
+dl.gloss { margin: 6px 0 0; display: grid; grid-template-columns: minmax(120px, 200px) 1fr; gap: 8px 16px; }
+dl.gloss dt { font-weight: 600; }
+dl.gloss dd { margin: 0; color: var(--ink-2); max-width: 760px; }
+/* Measurements at a glance: one bar hue (--bar, checked with the data-viz palette validator in both
+   modes), the tool named in the row label, and a missing value written in its row, never a zero bar. */
+.mgroup { border-top: 1px solid var(--grid); margin-top: 18px; }
+.mgroup:first-of-type { border-top: 0; margin-top: 0; }
+.mgroup > .kicker { margin-top: 14px; }
+.mchart-title { font-size: 15px; font-weight: 600; margin: 2px 0 2px; }
+.mcap { font-size: 13px; color: var(--ink-2); margin: 2px 0 6px; max-width: 760px; }
+.mchart { display: block; width: 100%; max-width: 760px; height: auto; margin: 4px 0 10px; }
+.mchart text { font-family: inherit; font-size: 12px; fill: var(--ink); }
+.mchart .facet { fill: var(--ink-2); font-weight: 600; }
+.mchart .tick { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.mchart .state { fill: var(--muted); font-style: italic; stroke: var(--surface); stroke-width: 3px; paint-order: stroke; }
+.mchart .grid { stroke: var(--grid); }
+.mchart .axis { stroke: var(--axis); }
+.mchart .mbar { fill: var(--bar); }
+/* The one chart where a longer bar is worse (fixed apps wrongly flagged). */
+.mchart.lower-better .mbar { fill: var(--bar-bad); }
+.mtag { display: inline-block; margin-left: 8px; padding: 1px 7px; border-radius: 999px; font-size: 11px; font-weight: 600; color: var(--bar-bad); border: 1px solid var(--bar-bad); vertical-align: middle; }
+.mchart .hit { fill: transparent; }
+.mchart .mrow { outline: none; }
+.mchart .mrow:hover .hit, .mchart .mrow:focus .hit { fill: var(--surface-2); }
+.mchart .mrow:focus-visible .hit { stroke: var(--ink-2); stroke-width: 1px; }
+.mchart .mrow:hover .mbar, .mchart .mrow:focus .mbar { opacity: .85; }
+.mchart .mrow:hover .state, .mchart .mrow:focus .state { stroke: var(--surface-2); }
+section.reviewers { margin: 32px 0 0; padding-top: 20px; border-top: 1px solid var(--axis); }
+details.reviewers-body > summary {
+  cursor: pointer; list-style: none; display: inline-flex; align-items: center; gap: 8px; margin: 4px 0 8px;
+  border: 1px solid var(--border); background: var(--surface); border-radius: 6px; padding: 6px 14px;
+  font-weight: 600; color: var(--ink);
+}
+details.reviewers-body > summary::-webkit-details-marker { display: none; }
+details.reviewers-body > summary:hover { background: var(--surface-2); }
+@media (max-width: 640px) {
+  dl.gloss { grid-template-columns: 1fr; gap: 2px; }
+  dl.gloss dd { margin-bottom: 8px; }
+}
 @media (max-width: 640px) {
   h1 { font-size: 21px; }
   section.block { padding: 14px; }
@@ -204,6 +282,7 @@ footer { color: var(--muted); font-size: 13px; padding: 8px 0 40px; }
   <div class="wrap">
     <span class="brand">SAST Scanner Evaluation</span>
     <nav class="sections" aria-label="Sections">
+      <a href="#summary">Summary</a>
       <a href="#overview">Overview</a>
       <a href="#m1">1 Risk detection</a>
       <a href="#m2">2 Path tracing</a>
@@ -247,27 +326,36 @@ function svg(tag, attrs, ...kids) {
   return n;
 }
 const num = (v, d = 3) => (v === null || v === undefined || Number.isNaN(v)) ? "n/a" : Number(v).toFixed(d);
-const pct = v => (v === null || v === undefined) ? "n/a" : (v * 100).toFixed(1) + "%";
 const sum = (xs, f) => xs.reduce((a, x) => a + (f(x) || 0), 0);
 const ratio = (a, b) => b ? a / b : null;
+const mean = xs => { const v = xs.filter(x => x !== null && x !== undefined); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null; };
+const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
-function taskId(name) {
-  const parts = String(name).split("/").pop().split("_");
-  if (parts.length >= 3 && (parts.at(-1) === "positive" || parts.at(-1) === "negative"))
-    return [parts.slice(1, -1).join("_"), parts.at(-1)];
-  return [String(name), ""];
+// Code text with break opportunities after separators, so long rule ids and paths
+// wrap at a dot or slash instead of in the middle of a word.
+function code(text) {
+  const parts = String(text ?? "").split(/(?<=[./_:-])/);
+  const n = el("code", {});
+  parts.forEach((p, i) => { n.append(document.createTextNode(p)); if (i < parts.length - 1) n.append(el("wbr")); });
+  return n;
 }
 function loc(v) {
   if (Array.isArray(v) && v.length) return v.length > 1 ? `${v[0]}:${v[1]}` : String(v[0]);
   if (v && typeof v === "object") return `${v.file || ""}:${v.start_line || ""}`;
   return String(v || "");
 }
+function parseTaskName(name) {
+  const parts = String(name).split("/").pop().split("_");
+  if (parts.length >= 3 && parts[0] === "task" && (parts.at(-1) === "positive" || parts.at(-1) === "negative"))
+    return [parts.slice(1, -1).join("_"), parts.at(-1)];
+  return [String(name), ""];
+}
 const RISK_LABEL = {
   sensitive_information_disclosure: "Sensitive Information Disclosure (LLM02)",
   excessive_agency: "Excessive Agency (LLM03)",
 };
 const CATEGORY_LABEL = {
-  "LLM02.SID": "Sensitive Information Disclosure",
+  "LLM02.SID": "Sensitive Information Disclosure (Medium and High)",
   "LLM02.SID.MEDIUM": "Sensitive Information Disclosure, Medium",
   "LLM02.SID.HIGH": "Sensitive Information Disclosure, High",
   "LLM03.EA.FUNCTIONALITY": "Excessive Agency, Tool Functionality",
@@ -282,7 +370,8 @@ const SHORT_CATEGORY = {
   "LLM03.EA.PERMISSIONS": "Agency: Permissions",
   "LLM03.EA.AUTONOMY": "Agency: Autonomy",
 };
-const TRUTH_SET_LABEL = { both: "Both risks", "SID only": "Disclosure only", "EA only": "Agency only", neither: "Neither (negative)" };
+const TRUTH_SET_ORDER = ["both", "SID only", "EA only", "neither"];
+const TRUTH_SET_LABEL = { both: "Both risks", "SID only": "Disclosure only", "EA only": "Agency only", neither: "Neither (negatives)" };
 
 // ---- tooltip -----------------------------------------------------------------------
 const tip = document.getElementById("tip");
@@ -295,8 +384,20 @@ document.addEventListener("pointermove", e => {
   let x = e.clientX + 14, y = e.clientY + 14;
   if (x + w > innerWidth - 8) x = e.clientX - w - 14;
   if (y + h > innerHeight - 8) y = e.clientY - h - 14;
-  tip.style.left = x + "px"; tip.style.top = y + "px";
+  tip.style.left = Math.max(4, x) + "px"; tip.style.top = Math.max(4, y) + "px";
 });
+
+// Keyboard focus on a chart row shows the same tooltip, under the row.
+document.addEventListener("focusin", e => {
+  const t = e.target.closest && e.target.closest(".mrow[data-tip]");
+  if (!t) return;
+  tip.textContent = t.getAttribute("data-tip");
+  tip.style.display = "block";
+  const r = t.getBoundingClientRect();
+  tip.style.left = Math.max(4, Math.min(r.left + 8, innerWidth - tip.offsetWidth - 8)) + "px";
+  tip.style.top = Math.min(r.bottom + 6, innerHeight - tip.offsetHeight - 8) + "px";
+});
+document.addEventListener("focusout", e => { if (e.target.closest && e.target.closest(".mrow")) tip.style.display = "none"; });
 
 // ---- theme -------------------------------------------------------------------------
 (function () {
@@ -339,53 +440,76 @@ function showPicker(message) {
 // ---- state -------------------------------------------------------------------------
 let DATA = null;
 let visible = new Set();
+const NS = () => DATA.not_supported || "not supported by this tool";
+const BADGE = () => DATA.no_results_badge || "no results, scores not meaningful";
+const NR = () => DATA.no_results_measure || "n/a (no results)";
 
 function normalise(data) {
   // eval_report.json from tools/eval_report.py; an older list-of-tools payload is accepted too.
   if (Array.isArray(data)) data = { tools: data };
-  data.tools.forEach((t, i) => { t._slot = Math.min(i, 3) + 1; t.trials = t.trials || []; });
+  const seen = new Set();
+  data.tools.forEach((t, i) => {
+    t.trials = t.trials || [];
+    let key = t.key || t.tool || `tool ${i + 1}`;
+    for (let n = 2; seen.has(key); n++) key = `${t.key || t.tool} #${n}`;
+    seen.add(key);
+    t.key = key;
+    t._i = i;
+    t.no_results = t.no_results ?? !!((t.summary || {}).no_results_emitted || []).length;
+    t.trials.forEach(r => {
+      if (!r.family || r.role === undefined) { const [f, role] = parseTaskName(r.task); r.family = r.family || f; r.role = r.role ?? role; }
+    });
+  });
+  data.observations = (data.observations || []).map(o => typeof o === "string" ? { tool: null, text: o } : o);
   return data;
 }
 function start(data) {
   DATA = normalise(data);
-  visible = new Set(DATA.tools.map(t => t.tool));
+  visible = new Set(DATA.tools.map(t => t.key));
   render();
 }
-const shown = () => DATA.tools.filter(t => visible.has(t.tool));
-const color = t => `var(--tool-${t._slot})`;
-const swatch = t => el("span", { class: "swatch", style: `background:${color(t)}` });
-const toolHead = t => el("span", { class: "toolhead" }, swatch(t), t.tool);
+const shown = () => DATA.tools.filter(t => visible.has(t.key));
+const color = t => `var(--tool-${(t._i % 8) + 1})`;
+const striped = t => t._i >= 8;
+const swatch = t => el("span", { class: "swatch" + (striped(t) ? " striped" : ""), style: `background-color:${color(t)}` });
+const badge = t => t.no_results ? el("span", { class: "badge", "data-tip": `${t.key} wrote no result on any task. Its negatives pass by default and its FPR and OWASP score are what an empty report earns.` }, BADGE()) : null;
+const toolHead = t => el("span", { class: "toolhead" }, swatch(t), t.key, badge(t));
+const nsCell = () => el("span", { class: "ns" }, NS());
 
 // ---- derived numbers ---------------------------------------------------------------
-function positives(t) { return t.trials.filter(r => r.reward !== null && (r.gt || 0) > 0); }
-function negatives(t) { return t.trials.filter(r => r.reward !== null && r.gt === 0); }
-function pathStats(t) {
-  const pos = positives(t);
-  const gt = sum(pos, r => r.gt);
-  const withMeta = pos.filter(r => r.near !== null && r.near !== undefined);
-  const gtMeta = sum(withMeta, r => r.gt);
-  const hits = t.hits || [];
-  return {
-    gt, tp: sum(pos, r => r.tp),
-    findingRecall: ratio(sum(pos, r => r.tp), gt),
-    nearRecall: ratio(sum(withMeta, r => r.near), gtMeta),
-    nearCweRecall: ratio(sum(withMeta, r => r.near_cwe), gtMeta),
-    withTrace: hits.filter(h => (h.scores || {}).path > 0).length,
-    hits: hits.length,
-  };
-}
-function emitted(t) { return (t.funnel || {}).results_emitted || 0; }
+const isScored = r => r.reward !== null && r.reward !== undefined && (r.status === "ok" || r.status === "?") && !r.sarif_missing;
+const positives = t => t.trials.filter(r => isScored(r) && r.role === "positive");
+const negatives = t => t.trials.filter(r => isScored(r) && r.role === "negative");
+const S = t => t.summary || {};
+const cat = t => (S(t).categories || {}).overall || {};
+const riskRow = (t, k, key = "risk_types") => ((S(t)[key]) || {})[k] || {};
+const M = t => t.measures || {};
+const supported = (t, k) => ((M(t).supported || {})[k]) !== false;
+// A measurement of a scanner that matched no finding: whether it can fill the field is not known.
+const noResults = (t, k) => (M(t).no_results || []).includes(k);
+const measureCell = (t, k, value, tipText) => !supported(t, k) ? nsCell()
+  : noResults(t, k) ? el("span", { class: "ns", "data-tip": `${t.key} matched no finding, so this cannot be scored` }, NR())
+  : meter(value, t, tipText);
+// Measurements 2 to 4 over the matched findings only, and the fixed-answer baselines of 3 and 4.
+const matchedCell = (t, k) => measureCell(t, k, (M(t).matched_only || {})[k],
+  `Mean over the ${(M(t).matched_only || {}).findings ?? 0} matched findings only`);
+const fixedOf = (t, k) => ((M(t).fixed_answer || {})[k]) || {};
+const fixedCell = (t, k, tipText) => fixedOf(t, k).per_app === null || fixedOf(t, k).per_app === undefined ? "n/a"
+  : meter(fixedOf(t, k).per_app, null, `${tipText}, mean over ${fixedOf(t, k).tasks} positives (per finding ${num(fixedOf(t, k).per_finding)})`);
+const TOO_FEW = "too few tasks";
+const macro = (t, key) => cat(t).suppressed ? TOO_FEW : num(cat(t)[key]);
 
 // ---- reusable pieces ---------------------------------------------------------------
 function meter(value, t, tipText, invert) {
   const v = value === null || value === undefined ? null : Math.max(0, Math.min(1, value));
+  const bg = t ? `background-color:${color(t)}` + (striped(t) ? ";background-image:repeating-linear-gradient(45deg,transparent 0 3px,rgba(255,255,255,.6) 3px 6px)" : "")
+    : `background-color:${invert ? "var(--critical)" : "var(--good)"}`;
   return el("div", { class: "meter", "data-tip": tipText || null },
-    el("div", { class: "bar" }, v === null ? null :
-      el("div", { class: "fill", style: `width:${(v * 100).toFixed(1)}%;background:${t ? color(t) : (invert ? "var(--critical)" : "var(--good)")}` })),
+    el("div", { class: "bar" }, v === null ? null : el("div", { class: "fill", style: `width:${(v * 100).toFixed(1)}%;${bg}` })),
     el("span", { class: "val" }, v === null ? "n/a" : num(value, 2)));
 }
 function status(kind, text, tipText) {
-  const icon = { ok: "✓", bad: "✕", na: "–" }[kind];
+  const icon = { ok: "✓", bad: "✕", mixed: "±", na: "–" }[kind];
   return el("span", { class: `status ${kind}`, "data-tip": tipText || null }, el("span", { class: "ic", "aria-hidden": "true" }, icon), text);
 }
 function table(head, rows, numCols) {
@@ -418,38 +542,51 @@ function barChart(items, { min = 0, max = 1, label, fmt = v => num(v, 3) }) {
   items.forEach((it, i) => {
     const y = top + i * rowH + 8, h = rowH - 16;
     const v = it.value;
-    g.append(svg("text", { x: left - 10, y: y + h / 2 + 4, "text-anchor": "end", class: "lbl" }, it.name));
+    const name = it.name.length > 14 && W < 480 ? it.name.slice(0, 13) + "…" : it.name;
+    g.append(svg("text", { x: left - 10, y: y + h / 2 + 4, "text-anchor": "end", class: "lbl" }, name));
+    const tipText = `${it.name}: ${v === null || v === undefined ? "n/a" : fmt(v)}${it.tip ? " (" + it.tip + ")" : ""}`;
     if (v === null || v === undefined) {
       g.append(svg("text", { x: x(Math.max(0, min)) + 6, y: y + h / 2 + 4 }, "n/a"));
       return;
     }
     const x0 = x(Math.max(min, 0)), x1 = x(v);
     const bx = Math.min(x0, x1), bw = Math.max(Math.abs(x1 - x0), v === 0 ? 0 : 2);
-    const bar = svg("rect", { x: bx, y, width: bw, height: h, rx: 4, fill: it.color, "data-tip": `${it.name}: ${fmt(v)}${it.tip ? " (" + it.tip + ")" : ""}` });
-    g.append(bar);
-    if (v === 0) g.append(svg("line", { x1: x0, x2: x0, y1: y - 2, y2: y + h + 2, stroke: it.color, "stroke-width": 2, "data-tip": `${it.name}: ${fmt(v)}` }));
+    g.append(svg("rect", { x: bx, y, width: bw, height: h, rx: 4, fill: it.color, "stroke-dasharray": it.dashed ? "3 2" : null, stroke: it.dashed ? "var(--ink)" : null, "data-tip": tipText }));
+    if (v === 0) g.append(svg("line", { x1: x0, x2: x0, y1: y - 2, y2: y + h + 2, stroke: it.color, "stroke-width": 2, "data-tip": tipText }));
     // invisible hit target bigger than the mark
-    g.append(svg("rect", { x: left, y: y - 6, width: W - left - right, height: h + 12, fill: "transparent", "data-tip": `${it.name}: ${fmt(v)}${it.tip ? " (" + it.tip + ")" : ""}` }));
+    g.append(svg("rect", { x: left, y: y - 6, width: W - left - right, height: h + 12, fill: "transparent", "data-tip": tipText }));
     const lx = v >= 0 ? Math.max(x1, x0) + 6 : Math.min(x1, x0) - 6;
-    g.append(svg("text", { x: lx, y: y + h / 2 + 4, "text-anchor": v >= 0 ? "start" : "end", class: "lbl" }, fmt(v)));
+    g.append(svg("text", { x: lx, y: y + h / 2 + 4, "text-anchor": v >= 0 ? "start" : "end", class: "lbl" }, fmt(v) + (it.flag ? " *" : "")));
   });
   return g;
 }
+const chartItem = (t, value, tipText) => ({ name: t.key, value, color: color(t), dashed: striped(t), flag: t.no_results,
+  tip: (tipText || "") + (t.no_results ? (tipText ? ", " : "") + BADGE() : "") });
+const chartFootnote = ts => ts.some(t => t.no_results)
+  ? el("p", { class: "small" }, "* ", ts.filter(t => t.no_results).map(t => t.key).join(", "), `: ${BADGE()}. The bar shows what an empty report earns.`) : null;
 
 // ---- sections ----------------------------------------------------------------------
+function datasetOf() {
+  if (DATA.dataset) return DATA.dataset;
+  // Older payloads: the union of every tool's tasks.
+  const tasks = new Map();
+  for (const t of DATA.tools) for (const r of t.trials) if (!tasks.has(r.task)) tasks.set(r.task, r);
+  const all = [...tasks.values()];
+  const pos = all.filter(r => r.role === "positive");
+  return { families: new Set(all.map(r => r.family)).size, positives: pos.length,
+    negatives: all.filter(r => r.role === "negative").length, gt_findings: sum(pos, r => r.gt), positives_by_risk_set: {} };
+}
 function renderHeader() {
   const tools = DATA.tools;
-  const first = tools[0] || { trials: [] };
-  const fams = new Set(first.trials.map(r => taskId(r.task)[0]));
-  const pos = positives(first), neg = negatives(first);
-  const gt = sum(pos, r => r.gt);
-  const sets = ((first.summary || {}).risk_types || {}).by_truth_set || {};
+  const ds = datasetOf();
+  const sets = ds.positives_by_risk_set || {};
   const chips = el("div", { class: "chips", role: "group", "aria-label": "Scanners shown" },
     tools.map(t => el("button", {
-      class: "chip", type: "button", "aria-pressed": visible.has(t.tool) ? "true" : "false",
+      class: "chip", type: "button", "aria-pressed": visible.has(t.key) ? "true" : "false",
       "data-tip": `${Object.keys(t.agent_versions || {}).join(", ")}${Object.keys(t.image_manifests || {}).length ? " | image " + Object.keys(t.image_manifests).join(", ") : ""}`,
-      onclick: () => { if (visible.has(t.tool)) { if (visible.size > 1) visible.delete(t.tool); } else visible.add(t.tool); render(); },
-    }, swatch(t), t.tool, el("span", { class: "meta" }, Object.keys(t.agent_versions || {})[0] || ""))));
+      onclick: () => { if (visible.has(t.key)) { if (visible.size > 1) visible.delete(t.key); } else visible.add(t.key); render(); },
+    }, swatch(t), t.key, el("span", { class: "meta" }, Object.keys(t.agent_versions || {})[0] || ""), badge(t))));
+  const obs = DATA.observations.filter(o => !o.tool || visible.has(o.tool));
   return el("div", { id: "overview" },
     el("div", { class: "kicker" }, "OWASP LLM02:2026 and LLM03:2026 static analysis benchmark"),
     el("h1", {}, "How well do SAST scanners find Sensitive Information Disclosure and Excessive Agency in GenAI code?"),
@@ -458,184 +595,257 @@ function renderHeader() {
     chips,
     el("p", { class: "small" }, "Click a scanner to hide or show it everywhere in the report."),
     el("div", { class: "tiles" },
-      tile(fams.size, "repository families"),
-      tile(pos.length, "positive tasks (vulnerable)"),
-      tile(neg.length, "ambiguous negatives (fixed twin)"),
-      tile(gt, "ground-truth findings"),
-      tile(["both", "SID only", "EA only"].map(k => (sets[k] || {}).tasks || 0).join(" / "), "positives with both risks / disclosure only / agency only")),
-    DATA.observations && DATA.observations.length ? el("div", { class: "callout", role: "note" },
-      el("strong", {}, "Key observations"),
-      el("ul", {}, DATA.observations.filter(o => shown().some(t => o.startsWith(t.tool + " ")) || !DATA.tools.some(t => o.startsWith(t.tool + " "))).map(o => el("li", {}, o)))) : null,
+      tile(ds.families, "repository families"),
+      tile(ds.positives, "positive tasks (vulnerable)"),
+      tile(ds.negatives, "ambiguous negatives (fixed twin)"),
+      tile(ds.gt_findings, "ground-truth findings"),
+      tile(["both", "SID only", "EA only"].map(k => sets[k] || 0).join(" / "), "positives with both risks / disclosure only / agency only")),
+    DATA.coverage_note ? el("p", { class: "note" }, DATA.coverage_note) : null,
+    (DATA.warnings || []).length ? el("div", { class: "callout warn", role: "note" },
+      el("strong", {}, "Warnings"), el("ul", {}, DATA.warnings.map(w => el("li", {}, w)))) : null,
+    obs.length ? el("div", { class: "callout", role: "note" },
+      el("strong", {}, "Key observations"), el("ul", {}, obs.map(o => el("li", {}, o.text)))) : null,
     renderScoreboard());
 }
-function tile(v, l) { return el("div", { class: "tile" }, el("div", { class: "v" }, v), el("div", { class: "l" }, l)); }
+function tile(v, l) { return el("div", { class: "tile" }, el("div", { class: "v" }, String(v ?? "n/a")), el("div", { class: "l" }, l)); }
 
 function renderScoreboard() {
   const ts = shown();
-  const rows = [
-    ["Ground-truth findings detected", t => { const p = pathStats(t); return `${p.tp} / ${p.gt}`; }, [1]],
-    ["Risk detection, mean TPR over the two risks", t => num(mean(Object.values(RISK_LABEL).map((_, i) => riskRow(t, Object.keys(RISK_LABEL)[i]).TPR)))],
-    ["Risk detection, mean FPR over the two risks", t => num(mean(Object.keys(RISK_LABEL).map(k => riskRow(t, k).FPR)))],
-    ["Exact risk set (both / one / neither) correct", t => { const s = exactTotals(t); return `${s.exact} / ${s.tasks}`; }],
-    ["Ambiguous negatives judged clean", t => { const z = (t.summary || {}).zero_finding_tasks_clean || [0, 0]; return `${z[0]} / ${z[1]}`; }],
-    ["Path tracing, mean score on positives", t => num(meas(t).path)],
-    ["Mitigation detection, mean score on positives", t => num(meas(t).controls)],
-    ["Recommendation, mean score on positives", t => num(meas(t).recommendations)],
-    ["OWASP Benchmark score (mean TPR minus mean FPR)", t => num(cat(t).score)],
-    ["Results written by the scanner", t => String(emitted(t))],
-  ];
-  const chart = barChart(ts.map(t => ({ name: t.tool, value: cat(t).score, color: color(t), tip: `TPR ${num(cat(t).mean_TPR)}, FPR ${num(cat(t).mean_FPR)}` })),
-    { min: -1, max: 1, label: "OWASP Benchmark score per scanner, from -1 to 1" });
+  const sb = DATA.scoreboard || { columns: [], rows: [] };
+  const colOf = new Map((sb.columns || []).map((c, i) => [c, i]));
+  const rows = (sb.rows || []).map(r => [r[0], ...ts.map(t => {
+    const v = r[colOf.get(t.key)];
+    return v === NS() ? nsCell() : v === NR() ? el("span", { class: "ns" }, NR()) : String(v ?? "");
+  })]);
+  const chart = barChart(ts.map(t => chartItem(t, cat(t).suppressed ? null : cat(t).score,
+    cat(t).suppressed ? `${TOO_FEW}: a category has fewer than ${cat(t).min_tasks_per_side || 5} positives or negatives` : `TPR ${num(cat(t).mean_TPR)}, FPR ${num(cat(t).mean_FPR)}`)),
+    { min: -1, max: 1, label: "OWASP Benchmark style score per scanner, from -1 to 1" });
   return el("section", { class: "block", "aria-labelledby": "score-h" },
     el("h2", { id: "score-h" }, "Scoreboard"),
-    el("p", { class: "lede" }, "One row per measurement the client requirement asks every task to support. Positives and negatives are always scored apart, since a scanner that reports nothing passes every negative."),
-    table(["Measure", ...ts.map(toolHead)], rows.map(([label, f]) => [label, ...ts.map(t => f(t))]), ts.map((_, i) => i + 1)),
-    el("h3", {}, "OWASP Benchmark score per scanner"),
-    el("p", { class: "small" }, "Mean true positive rate minus mean false positive rate over the taxonomy categories. 0 is what guessing or reporting nothing earns, 1 is perfect."),
-    chart);
-}
-const mean = xs => { const v = xs.filter(x => x !== null && x !== undefined); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null; };
-const cat = t => ((t.summary || {}).categories || {}).overall || {};
-const meas = t => (t.summary || {}).measurements_positive_tasks || {};
-const riskRow = (t, k, key = "risk_types") => (((t.summary || {})[key]) || {})[k] || {};
-function exactTotals(t) {
-  const sets = riskRow(t, "by_truth_set");
-  return { exact: sum(Object.values(sets), v => v.exact), tasks: sum(Object.values(sets), v => v.tasks) };
+    el("p", { class: "lede" }, "The same rows as the scoreboard in eval_report.md. Positives and negatives are always scored apart, since a scanner that reports nothing passes every negative. \"" + NS() + "\" means the scanner matched a finding but no graded result of it carries the field the grader reads. \"" + NR() + "\" means it matched no finding, so that cannot be told."),
+    table(["Measure", ...ts.map(toolHead)], rows, ts.map((_, i) => i + 1)),
+    el("h3", {}, "OWASP Benchmark style score per scanner"),
+    el("p", { class: "small" }, "Mean true positive rate minus mean false positive rate over the taxonomy categories the scanner can emit. 1 is perfect. 0 is what guessing earns, and also what reporting nothing earns. No bar (n/a) means " + TOO_FEW + ": the mean is only drawn when every category in it has at least 5 positives and 5 negatives."),
+    chart, chartFootnote(ts));
 }
 
+function renderVersions() {
+  const v = DATA.versions;
+  if (!v) return null;
+  const ts = shown();
+  const colOf = new Map((v.columns || []).map((c, i) => [c, i]));
+  const rows = (v.rows || []).map(r => [r[0], ...ts.map(t => String(r[colOf.get(t.key)] ?? ""))]);
+  return section("versions", "Provenance", "Versions and run configuration", v.intro || null,
+    el("p", { class: "small" }, "Task set: ", v.task_set_text || "not recorded"),
+    table(["Field", ...ts.map(toolHead)], rows));
+}
+
+function riskTable(ts, key) {
+  return Object.entries(RISK_LABEL).map(([k, label]) => el("div", {},
+    el("h3", {}, label),
+    table(["Scanner", "Recall (TPR)", "False alarm rate on negatives (FPR)", "TP", "FN", "FP", "TN", "Precision"],
+      ts.map(t => { const r = riskRow(t, k, key); return [toolHead(t),
+        meter(r.TPR, t, `${t.key}: ${r.TP || 0} of ${(r.TP || 0) + (r.FN || 0)} positives with this risk flagged`),
+        meter(r.FPR, null, `${t.key}: ${r.FP || 0} of ${(r.FP || 0) + (r.TN || 0)} negatives flagged with this risk`, true),
+        r.TP, r.FN, r.FP, r.TN, num(r.precision)]; }), [3, 4, 5, 6, 7])));
+}
+function exactTable(ts, key) {
+  const sets = TRUTH_SET_ORDER.filter(s => ts.some(t => riskRow(t, "by_truth_set", key)[s]));
+  const rows = sets.map(s => [TRUTH_SET_LABEL[s] || s, ...ts.map(t => { const v = riskRow(t, "by_truth_set", key)[s];
+    return v ? meter(v.exact_rate, t, `${t.key}: predicted set equals the label on ${v.exact} of ${v.tasks}`) : "n/a"; })]);
+  for (const role of ["positive", "negative"]) {
+    rows.push([role === "positive" ? "All positives" : "All negatives", ...ts.map(t => { const v = (riskRow(t, "exact_by_role", key) || {})[role];
+      return v ? `${v.exact} / ${v.tasks}` : "n/a"; })]);
+  }
+  return table(["Labelled risk set", ...ts.map(toolHead)], rows);
+}
+function otherPosNote(ts) {
+  const notes = ts.flatMap(t => Object.entries(RISK_LABEL).map(([k, label]) => {
+    const n = riskRow(t, k, "risk_types_loose").FP_other_pos || 0;
+    return n ? `${t.key} also flagged ${label} on ${plural(n, "positive")} labelled without it (counted in precision, not in FPR).` : null;
+  })).filter(Boolean);
+  return notes.length ? el("p", { class: "small" }, notes.join(" ")) : null;
+}
 function renderM1() {
   const ts = shown();
-  const riskTables = Object.entries(RISK_LABEL).map(([k, label]) => el("div", {},
-    el("h3", {}, label),
-    table(["Scanner", "Recall (TPR)", "False alarm rate (FPR)", "TP", "FN", "FP", "TN", "Precision"],
-      ts.map(t => { const r = riskRow(t, k); return [toolHead(t),
-        meter(r.TPR, t, `${t.tool}: ${r.TP || 0} of ${(r.TP || 0) + (r.FN || 0)} tasks with this risk flagged`),
-        meter(r.FPR, null, `${t.tool}: ${r.FP || 0} of ${(r.FP || 0) + (r.TN || 0)} tasks without this risk flagged`, true),
-        r.TP, r.FN, r.FP, r.TN, num(r.precision)]; }), [3, 4, 5, 6, 7])));
-  const setNames = [...new Set(ts.flatMap(t => Object.keys(riskRow(t, "by_truth_set"))))]
-    .sort((a, b) => ["both", "SID only", "EA only", "neither"].indexOf(a) - ["both", "SID only", "EA only", "neither"].indexOf(b));
-  const exact = table(["Labelled risk set", "Tasks", ...ts.map(toolHead)],
-    setNames.map(s => { const tasks = (riskRow(ts[0], "by_truth_set")[s] || {}).tasks || 0;
-      return [TRUTH_SET_LABEL[s] || s, tasks, ...ts.map(t => { const v = riskRow(t, "by_truth_set")[s];
-        return v ? meter(v.exact_rate, t, `${t.tool}: predicted set equals the label on ${v.exact} of ${v.tasks}`) : "n/a"; })]; }), [1]);
   return section("m1", "Measurement 1", "Risk detection",
-    "Does the scanner say whether the repository causes Sensitive Information Disclosure, Excessive Agency, both, or neither? A risk counts as detected on a task only when a reported result matched a ground-truth finding (or, on a negative, when a result fails it).",
-    riskTables,
+    "Does the scanner say whether the repository causes Sensitive Information Disclosure, Excessive Agency, both, or neither? A risk counts as detected on a task only when a reported result matched a ground-truth finding of that risk (or, on a negative, when a result fails it). Recall is over the positives labelled with the risk, the false alarm rate over the negatives only.",
+    riskTable(ts, "risk_types"),
     el("h3", {}, "Exact risk set per task"),
-    el("p", { class: "small" }, "Share of tasks where the set of risks the scanner reported is exactly the labelled set. On negatives the right answer is neither."),
-    exact);
+    el("p", { class: "small" }, "Share of tasks where the set of risks the scanner reported is exactly the labelled set. Positives and negatives are shown apart. On negatives the right answer is neither."),
+    exactTable(ts, "risk_types"),
+    el("h3", {}, "Loose rule (secondary view, not the score)"),
+    el("p", { class: "small" }, "The grader's older flag: a risk counts as predicted from any result in the files the fix changed or next to the fixed code, matched or not. It shows how often a scanner flagged the right area without a matching finding."),
+    riskTable(ts, "risk_types_loose"),
+    otherPosNote(ts),
+    exactTable(ts, "risk_types_loose"));
 }
 
 function renderM2() {
   const ts = shown();
   return section("m2", "Measurement 2", "Reachability and path tracing",
     "Does the scanner identify the weakness, the affected asset and the reachable path from the source or model decision to the sink or action? Scored on positive tasks against each ground-truth finding.",
-    table(["Scanner", "Findings matched", "Finding recall", "Result near the finding", "Near, with an acceptable CWE", "Path score (mean)", "Detections with a trace"],
-      ts.map(t => { const p = pathStats(t); return [toolHead(t), `${p.tp} / ${p.gt}`,
-        meter(p.findingRecall, t, "Matched by location, rule and CWE, as the grader does"),
-        meter(p.nearRecall, t, "Any security result of the tool within the line tolerance of the finding, before OWASP mapping"),
-        meter(p.nearCweRecall, t, "As before, and the raw result carries one of the finding's acceptable CWEs"),
-        meter(meas(t).path, t, "Share of the labelled path steps covered by the result's codeFlows, averaged over every finding (missed findings score 0)"),
-        `${p.withTrace} / ${p.hits}`]; }), [1, 6]),
-    el("p", { class: "note" }, "The two near columns look at the scanner's raw output, before anything is mapped to an OWASP rule. They show how close a tool came even when it reported the wrong rule or no rule. A detection with a trace is a matched result whose code flow earned path credit."));
+    table(["Scanner", "Findings matched", "Finding recall", "Raw result near the finding", "Near, with an acceptable CWE", "Path score (mean)", "Path score, matched findings only", "Detections with a code flow"],
+      ts.map(t => { const m = M(t); return [toolHead(t), `${m.matched ?? 0} / ${m.gt ?? 0}`,
+        meter(m.finding_recall, t, "Matched as the grader does: same risk family, within the line tolerance, and a shared CWE"),
+        meter(m.near_recall, t, `${m.near ?? "n/a"} of ${m.gt_with_metadata ?? "n/a"}: any security result of the scanner within the line tolerance of the finding, before OWASP mapping`),
+        meter(m.near_cwe_recall, t, `${m.near_cwe ?? "n/a"} of ${m.gt_with_metadata ?? "n/a"}: as before, and the raw result carries the finding's primary CWE or an acceptable one`),
+        measureCell(t, "path", m.path, "Share of the labelled path steps covered by the result's codeFlows, averaged over every finding (missed findings score 0)"),
+        matchedCell(t, "path"),
+        `${m.hits_with_flow ?? 0} / ${m.hits ?? 0}`]; }), [1, 7]),
+    el("p", { class: "note" }, "The two near columns look at the scanner's raw output, before anything is mapped to an OWASP rule, and pair each finding with a different raw result (one result never counts for two findings). They show how close a scanner came even when it reported the wrong risk or no rule. \"" + NS() + "\" means no graded result of the scanner has a codeFlows entry, so the path score cannot be earned. \"" + NR() + "\" means it matched no finding, so that cannot be told."));
 }
 
 function renderM3() {
   const ts = shown();
   return section("m3", "Measurement 3", "Mitigation detection",
-    "Can the scanner tell vulnerable code from code with partial or complete controls, and judge the residual risk? On positives this is the control status and residual risk of each matched result. The ambiguous negatives, where a working control is the only difference, test the same skill from the other side.",
-    table(["Scanner", "Control and residual-risk score (positives, mean)", "Ambiguous negatives judged clean", "Flagged next to the fixed code", "Flagged on a decoy"],
-      ts.map(t => { const z = (t.summary || {}).zero_finding_tasks_clean || [0, 0]; const neg = ((t.summary || {}).reward_by_role || {}).negative || {};
-        return [toolHead(t), meter(meas(t).controls, t, "controlStatus (75%) and residualRisk (25%) compared with the labels, missed findings score 0"),
-          meter(ratio(z[0], z[1]), t, `${z[0]} of ${z[1]} negatives with no false positive`),
-          String(neg.failed_near_fix || 0), String(neg.failed_trap || 0)]; }), [3, 4]),
-    el("p", { class: "note" }, "A negative counts as clean only when the scanner reports nothing on the fixed code and nothing on its decoys. Results elsewhere in the repository are listed under scanner output but not held against it."));
+    "Can the scanner tell vulnerable code from code with partial or complete controls, and judge the residual risk? On positives this is the control status and residual risk of each matched result. The ambiguous negatives, where a working control is the main difference, test the same skill from the other side.",
+    table(["Scanner", "Control and residual-risk score (positives, mean)", "Matched findings only", "Fixed answer none/high on every finding", "Ambiguous negatives judged clean", "Negatives with any result in scope", "Flagged next to the fixed code", "Flagged on a decoy", "Flagged anywhere in scope"],
+      ts.map(t => { const m = M(t);
+        return [toolHead(t), measureCell(t, "controls", m.controls, "controlStatus (75%) and residualRisk (25%) compared with the labels, missed findings score 0"),
+          matchedCell(t, "controls"),
+          fixedCell(t, "controls", "controlStatus none and residualRisk high on every finding, scored by the grader"),
+          meter(ratio(m.negatives_clean, m.negatives), t, `${m.negatives_clean} of ${m.negatives} negatives with no failing result`),
+          `${m.negatives_any_result ?? 0} / ${m.negatives ?? 0}`,
+          String(m.failed_near_fix || 0), String(m.failed_trap || 0), String(m.failed_in_scope || 0)]; }), [5, 6, 7, 8]),
+    el("p", { class: "note" }, "The fixed answer column is what controlStatus none and residualRisk high on every finding earns, scored with the grader's own functions on the same positives as if every finding were matched. A score close to it shows little judgement. A negative counts as clean unless a result of a contrasted OWASP prefix (LLM02 or LLM03) lands next to the fixed code, or a result with a decoy's prefix lands on that decoy. Results elsewhere in the repository are not held against it, so the any-result column counts them too."));
 }
 
 function renderM4() {
   const ts = shown();
   return section("m4", "Measurement 4", "Mitigation recommendation",
     "Does the scanner recommend risk-specific controls where they are missing or ineffective, such as authorizing before retrieval, minimising context, sink-side enforcement, least-privilege tools and exact-action approval?",
-    table(["Scanner", "Recommendation score (positives, mean)", "Matched detections"],
-      ts.map(t => [toolHead(t), meter(meas(t).recommendations, t, "Recommendations that apply to the finding earn credit, inapplicable ones are penalised, missed findings score 0"), String((t.hits || []).length)]), [2]),
-    el("p", { class: "note" }, "Plain SAST scanners report a rule and a location, not a remediation plan, so this measurement can only be earned through matched detections that carry recommendations."));
+    table(["Scanner", "Recommendation score (positives, mean)", "Matched findings only", `Fixed answer ${(M(DATA.tools[0] || {}).fixed_answer || {}).recommendation_id || ""} on every finding`, "Matched detections"],
+      ts.map(t => [toolHead(t), measureCell(t, "recommendations", M(t).recommendations, "Recommendations that apply to the finding earn credit, inapplicable ones are penalised, missed findings score 0"),
+        matchedCell(t, "recommendations"),
+        fixedCell(t, "recommendations", `The single most common required recommendation id (${(M(t).fixed_answer || {}).recommendation_id || "none"}) on every finding, scored by the grader`),
+        String((t.hits || []).length)]), [4]),
+    el("p", { class: "note" }, "Only the top-level recommendations property of a matched result is scored. Agents that write fixed heuristic recommendations under properties.heuristics are not scored on them, so a scanner with no recommendations of its own shows \"" + NS() + "\"."));
 }
 
 function renderNegatives() {
   const ts = shown();
-  const fps = ts.flatMap(t => (t.false_positives || []).filter(f => f.kind !== "unmatched").map(f => [toolHead(t), taskId(f.task)[0],
-    f.kind === "trap" ? "Decoy" : "Next to the fix", el("code", {}, f.rule || ""), el("code", {}, loc(f.location)), f.traps || ""]));
-  const chart = barChart(ts.map(t => { const z = (t.summary || {}).zero_finding_tasks_clean || [0, 0]; return { name: t.tool, value: ratio(z[0], z[1]), color: color(t), tip: `${z[0]} of ${z[1]}` }; }),
+  const fps = ts.flatMap(t => (t.false_positives || []).filter(f => f.kind !== "unmatched").map(f => [toolHead(t), f.family || parseTaskName(f.task)[0], runLabel(f),
+    f.kind === "trap" ? "Decoy" : f.kind === "in_scope" ? "Anywhere in scope" : "Next to the fix", code(f.rule || ""), code(loc(f.location)), f.traps || ""]));
+  const chart = barChart(ts.map(t => { const m = M(t); return chartItem(t, ratio(m.negatives_clean, m.negatives), `${m.negatives_clean} of ${m.negatives}`); }),
     { min: 0, max: 1, label: "Share of ambiguous negatives judged clean per scanner" });
   return section("negatives", "Ambiguous negatives", "Hard negatives near the P/N boundary",
-    "Each negative is the fixed twin of a positive: it differs only in the safety-relevant condition, for example the sensitive value no longer reaches the external sink, or a broad permission is narrowed by the deployed configuration. Some negatives also carry decoys that look risky but are safe.",
-    el("h3", {}, "Negatives judged clean"), chart,
+    "Each negative is the fixed twin of a positive: it differs mainly in the safety-relevant condition, for example the sensitive value no longer reaches the external sink, or a broad permission is narrowed by the deployed configuration. Some negatives also carry decoys that look risky but are safe.",
+    el("h3", {}, "Negatives judged clean"), chart, chartFootnote(ts),
     el("h3", {}, "Every false alarm on a negative"),
-    fps.length ? table(["Scanner", "Family", "Where", "Rule", "Location", "Decoy"], fps) : el("p", { class: "empty" }, "No scanner raised a false alarm on a negative."));
+    fps.length ? table(["Scanner", "Family", "Task", "Where", "Rule", "Location", "Decoy"], fps) : el("p", { class: "empty" }, "No scanner raised a false alarm on a negative."));
 }
 
+// One outcome per task, not per role: a family can hold two positives, and a task run more than
+// once (harbor -k N) is summed up over its runs. eval_report.py computes these. Older payloads
+// without task_outcomes get one line per trial instead, so nothing is dropped.
+function outcomesOf(t) {
+  if (Array.isArray(t.task_outcomes)) return t.task_outcomes;
+  return t.trials.map(r => {
+    const role = r.role || "unknown";
+    let kind = "na", text = `not scored (${r.status})`;
+    if (isScored(r) && role === "positive") { kind = r.tp > 0 ? "ok" : "bad"; text = `${r.tp || 0}/${r.gt ?? "?"} found` + (r.fp ? `, ${r.fp} FP` : ""); }
+    else if (isScored(r) && role === "negative") { kind = (r.fp || 0) === 0 ? "ok" : "bad"; text = (r.fp || 0) === 0 ? "clean" : `FAIL (${r.fp} FP)`; }
+    else if (isScored(r)) text = `role unknown (${r.task})`;
+    return { task: r.task, family: r.family, role, runs: 1, scored: isScored(r) ? 1 : 0, text, kind, gt: r.gt };
+  });
+}
+const runLabel = x => x.run ? `${x.task} (run ${x.run})` : x.task;
+const ROLE_RANK = { positive: 0, negative: 1 };
 function renderFamilies() {
   const ts = shown();
   const fams = new Map();
-  for (const t of ts) for (const r of t.trials) {
-    const [id, role] = taskId(r.task);
-    if (!fams.has(id)) fams.set(id, { id, truth: null, cats: new Set(), byTool: new Map() });
-    const f = fams.get(id);
-    if (role === "positive") {
-      Object.entries(r.categories || {}).forEach(([c, v]) => { if (v.truth) f.cats.add(c); });
-      f.risks = Object.entries(r.risks || {}).filter(([, v]) => v.truth).map(([k]) => k);
-      f.gt = r.gt;
+  const famOf = id => { if (!fams.has(id)) fams.set(id, { id, name: null, cats: new Set(), tasks: new Map(), byTool: new Map() }); return fams.get(id); };
+  for (const t of ts) {
+    for (const r of t.trials) {
+      const f = famOf(r.family);
+      if (r.family_name && r.family_name !== r.family) f.name = r.family_name;
+      if (!f.tasks.has(r.task)) f.tasks.set(r.task, { role: r.role || "unknown", gt: null, raw: new Map() });
+      const task = f.tasks.get(r.task);
+      if (task.role === "unknown" && r.role) task.role = r.role;
+      if (r.role === "positive") {
+        Object.entries(r.categories || {}).forEach(([c, v]) => { if (v.truth) f.cats.add(c); });
+        if (r.gt !== null && r.gt !== undefined && (task.gt === null || isScored(r))) task.gt = r.gt;
+      }
+      if (r.raw !== null && r.raw !== undefined) task.raw.set(t.key, (task.raw.get(t.key) || 0) + r.raw);
     }
-    if (!f.byTool.has(t.tool)) f.byTool.set(t.tool, {});
-    f.byTool.get(t.tool)[role || "task"] = r;
+    for (const o of outcomesOf(t)) {
+      const f = famOf(o.family);
+      if (!f.tasks.has(o.task)) f.tasks.set(o.task, { role: o.role || "unknown", gt: o.gt ?? null, raw: new Map() });
+      if (!f.byTool.has(t.key)) f.byTool.set(t.key, new Map());
+      f.byTool.get(t.key).set(o.task, o);
+    }
   }
   const cols = `minmax(150px,1.3fr) ${ts.map(() => "minmax(150px,1fr)").join(" ")}`;
   const head = el("div", { style: `display:grid;grid-template-columns:${cols};gap:10px;padding:0 4px 6px 4px;font-size:12px;font-weight:600;color:var(--ink-2)` },
     el("div", {}, "Family and labels"), ts.map(t => el("div", {}, toolHead(t))));
-  const rows = [...fams.values()].sort((a, b) => a.id.localeCompare(b.id)).map(f => {
+  const rows = [...fams.values()].sort((a, b) => String(a.id).localeCompare(String(b.id))).map(f => {
+    const order = [...f.tasks.entries()].sort(([a, x], [b, y]) => ((ROLE_RANK[x.role] ?? 2) - (ROLE_RANK[y.role] ?? 2)) || a.localeCompare(b));
+    const roleCount = new Map();
+    order.forEach(([, x]) => roleCount.set(x.role, (roleCount.get(x.role) || 0) + 1));
+    // The task id is shown only when the family has two tasks of the same role.
+    const lineName = (task, role) => roleCount.get(role) > 1 ? `${role} ${task}` : role;
+    const gtSum = order.filter(([, x]) => x.role === "positive" && x.gt !== null && x.gt !== undefined).reduce((a, [, x]) => a + x.gt, 0);
+    const hasGt = order.some(([, x]) => x.role === "positive" && x.gt !== null && x.gt !== undefined);
     const cells = ts.map(t => {
-      const pr = f.byTool.get(t.tool) || {};
-      const p = pr.positive, n = pr.negative;
-      return el("div", {},
-        p ? (p.reward === null ? status("na", p.status) : status(p.tp > 0 ? "ok" : "bad", `found ${p.tp || 0}/${p.gt || 0}`, `Positive: reward ${num(p.reward)}, ${p.fp || 0} unmatched results`)) : status("na", "not run"),
-        el("br"),
-        n ? (n.reward === null ? status("na", n.status) : status((n.fp || 0) === 0 ? "ok" : "bad", (n.fp || 0) === 0 ? "negative clean" : `negative: ${n.fp} alarm${n.fp > 1 ? "s" : ""}`)) : status("na", "not run"));
+      const mine = f.byTool.get(t.key) || new Map();
+      return el("div", {}, order.map(([task, x], i) => {
+        const o = mine.get(task);
+        const runs = o && o.runs > 1 ? `, ${o.runs} runs` : "";
+        const line = o ? status(o.kind, `${lineName(task, x.role)}: ${o.text}`, `${task} (${x.role}${runs})`)
+          : status("na", `${lineName(task, x.role)}: not run`, task);
+        return [i ? el("br") : null, line];
+      }));
     });
     const details = ts.map(t => {
-      const hits = (t.hits || []).filter(h => taskId(h.task)[0] === f.id);
-      const fps = (t.false_positives || []).filter(x => taskId(x.task)[0] === f.id);
-      const pr = (f.byTool.get(t.tool) || {});
-      if (!hits.length && !fps.length) return el("p", {}, toolHead(t), el("span", { class: "small" }, `  no results on this family (${(pr.positive || {}).raw ?? "?"} raw results on the positive before mapping)`));
+      const mine = x => x.family === f.id || (!x.family && parseTaskName(x.task)[0] === f.id);
+      const hits = (t.hits || []).filter(mine);
+      const fps = (t.false_positives || []).filter(mine);
+      const outs = (t.outside_scope || []).filter(mine);
+      if (!hits.length && !fps.length && !outs.length) {
+        const raw = order.filter(([, x]) => x.role === "positive").map(([, x]) => x.raw.get(t.key)).filter(v => v !== undefined);
+        const n = raw.length ? raw.reduce((a, b) => a + b, 0) : null;
+        return el("p", {}, toolHead(t), el("span", { class: "small" }, `  no results on this family (${n ?? "?"} raw result${n === 1 ? "" : "s"} on its positives before mapping)`));
+      }
+      const who = x => `${runLabel(x)} (${x.role || "unknown"})`;
       return el("div", {}, el("p", {}, toolHead(t)),
-        table(["Twin", "Outcome", "Rule", "Location", "Decoy"],
-          [...hits.map(h => [taskId(h.task)[1], status("ok", "matched " + h.finding), el("code", {}, h.rule), el("code", {}, loc(h.location)), ""]),
-           ...fps.map(x => [taskId(x.task)[1], status("bad", { unmatched: "unmatched", trap: "on a decoy", near_fix: "next to the fix" }[x.kind] || x.kind), el("code", {}, x.rule), el("code", {}, loc(x.location)), x.traps || ""])]));
+        table(["Task", "Outcome", "Rule", "Location", "Decoy"],
+          [...hits.map(h => [who(h), status("ok", "matched " + h.finding), code(h.rule), code(loc(h.location)), ""]),
+           ...fps.map(x => [who(x), status("bad", { unmatched: "unmatched", trap: "on a decoy", near_fix: "next to the fix", in_scope: "anywhere in scope" }[x.kind] || x.kind), code(x.rule), code(loc(x.location)), x.traps || ""]),
+           ...outs.map(x => [who(x), status("na", "outside scope (not scored)"), code(x.rule), code(loc(x.location)), ""])]));
     });
     return el("details", { class: "fam" },
       el("summary", { style: `grid-template-columns:${cols}` },
-        el("div", {}, el("span", { class: "caret", "aria-hidden": "true" }, "▸"), " ", el("strong", { class: "mono" }, f.id),
+        el("div", {}, el("span", { class: "caret", "aria-hidden": "true" }, "▸"), " ", el("strong", { class: "mono" }, f.id), f.name ? el("span", { class: "small mono" }, ` (${f.name})`) : null,
           el("div", {}, [...f.cats].sort().map(c => el("span", { class: "tag", "data-tip": c }, SHORT_CATEGORY[c] || c)),
-            f.gt !== undefined ? el("span", { class: "small" }, ` ${f.gt} finding${f.gt === 1 ? "" : "s"}`) : null)),
+            hasGt ? el("span", { class: "small" }, ` ${plural(gtSum, "finding")}`) : null)),
         cells),
       el("div", { class: "body" }, details));
   });
-  return section("families", "Repository families", "Each family: the vulnerable task and its fixed twin",
-    "One row per family. Open a row to see every result the scanners reported on it, matched or not.",
+  return section("families", "Repository families", "Each family: its vulnerable tasks and fixed twins",
+    "One row per family, with one line per task (a family can hold more than one positive). A task run more than once shows how many runs gave each result. Open a row to see every result the scanners reported on it: matched, false positives, and results outside the scored scope.",
     el("div", { class: "scroll" }, el("div", { style: "min-width:" + (180 + ts.length * 160) + "px" }, head, rows)));
 }
 
 function renderTaxonomy() {
   const ts = shown();
-  const cats = [...new Set(ts.flatMap(t => Object.keys(((t.summary || {}).categories || {}).per_category || {})))].sort();
-  const rows = cats.flatMap(c => ts.map((t, i) => { const v = (((t.summary || {}).categories || {}).per_category || {})[c] || {};
+  const cats = [...new Set(ts.flatMap(t => Object.keys((S(t).categories || {}).per_category || {})))].sort();
+  const rows = cats.flatMap(c => ts.map((t, i) => { const v = ((S(t).categories || {}).per_category || {})[c] || {};
+    const P = v.positives ?? ((v.TP || 0) + (v.FN || 0)), N = v.negatives ?? ((v.FP || 0) + (v.TN || 0));
     return [i === 0 ? el("strong", {}, CATEGORY_LABEL[c] || c) : "", toolHead(t),
-      meter(v.TPR, t, `${v.TP || 0} of ${(v.TP || 0) + (v.FN || 0)} tasks in this category detected`),
-      meter(v.FPR, null, `${v.FP || 0} of ${(v.FP || 0) + (v.TN || 0)} tasks outside it flagged`, true),
-      num(v.youden), v.TP, v.FN, v.FP, v.TN]; }));
+      meter(v.TPR, t, `${v.TP || 0} of ${P} positives labelled with this category detected`),
+      meter(v.FPR, null, `${v.FP || 0} of ${N} negatives that contrast this category flagged`, true),
+      num(v.youden), `${P} / ${N}`, `${v.TP || 0} / ${P}`, `${v.FP || 0} / ${N}`,
+      (cat(t).cannot_emit || []).includes(c) ? el("span", { class: "ns", "data-tip": "Its ruleIds come from the CWE map, and no CWE maps to this category" }, "cannot emit, left out of its mean") : ""]; }));
+  const means = ts.map(t => [toolHead(t), macro(t, "mean_TPR"), macro(t, "mean_FPR"), macro(t, "score"),
+    (cat(t).excluded_cannot_emit || []).join(", ") || "none"]);
   return section("taxonomy", "Risk taxonomy", "Scores per taxonomy category (OWASP Benchmark style)",
-    "Every graded task is a test case for each category it is labelled with. The score per category is the true positive rate minus the false positive rate (Youden), as the OWASP Benchmark scorecard computes it.",
-    table(["Category", "Scanner", "TPR", "FPR", "Score", "TP", "FN", "FP", "TN"], rows, [4, 5, 6, 7, 8]),
-    el("p", { class: "note" }, "Severity (Medium or High disclosure) is carried in the reported rule and checked as classification on matched findings."));
+    "Every scored task is a test case for each category it is labelled with: a positive for the categories of its findings, a negative for the categories it contrasts. The score per category is the true positive rate minus the false positive rate (Youden), as in the OWASP Benchmark scorecard, but with this benchmark's matching rules and test cases.",
+    table(["Category", "Scanner", "TPR", "FPR", "Score", "n positives / negatives", "TP / positives", "FP / negatives", "Note"], rows, [4, 5, 6, 7]),
+    el("h3", {}, "Means over the categories"),
+    table(["Scanner", "Mean TPR", "Mean FPR", "Score", "Left out: cannot emit"], means, [1, 2, 3]),
+    el("p", { class: "note" }, "On a negative, a category counts as flagged when a failing result has the same OWASP prefix (LLM02 or LLM03), so an Excessive Agency result of any subtype flags an Excessive Agency negative. The means are over the categories that have both positives and negatives and that the scanner can emit (Semgrep, CodeQL, SonarQube and a stock Claude review take their rule from the CWE map, which never gives LLM03.EA.AUTONOMY). A mean reads \"" + TOO_FEW + "\" when any category in it has fewer than 5 positives or 5 negatives."),
+    DATA.coverage_note ? el("p", { class: "note" }, DATA.coverage_note) : null);
 }
 
 function renderOutput() {
@@ -646,40 +856,186 @@ function renderOutput() {
     ts.map(t => [toolHead(t),
       el("div", {}, Object.entries(t.unmapped_by_cwe || {}).slice(0, 10).map(([k, v]) => el("span", { class: "tag" }, `${k} ×${v}`))),
       el("div", {}, Object.entries(t.results_by_rule || {}).map(([k, v]) => el("span", { class: "tag" }, `${k} ×${v}`)))]));
-  const ops = table(["Scanner", "Trials ok", "Not ok", "Mean setup s", "Mean scan s", "Agent", "Image manifest"],
-    ts.map(t => { const bad = t.trials.filter(r => r.status !== "ok");
+  const ops = table(["Scanner", "Trials scored", "Not scored", "Mean setup s", "Mean scan s", "Agent", "Image manifest"],
+    ts.map(t => { const bad = t.trials.filter(r => !isScored(r));
       return [toolHead(t), String(t.trials.length - bad.length), String(bad.length),
         num(mean(t.trials.map(r => r.setup_s)), 1), num(mean(t.trials.map(r => r.scan_s)), 1),
-        Object.keys(t.agent_versions || {}).join(", "), el("code", {}, Object.keys(t.image_manifests || {}).join(", ") || "not recorded")]; }), [1, 2, 3, 4]);
-  const errs = ts.flatMap(t => t.trials.filter(r => r.status !== "ok").map(r => [toolHead(t), r.task, r.status, r.error || ""]));
-  const unmatched = ts.flatMap(t => (t.false_positives || []).filter(f => f.kind === "unmatched").map(f => [toolHead(t), taskId(f.task)[0], el("code", {}, f.rule), el("code", {}, loc(f.location)), f.traps || ""]));
+        Object.keys(t.agent_versions || {}).join(", "), code(Object.keys(t.image_manifests || {}).join(", ") || "not recorded")]; }), [1, 2, 3, 4]);
+  const errs = ts.flatMap(t => t.trials.filter(r => !isScored(r)).map(r => [toolHead(t), runLabel(r), r.role || "unknown", r.status, r.gt ?? "?", r.error || ""]));
+  const warns = ts.flatMap(t => (t.warnings || []).map(w => [toolHead(t), runLabel(w), w.warning]));
+  const unmatched = ts.flatMap(t => (t.false_positives || []).filter(f => f.kind === "unmatched").map(f => [toolHead(t), f.family || parseTaskName(f.task)[0], runLabel(f), code(f.rule), code(loc(f.location)), f.traps || ""]));
   return section("output", "Scanner output", "What each scanner reported and where it went",
-    "Scanner results are mapped to the OWASP rules by CWE. A result whose CWEs no LLM02 or LLM03 rule covers is dropped before grading; these counts show how much of each tool's output fell outside the two risks.",
+    "Scanner results are mapped to the OWASP rules by CWE. A result whose CWEs no LLM02 or LLM03 rule covers is dropped before grading, and results of one family on the same file and line are merged into one. These counts show how much of each scanner's output fell outside the two risks.",
     funnel, el("h3", {}, "CWEs and rules"), dropped,
     el("h3", {}, "Unmatched results on positives"),
-    unmatched.length ? table(["Scanner", "Family", "Rule", "Location", "On a decoy"], unmatched) : el("p", { class: "empty" }, "None."),
+    unmatched.length ? table(["Scanner", "Family", "Task", "Rule", "Location", "On a decoy"], unmatched) : el("p", { class: "empty" }, "None."),
     el("h3", {}, "Runs"), ops,
-    errs.length ? [el("h3", {}, "Trials that did not finish cleanly"), table(["Scanner", "Task", "Status", "Error"], errs)] : null);
+    errs.length ? [el("h3", {}, "Trials that did not finish cleanly"), el("p", { class: "small" }, "Not scored and left out of every table. Their ground-truth findings are not added to recall."), table(["Scanner", "Task", "Role", "Status", "GT findings", "Error"], errs)] : null,
+    warns.length ? [el("h3", {}, "Warnings per trial"), table(["Scanner", "Task", "Warning"], warns)] : null);
 }
 
 function renderMethod() {
   return section("method", "Method", "How the numbers are computed",
     null,
-    el("ul", {},
-      el("li", {}, "Each task is a small runnable repository. Scanners receive only the repository source, configuration and safe fixtures plus the security-context manifest; labels, expected findings and reproduction tests stay evaluator-only."),
-      el("li", {}, "A finding is one risk type and one independently remediable weakness on one path. A reported result matches a finding when it lands in the labelled file and line range (within the task's line tolerance) and carries one of the finding's acceptable CWEs. Each result matches at most one finding, chosen by an optimal assignment. Classification then credits the reported OWASP rule (half credit for a partial-credit rule) and the CWE."),
-      el("li", {}, "Positives are scored on detection, classification, path, controls and recommendations. Negatives fail only when a result lands next to the fixed code or on a decoy."),
-      el("li", {}, "Task-level risk detection counts a risk as predicted only from results that matched a finding (or that fail the negative). Category scores follow the OWASP Benchmark scorecard: TPR minus FPR per category, then the mean."),
-      el("li", {}, DATA.harbor_mean_warning || "Harbor's job-level mean reward averages positives and negatives together and is not a score.")),
-    DATA.tasks_dir ? el("p", { class: "small" }, "Ground truth read from ", el("code", {}, DATA.tasks_dir)) : null,
-    el("p", { class: "small" }, "Jobs: ", DATA.tools.map(t => el("div", {}, el("code", {}, t.job || "")))));
+    el("ul", {}, (DATA.method || []).map(m => el("li", {}, m)),
+      el("li", {}, DATA.harbor_mean_warning || "Harbor's job-level means average positives and negatives together and are not scores.")),
+    DATA.tasks_dir ? el("p", { class: "small" }, "Ground truth read from ", code(DATA.tasks_dir)) : null,
+    el("p", { class: "small" }, "Jobs: ", DATA.tools.map(t => el("div", {}, t.key, " ", code(t.job || "")))));
 }
+
+// ---- plain-English summary -----------------------------------------------------------
+// Written by eval_report.py into DATA.summary, the same text as the top of eval_report.md.
+// It always shows every tool: the scanner chips only filter the reviewer views below it.
+function renderSummary() {
+  const s = DATA.summary;
+  if (!s) return null;
+  const byKey = new Map(DATA.tools.map(t => [t.key, t]));
+  const plainCells = new Set(Object.values(s.labels || {}));
+  const head = (cols, i) => {
+    const t = byKey.get((s.tools[i - 1] || {}).key);
+    return i === 0 ? "" : t ? el("span", { class: "toolhead" }, swatch(t), cols[i]) : cols[i];
+  };
+  const sumTable = tb => el("div", { class: "sumtable" }, table(tb.columns.map((_, i) => head(tb.columns, i)),
+    tb.rows.map(r => r.map((c, i) => i > 0 && plainCells.has(c) ? el("span", { class: "ns" }, c) : String(c ?? "")))));
+  const dot = tool => { const t = byKey.get(tool.key); return t ? swatch(t) : null; };
+  return el("div", { id: "summary" },
+    el("div", { class: "kicker" }, "Summary"),
+    el("h1", {}, s.title),
+    el("p", { class: "sub" }, s.intro),
+    (s.read_first || []).length ? section("first", null, "Read this first", null,
+      el("ul", { class: "plain-list" }, s.read_first.map(r => el("li", {}, r)))) : null,
+    el("div", { class: "tiles sumtiles" },
+      tile(s.apps, (s.coverage || {}).apps_total ? `apps tested, of ${s.coverage.apps_total}` : "apps tested"), tile(s.vulnerable_apps, "vulnerable apps"),
+      tile(s.fixed_apps, "fixed copies"), tile(s.known_issues, "known issues")),
+    section("tested", null, "What was tested", null,
+      el("ul", { class: "plain-list" }, s.tools.map(t => el("li", {}, dot(t), t.tested)))),
+    section("glance", null, "Results at a glance", null, sumTable(s.at_a_glance),
+      el("h3", {}, "Results by risk type"), sumTable(s.by_risk)),
+    renderMeasureCharts(s),
+    section("meaning", null, "What this means", null,
+      el("ul", { class: "plain-list" }, s.tools.map(t => el("li", {}, dot(t), t.meaning.join(" "))),
+        (s.notes || []).map(n => el("li", {}, n)))),
+    section("words", null, "Words used in this report", null,
+      el("dl", { class: "gloss" }, (s.glossary || []).map(g => [el("dt", {}, g.term), el("dd", {}, g.text)]))));
+}
+
+// ---- measurement charts ---------------------------------------------------------------
+// Drawn from DATA.summary.charts, the specs eval_report.py also writes as charts/*.svg. One bar per
+// tool on a 0 to 100% axis in one hue: the row label says which tool it is. A value that cannot be
+// drawn is written in the tool's row, never shown as a zero bar.
+let measureCtx = null;
+function textW(text, size = 12) {
+  measureCtx = measureCtx || document.createElement("canvas").getContext("2d");
+  measureCtx.font = `${size}px system-ui, -apple-system, "Segoe UI", sans-serif`;
+  return measureCtx.measureText(String(text)).width;
+}
+function barPath(x0, y, w, h) {
+  const r = Math.min(4, w, h / 2);
+  return `M${x0},${y}H${x0 + w - r}A${r},${r} 0 0 1 ${x0 + w},${y + r}V${y + h - r}A${r},${r} 0 0 1 ${x0 + w - r},${y + h}H${x0}Z`;
+}
+function measureChart(c, W) {
+  const rows = c.facets.flatMap(f => f.rows);
+  const nameW = Math.max(0, ...rows.map(r => textW(r.tool)));
+  const scored = rows.filter(r => r.value !== null && r.value !== undefined);
+  const right = scored.length ? Math.max(...scored.map(r => textW(r.text))) + 12 : 8;
+  const stateW = Math.max(0, ...rows.filter(r => r.value === null || r.value === undefined).map(r => textW(r.text)));
+  // The tool name sits left of its bar when there is room, else on its own line above it.
+  const stacked = nameW + 12 > W * 0.4 || nameW + 18 + stateW > W;
+  const x0 = stacked ? 1 : Math.ceil(nameW) + 12;
+  const plot = Math.max(40, W - right - x0);
+  const x = v => x0 + Math.max(0, Math.min(1, v)) * plot;
+  const rowH = stacked ? 44 : 30, ticks = [0, .25, .5, .75, 1];
+  let H = 0;
+  for (const f of c.facets) H += (f.title ? 26 : 0) + f.rows.length * rowH;
+  H += 22;
+  const g = svg("svg", { class: c.lower_is_better ? "mchart lower-better" : "mchart", viewBox: `0 0 ${W} ${H}`, width: W, height: H, role: "group", "aria-label": c.lower_is_better ? `${c.title} (lower is better)` : c.title });
+  let y = 0;
+  for (const f of c.facets) {
+    if (f.title) { g.append(svg("text", { x: 0, y: y + 16, class: "facet" }, f.title)); y += 26; }
+    const top = y, bottom = y + f.rows.length * rowH;
+    for (const r of f.rows) {
+      const where = f.title ? `${f.title}, ` : "";
+      const tipText = `${where}${r.tool}: ${r.text}`;
+      const row = svg("g", { class: "mrow", tabindex: 0, role: "img", "aria-label": tipText, "data-tip": tipText });
+      row.append(svg("rect", { class: "hit", x: 0, y: y + 1, width: W, height: rowH - 2, rx: 4 }));
+      const barY = stacked ? y + 22 : y + rowH / 2 - 7;
+      const textY = barY + 11;
+      row.append(svg("text", stacked ? { x: 0, y: y + 15 } : { x: x0 - 12, y: textY, "text-anchor": "end" }, r.tool));
+      if (r.value === null || r.value === undefined) {
+        row.append(svg("text", { x: x0 + 6, y: textY, class: "state" }, r.text));
+      } else {
+        const w = x(r.value) - x0;
+        row.append(w > 0 ? svg("path", { class: "mbar", d: barPath(x0, barY, w, 14) })
+          : svg("rect", { class: "mbar", x: x0, y: barY, width: 2, height: 14 }));
+        row.append(svg("text", { x: x0 + Math.max(w, 2) + 6, y: textY }, r.text));
+      }
+      g.append(row);
+      y += rowH;
+    }
+    // Gridlines behind the rows: drawn after them, then moved first. When names sit above the
+    // bars, the lines only run through the bar bands, so they never cross a name.
+    const spans = stacked ? f.rows.map((_, i) => [top + i * rowH + 19, top + i * rowH + 39]) : [[top, bottom]];
+    const lines = spans.flatMap(([y1, y2]) => ticks.map(tk => svg("line", { x1: x(tk), x2: x(tk), y1, y2, class: tk === 0 ? "axis" : "grid", "stroke-width": 1 })));
+    g.insertBefore(svg("g", { "aria-hidden": "true" }, lines), g.firstChild);
+  }
+  ticks.forEach(tk => g.append(svg("text", { x: x(tk), y: y + 16, class: "tick", "text-anchor": tk === 0 && stacked ? "start" : tk === 1 ? "end" : "middle", "aria-hidden": "true" }, `${Math.round(tk * 100)}%`)));
+  return g;
+}
+function renderMeasureCharts(s) {
+  if (!(s.charts || []).length) return null;
+  const app = document.getElementById("app");
+  const W = Math.max(260, Math.min(760, (app.clientWidth || 760) - (innerWidth <= 640 ? 30 : 42)));
+  const groups = [];
+  for (const c of s.charts) {
+    const last = groups.at(-1);
+    if (last && last.name === c.group) last.charts.push(c); else groups.push({ name: c.group, charts: [c] });
+  }
+  return section("measures", null, "Measurements at a glance", s.charts_intro || null,
+    groups.map(gr => el("div", { class: "mgroup" },
+      el("div", { class: "kicker" }, gr.name),
+      gr.charts.map(c => [el("div", { class: "mchart-title" }, c.title, c.lower_is_better ? el("span", { class: "mtag" }, "lower is better") : null), el("p", { class: "mcap" }, c.caption), measureChart(c, W)]))));
+}
+
+// The reviewer views start folded. They open on "Show details", on a link to one of them, or
+// when the page is opened on one, and stay as the reader left them when a chip re-renders.
+let detailsOpen = null;
+const hashInDetails = () => { const id = location.hash.slice(1); return !!id && id !== "summary" && !["first", "tested", "glance", "measures", "meaning", "words"].includes(id); };
+function openDetails() {
+  detailsOpen = true;
+  const d = document.getElementById("details-body");
+  if (d && !d.open) d.open = true;
+}
+document.querySelector("nav.sections").addEventListener("click", e => {
+  const a = e.target.closest("a");
+  if (a && a.getAttribute("href") !== "#summary") openDetails();
+});
+addEventListener("hashchange", () => { if (hashInDetails()) openDetails(); });
 
 function render() {
   const app = document.getElementById("app");
   const y = window.scrollY;
-  app.replaceChildren(renderHeader(), renderM1(), renderM2(), renderM3(), renderM4(), renderNegatives(), renderFamilies(), renderTaxonomy(), renderOutput(), renderMethod(),
-    el("footer", {}, "Generated by tools/eval_report.py from Harbor jobs. Schema ", DATA.schema || "sast-eval-report/1", "."));
+  const current = document.getElementById("details-body");
+  if (current) detailsOpen = current.open;
+  const views = [renderHeader(), renderVersions(), renderM1(), renderM2(), renderM3(), renderM4(), renderNegatives(), renderFamilies(), renderTaxonomy(), renderOutput(), renderMethod()];
+  const footer = el("footer", {}, "Generated by tools/eval_report.py from Harbor jobs. Schema ", DATA.schema || "sast-eval-report/2", ".");
+  const summary = renderSummary();
+  if (!summary) {
+    // An older payload without a summary: the reviewer views are the whole page.
+    app.replaceChildren(...views, footer);
+  } else {
+    if (detailsOpen === null) detailsOpen = hashInDetails();
+    const s = DATA.summary;
+    const label = el("span", {}, detailsOpen ? "Hide details" : "Show details");
+    const body = el("details", { class: "reviewers-body", id: "details-body", open: detailsOpen },
+      el("summary", {}, el("span", { class: "caret", "aria-hidden": "true" }, "▸"), label), views);
+    body.addEventListener("toggle", () => { detailsOpen = body.open; label.textContent = body.open ? "Hide details" : "Show details"; });
+    app.replaceChildren(summary,
+      el("section", { class: "reviewers", id: "details", "aria-labelledby": "details-h" },
+        el("h2", { id: "details-h" }, s.details_title || "Details for reviewers"),
+        el("p", { class: "lede" }, s.details_intro || ""),
+        body),
+      footer);
+  }
   window.scrollTo(0, y);
 }
 

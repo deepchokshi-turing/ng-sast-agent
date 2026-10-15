@@ -21,10 +21,40 @@ For every task folder (one holding task.toml or environment/):
 4. environment/Dockerfile may copy only ``repo/`` into the image. ``COPY
    --from=<stage>`` (files from another image) is allowed. Any other COPY or ADD
    source, for example ``tests/`` or ``.``, is a problem.
-5. For twins ``task_<id>_positive`` / ``task_<id>_negative``: the environment/
-   trees may differ only in files listed in the positive ground truth's
+5. task.toml and instruction.md are searched for the same banned words (instruction.md may name the five task ruleIds of the output contract). They
+   are the task files the harness and the scanner can read besides
+   environment/.
+6. For twins (paired through VARIANTS.json, or by the folder names
+   ``task_<id>_positive`` / ``task_<id>_negative`` when there is no map): the environment/
+   trees may differ only in files listed in the original positive's
    ``fix_changed_files`` (paths relative to environment/repo), and
-   security_manifest.json and fixtures/ must be byte-identical.
+   security_manifest.json and fixtures/ must be byte-identical. See
+   ``twin_pairs`` for how the original positive is chosen.
+7. Twin task.toml files are parsed and may differ only in ``task_id``,
+   ``variant_id`` and ``related_variant_ids``. Any other key that differs (a
+   package version, an architecture line, a tag) could tell the twins apart.
+8. Because those three keys escape point 7, ``task_id`` (when set) must equal
+   the task id in VARIANTS.json (opaque task_<8 hex>; else the folder name), the
+   folder name may not appear in task_metadata.json, and none of the three may hold a role word
+   (positive, negative, vulnerable, patch, fixed, benign, or a pos, neg,
+   vuln, fix, safe, unsafe, bad or good part between separators).
+9. Twin instruction.md files must be byte-identical.
+10. task.toml must not hold ``source_url``, ``source_commit``, ``license`` or
+    ``modifications``: spec 5.1 makes source origin, license and lineage
+    evaluator-only, so they live in validation/provenance.json (and the
+    generated tests/evaluator_view.json). ``source_origin`` stays.
+11. ``package_versions`` in task.toml must pin exact versions: no range or
+    wildcard (``>=3.10``, ``~=1.2``, ``1.*``, ``3.12.x``).
+12. When vocabulary.json sits next to the tasks, the task.toml values of
+    ``source_origin``, ``languages``, ``frameworks`` and ``architecture`` must
+    be listed in it (controlled values, spec 5.2).
+13. task_metadata.json (the scanner-visible view written by
+    tools/export_views.py), when present, may only have the keys in
+    ``METADATA_ALLOWLIST``, is searched for banned words like
+    task.toml, and twin copies may differ only in the keys of point 7.
+
+A VARIANTS.json that cannot be read or does not have the shape above fails
+every task with a message instead of stopping the scan.
 
 Prints one line per task and exits 1 when any task has a problem.
 ``--write-qc`` sets ``qc.label_leak_scan`` to "pass" or "fail" in each task's
@@ -69,14 +99,43 @@ import re
 import subprocess
 import sys
 import tarfile
+import tomllib
 from pathlib import Path
 
 BANNED = ["cve-", "ghsa-", "vulnerab", "exploit", "patch", "fixed", "insecure", "bypass", "traversal", "ssrf",
           "injection", "malicious", "LLM02", "LLM03", "CWE-"]
 BANNED_RE = re.compile("|".join(re.escape(w) for w in BANNED), re.IGNORECASE)
+#: The task ruleIds of the output contract, the only banned-looking tokens instruction.md may hold.
+CONTRACT_RULE_RE = re.compile(r"`?LLM02\.SID\.(?:MEDIUM|HIGH)`?|`?LLM03\.EA\.(?:FUNCTIONALITY|PERMISSIONS|AUTONOMY)`?")
 EVALUATOR_ONLY = [re.compile(p) for p in (r"^ground_truth.*\.json$", r"^repro_test.*\.py$", r"^provenance.*\.json$")]
 TWIN_RE = re.compile(r"^(task_.+)_(positive|negative)$")
+#: The scanner-visible view written by tools/export_views.py, and the only keys it may have (spec 5.2 task fields
+#: from task.toml plus a pointer to the security manifest). export_views.py imports these.
+METADATA_FILE = "task_metadata.json"
+METADATA_TOML_FIELDS = (
+    "schema_version", "task_id", "repository_id", "family_id", "variant_id", "source_origin",
+    "languages", "frameworks", "package_versions", "architecture",
+    "entrypoint", "build_command", "test_command", "scanner_roots", "excluded_paths", "related_variant_ids",
+)
+METADATA_POINTER_FIELDS = ("security_manifest_path", "security_manifest_fields")
+METADATA_ALLOWLIST = frozenset(METADATA_TOML_FIELDS + METADATA_POINTER_FIELDS)
+#: Files outside environment/ that the harness or the scanner can read.
+VISIBLE_TASK_FILES = ("task.toml", "instruction.md", METADATA_FILE)
+#: The only task.toml keys that may differ between twins.
+TOML_TWIN_KEYS = {"task_id", "variant_id", "related_variant_ids"}
+#: Words in an id that would say which twin a task is. Long words match anywhere in the id; the short ones
+#: only as a whole part between separators (``_``, ``-``, ``:``, ``.``) so that random hex cannot match.
+ROLE_RE = re.compile(r"positive|negative|vulnerab|patch|fixed|benign"
+                     r"|(?:^|[^a-z0-9])(?:pos|neg|vuln|fix|safe|unsafe|bad|good)(?=[^a-z0-9]|$)", re.IGNORECASE)
 SHINGLE = 6
+#: Provenance keys that are evaluator-only (spec 5.1) and must not be in task.toml.
+PROVENANCE_TOML_KEYS = ("source_url", "source_commit", "license", "modifications")
+#: task.toml [metadata] fields whose values must come from vocabulary.json.
+VOCABULARY_FIELDS = ("source_origin", "languages", "frameworks", "architecture")
+VOCABULARY_FILE = "vocabulary.json"
+#: An exact version: digits and dots, then optional pre/post/dev/local parts; no operator, comma, space or wildcard.
+EXACT_VERSION_RE = re.compile(r"^\d+(?:\.\d+)*(?:[a-z]+\d*)?(?:\.?(?:post|dev)\d+)*(?:\+[a-z0-9.]+)?$",
+                              re.IGNORECASE)
 WORD_RE = re.compile(r"[a-z0-9_]+")
 
 
@@ -105,6 +164,206 @@ def banned_hits(files: dict[str, bytes]) -> list[str]:
             if m:
                 hits.append(f"banned word '{m.group(0)}' at environment/{rel}:{n}")
     return hits
+
+
+def visible_file_hits(task: Path) -> list[str]:
+    """Banned words in task.toml and instruction.md."""
+    hits = []
+    for name in VISIBLE_TASK_FILES:
+        f = task / name
+        if not f.is_file():
+            continue
+        for n, line in enumerate(f.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+            if name == "instruction.md":
+                # The shared output contract must name the task ruleIds. They are the same public
+                # vocabulary in every task, so only they are allowed here.
+                line = CONTRACT_RULE_RE.sub("", line)
+            m = BANNED_RE.search(line)
+            if m:
+                hits.append(f"banned word '{m.group(0)}' at {name}:{n}")
+    return hits
+
+
+def _flatten(node: dict, prefix: str = "") -> dict[str, object]:
+    out = {}
+    for k, v in node.items():
+        if isinstance(v, dict):
+            out.update(_flatten(v, f"{prefix}{k}."))
+        else:
+            out[f"{prefix}{k}"] = v
+    return out
+
+
+def toml_twin_problems(a: Path, b: Path) -> list[str]:
+    """Keys other than task_id, variant_id and related_variant_ids that differ between twin task.toml files."""
+    fa, fb = a / "task.toml", b / "task.toml"
+    if not fa.is_file() and not fb.is_file():
+        return []
+    if not fa.is_file() or not fb.is_file():
+        return ["task.toml exists in only one twin"]
+    try:
+        ta = _flatten(tomllib.loads(fa.read_text(encoding="utf-8")))
+        tb = _flatten(tomllib.loads(fb.read_text(encoding="utf-8")))
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
+        return [f"cannot parse task.toml: {exc}"]
+    # task.name is the platform package name, "<org>/<folder name>": harness-side, never shown to the
+    # scanner, and different between twins by construction.
+    differing = sorted(k for k in set(ta) | set(tb)
+                       if ta.get(k) != tb.get(k) and k.rsplit(".", 1)[-1] not in TOML_TWIN_KEYS
+                       and k != "task.name")
+    return [f"task.toml differs between twins in {k}" for k in differing]
+
+
+def expected_task_id(task: Path) -> str:
+    """The scanner-visible task id: VARIANTS.json ``task_id`` when the map gives one, else the folder name.
+
+    Folder names (``<family>-a`` / ``-b``) are for people running the harness; since the final audit
+    (D1, 2026-10-13) the id a scanner can see is the opaque ``task_<8 hex>`` kept in VARIANTS.json."""
+    try:
+        entry = json.loads((task.parent / "VARIANTS.json").read_text(encoding="utf-8")).get(task.name)
+    except (OSError, ValueError, AttributeError):
+        entry = None
+    value = entry.get("task_id") if isinstance(entry, dict) else None
+    return value if isinstance(value, str) and value else task.name
+
+
+def toml_id_problems(task: Path) -> list[str]:
+    """``task_id`` other than the expected id, or a role word in task_id, variant_id or related_variant_ids.
+
+    These keys may differ between twins, so they are the one place in task.toml
+    where a role could hide without the twin diff seeing it."""
+    f = task / "task.toml"
+    if not f.is_file():
+        return []
+    try:
+        flat = _flatten(tomllib.loads(f.read_text(encoding="utf-8")))
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
+        return [f"cannot parse task.toml: {exc}"]
+    problems = []
+    for key, value in sorted(flat.items()):
+        leaf = key.rsplit(".", 1)[-1]
+        if leaf not in TOML_TWIN_KEYS:
+            continue
+        if leaf == "task_id" and value != expected_task_id(task):
+            problems.append(f"task.toml {key} = {value!r} is not the task id {expected_task_id(task)!r}")
+        for item in value if isinstance(value, list) else [value]:
+            m = ROLE_RE.search(str(item))
+            if m:
+                problems.append(f"role word '{m.group(0).strip('_-:.')}' in task.toml {key} = {item!r}")
+    return problems
+
+
+def _metadata_table(task: Path) -> tuple[dict | None, list[str]]:
+    f = task / "task.toml"
+    if not f.is_file():
+        return None, []
+    try:
+        data = tomllib.loads(f.read_text(encoding="utf-8"))
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
+        return None, [f"cannot parse task.toml: {exc}"]
+    return data.get("metadata") or {}, []
+
+
+def toml_field_problems(task: Path, vocabulary: dict | None) -> list[str]:
+    """Points 10 to 12: no provenance keys, exact package pins, controlled values."""
+    meta, problems = _metadata_table(task)
+    if meta is None:
+        return problems
+    flat = _flatten(tomllib.loads((task / "task.toml").read_text(encoding="utf-8")))
+    for key in sorted(flat):
+        if key.rsplit(".", 1)[-1] in PROVENANCE_TOML_KEYS:
+            problems.append(f"task.toml has {key}, which is evaluator-only (keep it in validation/provenance.json)")
+    pins = meta.get("package_versions")
+    if pins is not None:
+        if not isinstance(pins, dict):
+            problems.append(f"task.toml package_versions is not a table: {pins!r}")
+        else:
+            for name, version in sorted(pins.items()):
+                if not isinstance(version, str) or not EXACT_VERSION_RE.match(version.strip()):
+                    problems.append(f"task.toml package_versions.{name} = {version!r} is not an exact version")
+    if vocabulary is None:
+        return problems
+    for field in VOCABULARY_FIELDS:
+        if field not in meta:
+            continue
+        allowed = vocabulary.get(field)
+        if not isinstance(allowed, list):
+            problems.append(f"{VOCABULARY_FILE} has no list for {field}")
+            continue
+        value = meta[field]
+        for item in value if isinstance(value, list) else [value]:
+            if item not in allowed:
+                problems.append(f"task.toml {field} value {item!r} is not in {VOCABULARY_FILE}")
+    return problems
+
+
+def load_vocabulary(root: Path) -> tuple[dict | None, str | None]:
+    """(vocabulary, error); (None, None) when there is no vocabulary.json."""
+    f = root / VOCABULARY_FILE
+    if not f.is_file():
+        return None, None
+    try:
+        data = json.loads(f.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("expected an object of {field: [allowed values]}")
+    except (OSError, ValueError) as exc:
+        return None, f"cannot read {VOCABULARY_FILE}: {exc}"
+    return data, None
+
+
+def _read_metadata_view(task: Path) -> tuple[dict | None, list[str]]:
+    f = task / METADATA_FILE
+    if not f.is_file():
+        return None, []
+    try:
+        data = json.loads(f.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("expected an object")
+    except (OSError, ValueError) as exc:
+        return None, [f"cannot read {METADATA_FILE}: {exc}"]
+    return data, []
+
+
+def metadata_view_problems(task: Path) -> list[str]:
+    """Point 13: task_metadata.json keys stay within the allowlist."""
+    data, problems = _read_metadata_view(task)
+    if data is None:
+        return problems
+    extra = sorted(set(data) - METADATA_ALLOWLIST)
+    if extra:
+        problems.append(f"{METADATA_FILE} has keys outside the scanner-visible allowlist: {', '.join(extra)}")
+    if "task_id" in data and data["task_id"] != expected_task_id(task):
+        problems.append(f"{METADATA_FILE} task_id = {data['task_id']!r} is not the task id {expected_task_id(task)!r}")
+    # The folder name carries the -a/-b letter, so it must not reach the scanner view (final audit D1).
+    if expected_task_id(task) != task.name and task.name in json.dumps(data):
+        problems.append(f"{METADATA_FILE} names the task folder {task.name!r}")
+    return problems
+
+
+def metadata_view_twin_problems(a: Path, b: Path) -> list[str]:
+    """Twin task_metadata.json files may differ only in task_id, variant_id and related_variant_ids."""
+    da, pa = _read_metadata_view(a)
+    db, pb = _read_metadata_view(b)
+    if pa or pb:
+        return []  # already reported per task
+    if da is None and db is None:
+        return []
+    if da is None or db is None:
+        return [f"{METADATA_FILE} exists in only one twin"]
+    fa, fb = _flatten(da), _flatten(db)
+    differing = sorted(k for k in set(fa) | set(fb)
+                       if fa.get(k) != fb.get(k) and k.rsplit(".", 1)[-1] not in TOML_TWIN_KEYS)
+    return [f"{METADATA_FILE} differs between twins in {k}" for k in differing]
+
+
+def instruction_twin_problems(a: Path, b: Path) -> list[str]:
+    """Twin instruction.md files must have the same bytes."""
+    fa, fb = a / "instruction.md", b / "instruction.md"
+    if not fa.is_file() and not fb.is_file():
+        return []
+    if not fa.is_file() or not fb.is_file():
+        return ["instruction.md exists in only one twin"]
+    return [] if fa.read_bytes() == fb.read_bytes() else ["instruction.md differs between twins"]
 
 
 def evaluator_files(files: dict[str, bytes]) -> list[str]:
@@ -195,6 +454,7 @@ def dockerfile_problems(task: Path) -> list[str]:
 
 
 def twin_problems(pos: Path, neg: Path) -> list[str]:
+    """environment/ differences between the original positive ``pos`` and its twin."""
     a, b = env_files(pos), env_files(neg)
     try:
         gt = json.loads((pos / "tests" / "ground_truth.json").read_text(encoding="utf-8"))
@@ -224,31 +484,126 @@ def write_qc(task: Path, ok: bool) -> None:
     prov.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
 
 
+def _fix_files(task: Path) -> list[str]:
+    try:
+        gt = json.loads((task / "tests" / "ground_truth.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return list(gt.get("fix_changed_files") or [])
+
+
+def _code_state(task: Path) -> str | None:
+    try:
+        prov = json.loads((task / "validation" / "provenance.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return (prov.get("lineage") or {}).get("code_state")
+
+
+def original_positive(a: str, b: str, variants: dict, by_name: dict) -> str | None:
+    """Which twin of a pair holds the source-commit code (the side whose fix_changed_files apply).
+
+    1. The twin whose VARIANTS role is positive and whose ground truth lists a
+       non-empty ``fix_changed_files``, when only one twin qualifies.
+    2. When both qualify (a twin with the upstream fix relabelled as a
+       partial-control positive), the one whose ``former_name`` ends in
+       ``_positive``, if exactly one does.
+    3. Otherwise the one whose provenance ``lineage.code_state`` is
+       ``source_commit``, if exactly one is.
+    Returns None when the rules do not settle it.
+    """
+    cands = [x for x in (a, b) if variants[x].get("role") == "positive" and _fix_files(by_name[x])]
+    if len(cands) == 1:
+        return cands[0]
+    if len(cands) != 2:
+        return None
+    named = [x for x in cands if str(variants[x].get("former_name") or "").endswith("_positive")]
+    if len(named) == 1:
+        return named[0]
+    source = [x for x in cands if _code_state(by_name[x]) == "source_commit"]
+    return source[0] if len(source) == 1 else None
+
+
+def twin_pairs(root: Path, by_name: dict, problems: dict) -> list[tuple[str, str]]:
+    """(original positive, its twin) pairs.
+
+    With role-free task ids the pairing comes from the evaluator-only
+    ``VARIANTS.json`` next to the tasks ({id: {family, role, twin,
+    former_name}}, former_name optional), and ``original_positive`` picks the
+    side whose ``fix_changed_files`` define the allowed difference. A pair it
+    cannot settle is reported on both tasks. Without the map, folder names
+    ``task_<id>_positive`` / ``task_<id>_negative`` are paired.
+    """
+    pairs = []
+    variants_file = root / "VARIANTS.json"
+    if variants_file.is_file():
+        try:
+            variants = json.loads(variants_file.read_text(encoding="utf-8"))
+            if not isinstance(variants, dict) or not all(isinstance(v, dict) for v in variants.values()):
+                raise ValueError("expected an object of {task id: {family, role, twin, former_name}} objects")
+        except (OSError, ValueError) as exc:
+            for name in by_name:
+                problems[name].append(f"cannot read VARIANTS.json, so no twin was checked: {exc}")
+            return []
+        seen = set()
+        for name, v in variants.items():
+            if name not in by_name:
+                continue
+            twin = v.get("twin")
+            if not twin or twin not in by_name or twin not in variants:
+                problems[name].append(f"twin {twin} not found")
+                continue
+            if variants[twin].get("twin") != name:
+                problems[name].append(f"twin {twin} does not name {name} as its twin in VARIANTS.json")
+                continue
+            key = frozenset((name, twin))
+            if key in seen:
+                continue
+            seen.add(key)
+            orig = original_positive(name, twin, variants, by_name)
+            if orig is None:
+                msg = (f"cannot tell which of {name} and {twin} is the original positive (role positive with "
+                       "fix_changed_files, then former_name, then provenance lineage.code_state)")
+                problems[name].append(msg)
+                problems[twin].append(msg)
+                continue
+            pairs.append((orig, twin if orig == name else name))
+        for name in by_name:
+            if name not in variants:
+                problems[name].append("task missing from VARIANTS.json")
+        return pairs
+    for name in by_name:
+        m = TWIN_RE.match(name)
+        if not m:
+            continue
+        other = f"{m.group(1)}_{'negative' if m.group(2) == 'positive' else 'positive'}"
+        if other not in by_name:
+            problems[name].append(f"twin {other} not found")
+        elif m.group(2) == "positive":
+            pairs.append((name, other))
+    return pairs
+
+
 def scan(root: Path) -> dict[str, list[str]]:
     tasks = sorted(d for d in root.iterdir() if is_task(d))
     problems = {t.name: [] for t in tasks}
+    vocabulary, vocab_error = load_vocabulary(root)
     for t in tasks:
+        if vocab_error:
+            problems[t.name].append(vocab_error)
+        problems[t.name] += toml_field_problems(t, vocabulary) + metadata_view_problems(t)
         files = env_files(t)
         if not files:
             problems[t.name].append("no files under environment/")
-        problems[t.name] += banned_hits(files) + evaluator_files(files)
-        problems[t.name] += overlap_problems(t, files) + dockerfile_problems(t)
+        problems[t.name] += banned_hits(files) + visible_file_hits(t) + evaluator_files(files)
+        problems[t.name] += overlap_problems(t, files) + dockerfile_problems(t) + toml_id_problems(t)
     by_name = {t.name: t for t in tasks}
-    for name, t in by_name.items():
-        m = TWIN_RE.match(name)
-        if not m or m.group(2) != "positive":
-            continue
-        other = f"{m.group(1)}_negative"
-        if other not in by_name:
-            problems[name].append(f"twin {other} not found")
-            continue
-        for p in twin_problems(t, by_name[other]):
-            problems[name].append(p)
-            problems[other].append(p)
-    for name in by_name:
-        m = TWIN_RE.match(name)
-        if m and m.group(2) == "negative" and f"{m.group(1)}_positive" not in by_name:
-            problems[name].append(f"twin {m.group(1)}_positive not found")
+    for pos, neg in twin_pairs(root, by_name, problems):
+        a, b = by_name[pos], by_name[neg]
+        for p in (twin_problems(a, b) + toml_twin_problems(a, b) + instruction_twin_problems(a, b)
+                  + metadata_view_twin_problems(a, b)):
+            problems[pos].append(p)
+            problems[neg].append(p)
     return problems
 
 

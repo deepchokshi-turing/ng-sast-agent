@@ -5,20 +5,29 @@
 #   FROM <the task's base image>
 #   COPY --from=sast-tools /opt/sast /opt/sast
 #
-# /opt/sast holds three tools:
+# /opt/sast holds four tools:
 #   Semgrep        venv, rules and merged rules, with its own CPython (uv-managed),
 #                  so it works on any task base image with glibc >= 2.34.
 #   CodeQL         /opt/sast/codeql, the full CodeQL bundle (CLI plus query packs),
 #                  unpacked as a real folder: codeql-bundle-linux64 on amd64 and
 #                  codeql-bundle-linux-arm64 on arm64, each pinned by sha256.
 #   sonar-scanner  /opt/sast/sonar-scanner, the CLI with its bundled JRE.
+#   claude-review  /opt/sast/claude-review: the Claude Code native binary
+#                  (bin/claude, from the npm platform package for the CPU,
+#                  checked against its sha256 and npm sha512 integrity), the
+#                  pinned files of anthropics/claude-code-security-review
+#                  (ccsr/, each checked against its sha256) and a venv with the
+#                  hash-pinned anthropic and requests (requirements.lock,
+#                  installed with --require-hashes). The venv is built from
+#                  the Semgrep part's uv CPython, so it needs that part too.
 #
-# The CodeQL bundle, sonar-scanner, uv and the Semgrep rules are checked against
-# the sha256 pinned in sast/<tool>/pins.py. The Semgrep wheel, its dependencies
-# and uv's CPython are resolved with --exclude-newer at the pinned date but are
-# not hash-checked, so a rebuild could in principle get different bytes. The
-# manifest now records what was actually installed, so two builds can be
-# compared and a run can say which build it used.
+# The CodeQL bundle, sonar-scanner, uv, the Semgrep rules and every file of the
+# claude-review part are checked against the sha256 pinned in sast/<tool>/pins.py
+# (its wheels against sast/claude_review/requirements.lock). The Semgrep wheel,
+# its dependencies and uv's CPython are resolved with --exclude-newer at the
+# pinned date but are not hash-checked, so a rebuild could in principle get
+# different bytes. The manifest now records what was actually installed, so two
+# builds can be compared and a run can say which build it used.
 #
 # /opt/sast/MANIFEST.json is written by the manifest stage below with
 # sast/manifest.py (staged as sast_manifest.py): the tool versions from the
@@ -74,11 +83,24 @@ RUN set -e; \
       "$sha" /opt/sast/sonar-scanner --strip-top; \
     /opt/sast/sonar-scanner/bin/sonar-scanner -v
 
-# The three parts together, plus MANIFEST.json over all of them.
+# The Claude Code security review. sast/claude_review/install.py, staged as
+# claude_review_install.py, downloads and checks everything and builds the venv
+# with the Semgrep stage's uv and CPython (copied in, not shipped from here).
+FROM python:3.11-slim@sha256:0dd364ba7e10242f07755449e3a3d0e35f9efd987952737b90def6709ab0c5ce AS claude-review
+COPY --from=semgrep /opt/sast/python /opt/sast/python
+COPY --from=semgrep /opt/sast/bin /opt/sast/bin
+COPY claude_review_install.py claude_review_pins.json requirements.lock /tmp/claude-review/
+# The installer takes the Semgrep part's CPython 3.12 (/opt/sast/python) first.
+RUN python3 /tmp/claude-review/claude_review_install.py /tmp/claude-review/claude_review_pins.json \
+      --build --target /opt/sast/claude-review --uv /opt/sast/bin/uv \
+      --requirements /tmp/claude-review/requirements.lock
+
+# The four parts together, plus MANIFEST.json over all of them.
 FROM python:3.11-slim@sha256:0dd364ba7e10242f07755449e3a3d0e35f9efd987952737b90def6709ab0c5ce AS manifest
 COPY --from=semgrep /opt/sast /opt/sast
 COPY --from=codeql /opt/sast /opt/sast
 COPY --from=sonar /opt/sast /opt/sast
+COPY --from=claude-review /opt/sast/claude-review /opt/sast/claude-review
 COPY sast_manifest.py manifest_pins.json /tmp/
 RUN python3 /tmp/sast_manifest.py write /opt/sast /tmp/manifest_pins.json
 

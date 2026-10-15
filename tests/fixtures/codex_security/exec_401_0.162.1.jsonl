@@ -1,0 +1,7 @@
+{"type":"thread.started","thread_id":"01a13163-baf8-7503-9469-ee68d5dc88da"}
+{"type":"turn.started"}
+{"type":"error","message":"Reconnecting... 2/5 (unexpected status 401 Unauthorized: {\n  \"error\": {\n    \"messa, url: wss://api.openai.com/v1/responses, cf-ray: a49830df6a5b3a9b-LHE, request id: req_a2ef4727104a44dda472c78a8ac5c2d8, auth error: 401, auth error code: invalid_api_key)"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Falling back from WebSockets to HTTPS transport. unexpected status 401 Unauthorized: {\n  \"error\": {\n    \"messa, url: wss://api.openai.com/v1/responses, cf-ray: a49831210f7e727e-KHI, request id: req_de898bcfac0446c889ad8ea960cf341d, auth error: 401, auth error code: invalid_api_key"}}
+{"type":"error","message":"Reconnecting... 1/5 (unexpected status 401 Unauthorized: Incorrect API key provided: sk-fake-***STKEY. You can find your API key at https://platform.openai.com/account/api-keys., url: https://api.openai.com/v1/responses)"}
+{"type":"error","message":"unexpected status 401 Unauthorized: Incorrect API key provided: sk-fake-***STKEY. You can find your API key at https://platform.openai.com/account/api-keys., url: https://api.openai.com/v1/responses"}
+{"type":"turn.failed","error":{"message":"unexpected status 401 Unauthorized: Incorrect API key provided: sk-fake-***STKEY. You can find your API key at https://platform.openai.com/account/api-keys., url: https://api.openai.com/v1/responses"}}

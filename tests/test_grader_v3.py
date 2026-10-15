@@ -133,12 +133,15 @@ def test_without_require_cwe_the_location_is_enough(tmp_path):
 @pytest.mark.parametrize("doc, reward, fp, outside, bucket", [
     (sarif(), 1.0, 0, 0, None),
     (sarif(result("LLM03.EA.AUTONOMY", TOOL, 22, ["CWE-79"])), 0.0, 1, 0, "near_fix"),  # no CWE agreement needed
-    (sarif(result("LLM02.SID.MEDIUM", TOOL, 200)), 1.0, 0, 1, None),     # in a fix file but far from the fix
+    # v3.2 (F-B1): a contrast-family claim anywhere in scope fails; without scanner_roots the scope is
+    # fix_changed_files. These two passed before v3.2.
+    (sarif(result("LLM02.SID.MEDIUM", TOOL, 200)), 0.0, 1, 0, "in_scope"),  # in a fix file, far from the fix
     (sarif(result("LLM03.EA.FUNCTIONALITY", APP, 5)), 1.0, 0, 1, None),  # elsewhere
     (sarif(result("OTHER.X", TOOL, 21)), 1.0, 0, 1, None),               # not a contrast prefix
     (sarif(result("LLM03.EA.AUTONOMY", TOOL, 305)), 0.0, 1, 0, "trap"),  # the negative's own trap
     (sarif(result("LLM03.EA.AUTONOMY", TOOL, 318)), 0.0, 1, 0, "trap"),  # within tolerance of the trap
-    (sarif(result("LLM02.SID.HIGH", TOOL, 305)), 1.0, 0, 1, None),       # trap is for LLM03 only
+    (sarif(result("LLM02.SID.HIGH", TOOL, 305)), 0.0, 1, 0, "in_scope"),  # trap is LLM03 only, SID in scope
+    (sarif(result("LLM02.SID.HIGH", APP, 305)), 1.0, 0, 1, None),        # outside the scope
     (sarif(result("LLM03.EA.AUTONOMY", TOOL, 21), result("LLM03.EA.AUTONOMY", TOOL, 302)), 0.0, 2, 0,
      "near_fix+trap"),
 ])
@@ -148,6 +151,7 @@ def test_negative_fails_near_the_fix_or_on_a_trap(tmp_path, doc, reward, fp, out
     assert detail["failure_bucket"] == bucket
     assert score["neg.fail.near_fix"] == int("near_fix" in (bucket or ""))
     assert score["neg.fail.trap"] == int("trap" in (bucket or ""))
+    assert score["neg.fail.in_scope"] == int("in_scope" in (bucket or ""))
     assert score["trap_hits"] == len(detail["trap_hits"])
 
 
@@ -156,32 +160,43 @@ def test_trap_hit_detail_names_the_trap(tmp_path):
     assert [h["traps"] for h in detail["trap_hits"]] == [["N2"]]
     assert detail["results_near_fixed_code"] == []
     assert detail["task_level"]["risk_types"]["excessive_agency"] == "FP"
-    assert detail["task_level"]["categories"] == {"LLM02.SID": "TN", "LLM03.EA.FUNCTIONALITY": "FP"}
+    # v3.2 (A6): the failing result counts against the category it claims (AUTONOMY), not the
+    # contrast category that shares its prefix (FUNCTIONALITY, FP before v3.2).
+    assert detail["task_level"]["categories"] == {"LLM02.SID": "TN", "LLM03.EA.AUTONOMY": "FP",
+                                                  "LLM03.EA.FUNCTIONALITY": "TN"}
 
 
 def test_minimal_contrast_entry_is_not_a_trap(tmp_path):
     t = negative()
     t["fixed_locations"] = [{"file": TOOL, "start_line": 500, "end_line": 500, "why": "moved"}]
+    t["fix_changed_files"] = [APP]  # v3.2: keep TOOL out of scope so only the trap rule could fail it
     score, _ = run(sarif(result("LLM03.EA.AUTONOMY", TOOL, 21)), t, tmp_path)  # on N1 (minimal_contrast) only
     assert score["reward"] == 1.0 and score["fp_outside_scope"] == 1
 
 
-def test_negative_ignores_other_risk_family(tmp_path):
+def test_negative_fails_on_other_risk_family(tmp_path):
+    # v3.3 (final audit D2): a negative is "neither", so an SID claim on an EA-only negative fails too.
     score, detail = run(sarif(result("LLM02.SID.HIGH", TOOL, 21)), ea_only_negative(), tmp_path)
-    assert score["reward"] == 1.0 and score["fp_outside_scope"] == 1
+    assert score["reward"] == 0.0 and score["fp_outside_scope"] == 0
+    assert detail["failure_bucket"] == "in_scope"
     tl = detail["task_level"]
-    # The result does not fail the negative, so it predicts nothing. The loose view still records it.
-    assert tl["risk_types"]["sensitive_information_disclosure"] == "TN"
-    assert tl["risk_types_loose"]["sensitive_information_disclosure"] == "FP"
-    assert (score["tl.pred.SID"], score["tl.pred_loose.SID"]) == (0, 1)
-    assert tl["categories"] == {"LLM03.EA.FUNCTIONALITY": "TN"}
+    assert tl["risk_types"]["sensitive_information_disclosure"] == "FP"
+    assert (score["tl.pred.SID"], score["tl.pred_loose.SID"]) == (1, 1)
+    assert tl["categories"] == {"LLM03.EA.FUNCTIONALITY": "TN", "LLM02.SID": "FP"}
 
 
-def test_negative_noise_in_fix_file_counts_only_in_the_loose_view(tmp_path):
-    score, detail = run(sarif(result("LLM03.EA.FUNCTIONALITY", TOOL, 200)), negative(), tmp_path)
+def test_negative_other_family_complete_claim_is_not_a_failure(tmp_path):
+    res = result("LLM02.SID.HIGH", TOOL, 21, controlStatus="complete")
+    score, _ = run(sarif(res), ea_only_negative(), tmp_path)
     assert score["reward"] == 1.0
-    assert (score["tl.pred.EA"], score["tl.pred_loose.EA"]) == (0, 1)
-    assert detail["task_level"]["categories"]["LLM03.EA.FUNCTIONALITY"] == "TN"
+
+
+def test_negative_noise_in_fix_file_now_fails(tmp_path):
+    # Before v3.2 this passed and counted only in the loose view (audit F-B1 / A7).
+    score, detail = run(sarif(result("LLM03.EA.FUNCTIONALITY", TOOL, 200)), negative(), tmp_path)
+    assert score["reward"] == 0.0 and detail["failure_bucket"] == "in_scope"
+    assert (score["tl.pred.EA"], score["tl.pred_loose.EA"]) == (1, 1)
+    assert detail["task_level"]["categories"]["LLM03.EA.FUNCTIONALITY"] == "FP"
 
 
 def test_positive_oracle_on_negative_truth_scores_zero(tmp_path):
@@ -270,7 +285,9 @@ def test_reward_json_is_flat_and_numeric_for_harbor(tmp_path, truth):
 def test_oracle_style_sarif_scores_full_marks(tmp_path):
     def oracle(rule, line, cwe):
         r = result(rule, TOOL, line, [cwe], controlStatus="none", residualRisk="high", recommendations=["REC-A"])
-        r["codeFlows"] = [{"threadFlows": [{"locations": [{"location": r["locations"][0]}]}]}]
+        # v3.2 scores the step role too, so the oracle names it.
+        r["codeFlows"] = [{"threadFlows": [{"locations": [{"location": r["locations"][0],
+                                                           "properties": {"role": "sink"}}]}]}]
         return r
     score, _ = run(sarif(oracle("LLM03.EA.FUNCTIONALITY", 20, "CWE-22"), oracle("LLM02.SID.HIGH", 60, "CWE-201")),
                    positive(), tmp_path)
