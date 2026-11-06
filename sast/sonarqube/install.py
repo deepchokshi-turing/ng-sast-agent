@@ -4,7 +4,7 @@
 Uploaded by ``SonarQubeAgent.setup`` next to ``pins.json`` and ``fetch.py``,
 and run with the Python in ``/opt/sast`` when the image has one, else the
 image's ``python3``. It downloads nothing: the scanner and its JRE are about
-60 MB and come with the tools image ``sast-tools:0.4.0`` (see README.md).
+60 MB and come with the tools image ``sast-tools:0.5.0`` (see README.md).
 
 Checks, in order: ``bin/sonar-scanner`` exists and is executable, the version
 in the CLI jar's name matches the pin, and ``sonar-scanner -v``
@@ -87,7 +87,7 @@ def main():
 
     if not os.path.isfile(executable):
         fail("sonar-scanner is not installed at {}. It is not downloaded at setup: build the task image "
-             "with the tools image sast-tools:0.4.0 (COPY --from=sast-tools /opt/sast /opt/sast), "
+             "with the tools image sast-tools:0.5.0 (COPY --from=sast-tools /opt/sast /opt/sast), "
              "see README.md".format(home))
     if not os.access(executable, os.X_OK):
         fail("{} is not executable".format(executable))

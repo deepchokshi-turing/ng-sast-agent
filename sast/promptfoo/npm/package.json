@@ -1,0 +1,10 @@
+{
+  "name": "sast-promptfoo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "promptfoo for the ng-sast-agent Promptfoo Code Scanning agent",
+  "dependencies": {
+    "@modelcontextprotocol/server-filesystem": "2026.8.31",
+    "promptfoo": "0.124.1"
+  }
+}

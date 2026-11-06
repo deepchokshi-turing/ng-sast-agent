@@ -19,7 +19,7 @@ spec = importlib.util.spec_from_file_location("leak_scan", ROOT / "tools" / "lea
 leak_scan = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(leak_scan)
 
-TOOLS_DF = ("ARG SAST_TOOLS_IMAGE=sast-tools:0.4.0\nFROM ${SAST_TOOLS_IMAGE} AS sast-tools\n"
+TOOLS_DF = ("ARG SAST_TOOLS_IMAGE=sast-tools:0.5.0\nFROM ${SAST_TOOLS_IMAGE} AS sast-tools\n"
             "FROM python:3.12-slim\nCOPY --from=sast-tools /opt/sast /opt/sast\nCOPY repo/ /app/repo/\n")
 
 
@@ -93,7 +93,7 @@ def test_clean_image_passes_and_every_image_is_removed(tmp_path, monkeypatch):
     assert problems == [] and count == 4
     build = fake.sub("build")[0]
     assert build[:3] == ["docker", "build", "-q"]
-    assert "SAST_TOOLS_IMAGE=sast-tools:0.4.0" in build and build[-1] == str(task / "environment")
+    assert "SAST_TOOLS_IMAGE=sast-tools:0.5.0" in build and build[-1] == str(task / "environment")
     assert fake.sub("run")[0] == ["docker", "run", "--rm", "--entrypoint", "sh", "sha256:feedface", "-c",
                                   "find /app -type f -print0"]
     assert fake.sub("cp")[0] == ["docker", "cp", "c0ffee:/app", "-"]
@@ -103,8 +103,8 @@ def test_clean_image_passes_and_every_image_is_removed(tmp_path, monkeypatch):
 
 def test_tools_image_option_overrides_the_dockerfile_default(tmp_path, monkeypatch):
     task, fake = setup_task(tmp_path, monkeypatch)
-    leak_scan.scan_image(task, "registry.example/sast-tools:0.4.0")
-    assert "SAST_TOOLS_IMAGE=registry.example/sast-tools:0.4.0" in fake.sub("build")[0]
+    leak_scan.scan_image(task, "registry.example/sast-tools:0.5.0")
+    assert "SAST_TOOLS_IMAGE=registry.example/sast-tools:0.5.0" in fake.sub("build")[0]
 
 
 @pytest.mark.parametrize("extra, message", [
@@ -174,5 +174,5 @@ def test_image_mode_is_stdlib_and_shell_free():
     text = (ROOT / "tools" / "leak_scan.py").read_text()
     assert "shell=True" not in text and "os.system" not in text
     imports = {line.split()[1].split(".")[0] for line in text.splitlines() if line.startswith(("import ", "from "))}
-    assert imports <= {"__future__", "argparse", "hashlib", "io", "json", "re", "subprocess", "sys", "tarfile",
+    assert imports <= {"__future__", "argparse", "hashlib", "io", "json", "re", "subprocess", "sys", "tarfile", "tomllib",
                        "pathlib"}

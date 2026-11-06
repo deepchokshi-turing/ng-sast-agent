@@ -1,0 +1,627 @@
+{
+ "version": "2.1.0",
+ "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/main/sarif-2.1/schema/sarif-schema-2.1.0.json",
+ "runs": [
+  {
+   "tool": {
+    "driver": {
+     "informationUri": "https://github.com/DataDog/datadog-saist",
+     "name": "datadog-ai-static-analyzer",
+     "rules": [
+      {
+       "id": "datadog/python-accesscontrol",
+       "shortDescription": {
+        "text": "Potential improper access control"
+       },
+       "fullDescription": {
+        "text": "In Python, Improper Access Control (CWE-284) occurs when user input (such as IDs or identifiers) is used to access resources\nwithout verifying ownership or permissions (IDOR).\n\nFor example (vulnerable):\n```python\ndoc_id = request.args.get(\"doc_id\")\ndoc = Document.query.get(doc_id)\n# No ownership check!\nreturn jsonify(doc.to_dict())\n```\n\n## How to remediate:\n- Verify doc.owner_id == current_user.id before returning data.\n- Use Flask-Login or Django's permission system.\n- Filter queries by current user where appropriate."
+       },
+       "properties": {
+        "tags": [
+         "DATADOG_RULE_TYPE:datadog-ai-static-analyzer",
+         "CWE:284",
+         "SEVERITY:WARNING",
+         "CATEGORY:SECURITY"
+        ]
+       }
+      },
+      {
+       "id": "datadog/python-brokencrypto",
+       "shortDescription": {
+        "text": "Potential use of broken cryptography"
+       },
+       "fullDescription": {
+        "text": "In Python, Broken Cryptography (CWE-327) occurs when weak algorithms, modes, or key management\npractices are used to encrypt sensitive input.\n\nFor example (vulnerable):\n```python\ncipher = DES.new(key, DES.MODE_CBC, iv)  # DES is weak\ncipher = AES.new(key, AES.MODE_ECB)  # ECB mode is weak\n```\n\n## How to remediate:\n- Use AES with GCM mode or Fernet for encryption.\n- Use secrets module or os.urandom() for random generation.\n- Never hardcode keys or use static IVs."
+       },
+       "properties": {
+        "tags": [
+         "DATADOG_RULE_TYPE:datadog-ai-static-analyzer",
+         "CWE:327",
+         "SEVERITY:WARNING",
+         "CATEGORY:SECURITY"
+        ]
+       }
+      },
+      {
+       "id": "datadog/python-cmdi",
+       "shortDescription": {
+        "text": "Potential command injection"
+       },
+       "fullDescription": {
+        "text": "In Python, Command Injection (CWE-77) occurs when untrusted input is passed to system commands\n(e.g., os.system, subprocess) via string concatenation or shell=True, allowing arbitrary command execution.\n\nFor example (vulnerable):\n```python\nos.system(\"cat \" + filename)\n```\n\n## How to remediate:\n- Use subprocess with argument lists and shell=False:\n```python\nsubprocess.run([\"cat\", filename], shell=False)\n```\n- Validate/allowlist inputs; avoid passing raw user data to the shell.\n- Prefer Python standard libraries instead of shell commands where possible."
+       },
+       "properties": {
+        "tags": [
+         "DATADOG_RULE_TYPE:datadog-ai-static-analyzer",
+         "CWE:78",
+         "SEVERITY:WARNING",
+         "CATEGORY:SECURITY"
+        ]
+       }
+      },
+      {
+       "id": "datadog/python-codei",
+       "shortDescription": {
+        "text": "Potential code injection"
+       },
+       "fullDescription": {
+        "text": "In Python, Code Injection (CWE-94) occurs when untrusted input is passed to eval(), exec(),\nor used in template string construction.\n\nFor example (vulnerable):\n```python\nexpression = request.args.get(\"expr\")\nresult = eval(expression)\n```\n\n## How to remediate:\n- Never use eval() or exec() with user input.\n- Use ast.literal_eval() for safe literal evaluation.\n- Use pre-defined templates; never construct template strings from user input."
+       },
+       "properties": {
+        "tags": [
+         "DATADOG_RULE_TYPE:datadog-ai-static-analyzer",
+         "CWE:94",
+         "SEVERITY:WARNING",
+         "CATEGORY:SECURITY"
+        ]
+       }
+      },
+      {
+       "id": "datadog/python-datamodelpoisoning",
+       "shortDescription": {
+        "text": "Potential data and model poisoning"
+       },
+       "fullDescription": {
+        "text": "In Python, Data and Model Poisoning (CWE-345 / OWASP LLM04) occurs when user-controlled HTTP input flows into a machine-learning model-loading or training/fine-tuning call without validation, an allowlist check, or an integrity verification. An attacker can substitute a backdoored model artifact or corrupt model weights by controlling the path, hub name, or training dataset that reaches the ML API.\n\nFor example (vulnerable):\n```python\n@app.route(\"/load\", methods=[\"POST\"])\ndef load_model():\n    model_name = request.get_json()[\"model\"]\n    model = AutoModel.from_pretrained(model_name)  # user-controlled hub path, no allowlist\n```\n\n## How to remediate:\n- Validate model names and paths against a developer-maintained allowlist before loading\n- Verify model artifact integrity with a cryptographic hash before use\n- Gate model-loading and fine-tuning endpoints behind admin or role-based authentication"
+       },
+       "properties": {
+        "tags": [
+         "DATADOG_RULE_TYPE:datadog-ai-static-analyzer",
+         "CWE:345",
+         "SEVERITY:WARNING",
+         "CATEGORY:SECURITY"
+        ]
+       }
+      },
+      {
+       "id": "datadog/python-deserialization",
+       "shortDescription": {
+        "text": "Potential insecure deserialization"
+       },
+       "fullDescription": {
+        "text": "In Python, Insecure Deserialization (CWE-502) occurs when untrusted input is deserialized\nusing pickle, allowing arbitrary code execution.\n\nFor example (vulnerable):\n```python\ndata = request.get_data()\nobj = pickle.loads(data)  # Remote code execution!\n```\n\n## How to remediate:\n- Never use pickle with untrusted data.\n- Use json.loads() which is safe from code execution.\n- Use yaml.safe_load() instead of yaml.load()."
+       },
+       "properties": {
+        "tags": [
+         "DATADOG_RULE_TYPE:datadog-ai-static-analyzer",
+         "CWE:502",
+         "SEVERITY:WARNING",
+         "CATEGORY:SECURITY"
+        ]
+       }
+      },
+      {
+       "id": "datadog/python-errorinfoleak",
+       "shortDescription": {
+        "text": "Potential information exposure through error message"
+       },
+       "fullDescription": {
+        "text": "In Python, Information Exposure Through an Error Message (CWE-209) occurs when exception details from user-triggered operations are returned directly in HTTP responses. Python's `str(e)` on a database exception may return the full SQL query or connection string, and `traceback.format_exc()` exposes file paths and line numbers \u2014 returning these in a response exposes internal details to attackers.\n\nThe most common vulnerable patterns are:\n- `return jsonify({'error': str(e)}), 500` \u2014 serializes exception message from user input processing\n- `raise HTTPException(status_code=500, detail=str(e))` \u2014 FastAPI response with exception detail\n- `return jsonify({'error': traceback.format_exc()}), 500` \u2014 full stack trace in JSON response\n- `return HttpResponse(str(e), status=500)` \u2014 Django response with raw exception string\n\nFor example (vulnerable):\n```python\n@app.route('/user/<int:user_id>')\ndef get_user(user_id):\n    try:\n        user = db.session.get(User, user_id)\n        return jsonify(user.to_dict())\n    except Exception as e:\n        return jsonify({'error': str(e)}), 500\n```\n\nSafe (log internally, generic response):\n```python\n@app.route('/user/<int:user_id>')\ndef get_user(user_id):\n    try:\n        user = db.session.get(User, user_id)\n        return jsonify(user.to_dict())\n    except Exception:\n        app.logger.exception('get_user failed')\n        return jsonify({'error': 'internal server error'}), 500\n```\n\n## How to remediate:\n- Log the exception with `logging.exception` or `app.logger.exception` internally\n- Return a fixed generic string in the response, never `str(e)`, `repr(e)`, or `traceback.format_exc()`\n- For FastAPI, use `HTTPException(status_code=500, detail='internal server error')`"
+       },
+       "properties": {
+        "tags": [
+         "DATADOG_RULE_TYPE:datadog-ai-static-analyzer",
+         "CWE:209",
+         "SEVERITY:WARNING",
+         "CATEGORY:SECURITY"
+        ]
+       }
+      },
+      {
+       "id": "datadog/python-excessiveagency",
+       "shortDescription": {
+        "text": "Potential excessive agency"
+       },
+       "fullDescription": {
+        "text": "In Python, Excessive Agency (CWE-250) occurs when an AI agent is granted broader permissions or capabilities than its stated purpose requires \u2014 allowing it to accept untrusted LLM-controlled input and use it to perform operations far beyond what the agent's role dictates. For example, registering a shell execution tool for an agent that only needs to read files, or using FileManagementToolkit without a root_dir restriction. The overly permissive setup is visible in the tool or agent definition and creates a larger blast radius if the agent misbehaves or is manipulated.\n\nFor example (vulnerable):\n```python\nfrom langchain_community.tools import ShellTool\nagent = initialize_agent(\n    tools=[ShellTool()],  # unrestricted shell access \u2014 no allowlist\n    llm=llm,\n    agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,\n)\n```\n\n## How to remediate:\n- Grant agents only the minimum capabilities required for their stated purpose\n- Use scoping arguments: root_dir on FileManagementToolkit, authorized_imports on PythonInterpreterTool, work_dir on LocalCommandLineCodeExecutor\n- Enforce allowlists in custom tool bodies before passing LLM-supplied values to dangerous operations\n- Prefer read-only tools (FileReadTool) over read-write toolkits when writing is not needed"
+       },
+       "properties": {
+        "tags": [
+         "DATADOG_RULE_TYPE:datadog-ai-static-analyzer",
+         "CWE:250",
+         "SEVERITY:WARNING",
+         "CATEGORY:SECURITY"
+        ]
+       }
+      },
+      {
+       "id": "datadog/python-improperoutputhandling",
+       "shortDescription": {
+        "text": "Potential improper output handling"
+       },
+       "fullDescription": {
+        "text": "In Python, Improper Output Handling (CWE-74, LLM10:2026) occurs when LLM-generated output is used as input to dangerous downstream operations without validation, enabling SQL injection, command injection, XSS, path traversal, SSRF, ANSI escape injection (terminal/log writes), or Markdown exfiltration (unguarded HTTP responses) via LLM output.\n\nFor example (vulnerable):\n```python\nresponse = client.chat.completions.create(\n    model=\"gpt-4\",\n    messages=[{\"role\": \"user\", \"content\": prompt}]\n)\nsql_query = response.choices[0].message.content\ncursor.execute(sql_query)  # sink: raw LLM output in SQL\n```\n\n## How to remediate:\n- Validate LLM output against an allowlist before passing to any sink\n- Use structured output with schema validation (Pydantic, JSON mode) instead of raw strings\n- Use parameterized queries \u2014 never concatenate LLM output into SQL\n- Never pass raw LLM output to shell commands, eval/exec, or file paths\n- Strip ANSI sequences with a regex that covers full CSI plus BEL/ST-terminated OSC before writing to stdout or logs\n- Sanitize LLM-generated Markdown server-side before returning it; strip inline images, reference-style images, and HTML <img> tags"
+       },
+       "properties": {
+        "tags": [
+         "DATADOG_RULE_TYPE:datadog-ai-static-analyzer",
+         "CWE:74",
+         "SEVERITY:WARNING",
+         "CATEGORY:SECURITY"
+        ]
+       }
+      },
+      {
+       "id": "datadog/python-insecurecookie",
+       "shortDescription": {
+        "text": "Potential insecure cookie configuration"
+       },
+       "fullDescription": {
+        "text": "In Python, Insecure Cookie (CWE-614) occurs when cookies storing sensitive input are set without\nsecurity attributes (secure, httponly, samesite).\n\nFor example (vulnerable):\n```python\nresponse.set_cookie(\"session_id\", session_id)  # Missing security attributes\n```\n\n## How to remediate:\n- Set secure=True for HTTPS-only transmission.\n- Set httponly=True to prevent JavaScript access.\n- Set samesite=\"Strict\" or \"Lax\" for CSRF protection."
+       },
+       "properties": {
+        "tags": [
+         "DATADOG_RULE_TYPE:datadog-ai-static-analyzer",
+         "CWE:614",
+         "SEVERITY:WARNING",
+         "CATEGORY:SECURITY"
+        ]
+       }
+      },
+      {
+       "id": "datadog/python-integeroverflow",
+       "shortDescription": {
+        "text": "Potential integer overflow"
+       },
+       "fullDescription": {
+        "text": "In Python, standard integers are arbitrary-precision and do NOT overflow. Only flag integer overflow when user input (user-controlled values) enters a fixed-width C-level context that silently truncates or wraps:\n\n- `ctypes.c_int32(n)` / `ctypes.c_uint32(n)` \u2014 silently truncates to 32 bits\n- numpy array writes: `arr[i] = user_value` where arr.dtype is int32/int64 \u2014 silently wraps\n\nFor example (vulnerable):\n```python\ncount = int(request.args.get('count'))\nresult = ctypes.c_int32(count).value  # silently truncates if count > 2^31-1\n```\n\nSafe (bounds check):\n```python\ncount = int(request.args.get('count'))\nif count > 2**31 - 1 or count < -(2**31):\n    abort(400)\nresult = ctypes.c_int32(count).value\n```\n\n## How to remediate:\n- Validate user-supplied integers against fixed-width bounds before passing to ctypes or numpy\n- Use Python's arbitrary-precision int for all intermediate arithmetic; only convert to fixed-width at the last step after validation"
+       },
+       "properties": {
+        "tags": [
+         "DATADOG_RULE_TYPE:datadog-ai-static-analyzer",
+         "CWE:190",
+         "SEVERITY:WARNING",
+         "CATEGORY:SECURITY"
+        ]
+       }
+      },
+      {
+       "id": "datadog/python-ldapi",
+       "shortDescription": {
+        "text": "Potential LDAP injection"
+       },
+       "fullDescription": {
+        "text": "In Python, LDAP Injection (CWE-90) occurs when untrusted input is used in LDAP filters or DNs,\nallowing attackers to modify queries or access unauthorized data.\n\nFor example (vulnerable):\n```python\nfilter_str = f\"(&(uid={username})(objectClass=user))\"\nconn.search_s(base_dn, ldap.SCOPE_SUBTREE, filter_str)\n```\n\n## How to remediate:\n- Use ldap.filter.escape_filter_chars() to escape input.\n- Validate input with regex or allowlists.\n- Use parameterized queries where available."
+       },
+       "properties": {
+        "tags": [
+         "DATADOG_RULE_TYPE:datadog-ai-static-analyzer",
+         "CWE:90",
+         "SEVERITY:WARNING",
+         "CATEGORY:SECURITY"
+        ]
+       }
+      },
+      {
+       "id": "datadog/python-loginjection",
+       "shortDescription": {
+        "text": "Potential log injection"
+       },
+       "fullDescription": {
+        "text": "In Python, Log Injection (CWE-117) occurs when user-controlled input is embedded in a log message string without sanitization, enabling attackers to forge log entries via CRLF injection (\\r\\n) or inject ANSI escape sequences.\n\nThe vulnerability boundary is the log message string. Flag f-strings, concatenation, and the `%` operator \u2014 these embed user data in the message at the call site. Do NOT flag `logger.info(\"msg: %s\", value)` (args form, comma-separated) \u2014 this is the stdlib lazy-evaluation pattern, equivalent to SLF4J `{}` in Java, and is safe. Structured patterns that keep user data in the `extra` dict or in a bound structlog context are also safe.\n\nFor example (vulnerable):\n```python\nlogging.info(\"Login attempt for user: \" + username)       # concatenation\nlogging.warning(f\"Search query: {request.args.get('q')}\") # f-string\nlogger.info(\"User performed: %s\" % action)                 # % operator at call site\n```\n\nSafe (structured or lazy args):\n```python\nlogger.info(\"login_attempt for user: %s\", username)        # args form \u2014 NOT resolved at call site\nlogger.info(\"login_attempt\", extra={\"user\": username})     # extra dict, fixed message\nstructlog.get_logger().bind(user=username).info(\"login_attempt\")  # structlog bound context\n```\n\n## How to remediate:\n- Pass user data as `extra` dict keys (stdlib logging) or via `structlog.bind()` \u2014 keep the message string constant\n- Use the args form `logger.info(\"msg: %s\", value)` instead of f-strings or `+` concatenation\n- If the message must include user data, strip CRLF first: `input.replace('\\r', '').replace('\\n', '')`"
+       },
+       "properties": {
+        "tags": [
+         "DATADOG_RULE_TYPE:datadog-ai-static-analyzer",
+         "CWE:117",
+         "SEVERITY:WARNING",
+         "CATEGORY:SECURITY"
+        ]
+       }
+      },
+      {
+       "id": "datadog/python-misinformation",
+       "shortDescription": {
+        "text": "Potential misinformation"
+       },
+       "fullDescription": {
+        "text": "In Python, Misinformation (CWE-1426 / OWASP LLM09) occurs when LLM-generated text is returned to users via an HTTP response without a disclaimer, source attribution, or other validation safeguard. Users receive AI-generated content that may be factually false or fabricated, with no indication that the input should be independently verified.\n\nFor example (vulnerable):\n```python\n@app.route(\"/ask\", methods=[\"POST\"])\ndef ask():\n    answer = client.chat.completions.create(\n        model=\"gpt-4o\",\n        messages=[{\"role\": \"user\", \"content\": request.json[\"question\"]}],\n    ).choices[0].message.content\n    return jsonify({\"answer\": answer})  # raw LLM output, no disclaimer\n```\n\n## How to remediate:\n- Append a disclaimer to every LLM response before delivery: `answer + \"\\n\\nNote: AI-generated content. Verify independently.\"`\n- Return source documents alongside the answer when using RAG (`result[\"source_documents\"]`)\n- Add a human review gate for high-stakes responses before they are delivered to users"
+       },
+       "properties": {
+        "tags": [
+         "DATADOG_RULE_TYPE:datadog-ai-static-analyzer",
+         "CWE:1426",
+         "SEVERITY:WARNING",
+         "CATEGORY:SECURITY"
+        ]
+       }
+      },
+      {
+       "id": "datadog/python-openredirect",
+       "shortDescription": {
+        "text": "Potential open redirect"
+       },
+       "fullDescription": {
+        "text": "In Python, Open Redirect (CWE-601) occurs when user-controlled input is used as the destination of an HTTP redirect without proper validation, allowing attackers to redirect victims to malicious sites. Python web frameworks like Flask, Django, and FastAPI all have redirect functions that accept user input.\n\nThe most common vulnerable patterns are:\n- `return redirect(request.args.get('next'))` \u2014 Flask redirect with query parameter\n- `return HttpResponseRedirect(request.GET.get('next'))` \u2014 Django redirect with GET parameter\n- `return RedirectResponse(url=url)` \u2014 FastAPI redirect with user-supplied URL\n\nFor example (vulnerable):\n```python\n@app.route('/login', methods=['POST'])\ndef login():\n    next_url = request.args.get('next', '/')\n    # authenticate user...\n    return redirect(next_url)\n```\n\nSafe (parse and verify path-only):\n```python\nfrom urllib.parse import urlparse\n\n@app.route('/login', methods=['POST'])\ndef login():\n    next_url = request.args.get('next', '/')\n    parsed = urlparse(next_url)\n    if parsed.scheme or parsed.netloc:\n        next_url = '/'\n    return redirect(next_url)\n```\n\n## How to remediate:\n- Use `urllib.parse.urlparse` and verify both `u.scheme == ''` and `u.netloc == ''`\n- Use Flask's `werkzeug.utils.is_safe_url` helper\n- Use `url_for()` to redirect to named routes\n- Note: `url.startswith('/')` alone does NOT prevent open redirect \u2014 `//evil.com` starts with '/' but is scheme-relative"
+       },
+       "properties": {
+        "tags": [
+         "DATADOG_RULE_TYPE:datadog-ai-static-analyzer",
+         "CWE:601",
+         "SEVERITY:WARNING",
+         "CATEGORY:SECURITY"
+        ]
+       }
+      },
+      {
+       "id": "datadog/python-pathtraversal",
+       "shortDescription": {
+        "text": "Potential path traversal"
+       },
+       "fullDescription": {
+        "text": "In Python, Path Traversal (CWE-22) occurs when untrusted input is used to construct file paths,\nallowing attackers to access files outside the intended directory.\n\nFor example (vulnerable):\n```python\nfilename = request.args.get(\"file\")\nwith open(f\"/var/data/{filename}\", \"r\") as f:\n    content = f.read()\n```\n\n## How to remediate:\n- Use Path.resolve() and verify the path is within the base directory.\n- Use werkzeug.utils.secure_filename() for uploaded files.\n- Validate filenames against allowlists."
+       },
+       "properties": {
+        "tags": [
+         "DATADOG_RULE_TYPE:datadog-ai-static-analyzer",
+         "CWE:22",
+         "SEVERITY:WARNING",
+         "CATEGORY:SECURITY"
+        ]
+       }
+      },
+      {
+       "id": "datadog/python-promptinjection",
+       "shortDescription": {
+        "text": "Potential prompt injection"
+       },
+       "fullDescription": {
+        "text": "In Python, Prompt Injection (CWE-1427) occurs when attacker-controlled content can alter privileged LLM instructions or downstream agent behavior. Sources include direct user input, prior LLM responses written to memory/RAG that later feed prompts, and MCP/tool outputs that can contain attacker-influenced free text.\n\nFor example (vulnerable):\n```python\nuser_message = request.args.get(\"message\")\nprompt = \"You are a helpful assistant. User says: \" + user_message\nresponse = openai.ChatCompletion.create(\n    model=\"gpt-4\",\n    messages=[{\"role\": \"system\", \"content\": prompt}]\n)\n```\n\n## How to remediate:\nKeep privileged instructions static, preserve role boundaries, treat tool results and retrieved memory as untrusted unless proven otherwise, and reduce them to typed/allowlisted fields or apply robust content controls before reuse."
+       },
+       "properties": {
+        "tags": [
+         "DATADOG_RULE_TYPE:datadog-ai-static-analyzer",
+         "CWE:1427",
+         "SEVERITY:WARNING",
+         "CATEGORY:SECURITY"
+        ]
+       }
+      },
+      {
+       "id": "datadog/python-sensitiveinfodisclosure",
+       "shortDescription": {
+        "text": "Potential sensitive information disclosure"
+       },
+       "fullDescription": {
+        "text": "In Python, Sensitive Information Disclosure (CWE-200) occurs when sensitive application data \u2014 secrets, credentials, API keys, or PII \u2014 is used as input to an LLM API call by being directly interpolated or concatenated into the messages= content without redaction, potentially exposing confidential data to the model.\n\nFor example (vulnerable):\n```python\ndb_password = os.environ[\"DB_PASSWORD\"]\nresponse = client.chat.completions.create(\n    model=\"gpt-4\",\n    messages=[{\"role\": \"user\", \"content\": f\"Debug this error. Password: {db_password}\"}]\n)  # sink: secret in LLM message content\n```\n\n## How to remediate:\n- Never interpolate secrets, API keys, or PII directly into LLM message content\n- Redact or hash sensitive fields before including them in prompts\n- Use only non-sensitive identifiers (e.g., user IDs) in LLM messages, not PII fields\n- Ensure API keys are used only for client authentication, not injected into messages"
+       },
+       "properties": {
+        "tags": [
+         "DATADOG_RULE_TYPE:datadog-ai-static-analyzer",
+         "CWE:200",
+         "SEVERITY:WARNING",
+         "CATEGORY:SECURITY"
+        ]
+       }
+      },
+      {
+       "id": "datadog/python-sqli",
+       "shortDescription": {
+        "text": "Potential SQL injection"
+       },
+       "fullDescription": {
+        "text": "In Python, SQL Injection (CWE-89) occurs when untrusted user input is directly inserted into SQL queries, \nallowing attackers to manipulate or access the database. This can expose sensitive data or compromise \nthe entire system.\n\nTo prevent SQL injection, never build queries using string concatenation or formatting. \nAlways use parameterized queries or prepared statements so user input is treated as data, \nnot executable code.\n\nFor example, instead of:\n```python\ncursor.execute(f\"SELECT * FROM users WHERE username = '{username}'\")\n```\n\nUse:\n```python\ncursor.execute(\"SELECT * FROM users WHERE username = ?\", (username,))\n```\n\nYou should also validate user inputs and consider using an ORM (like SQLAlchemy or Django ORM), \nwhich handles parameters safely by design."
+       },
+       "properties": {
+        "tags": [
+         "DATADOG_RULE_TYPE:datadog-ai-static-analyzer",
+         "CWE:89",
+         "SEVERITY:WARNING",
+         "CATEGORY:SECURITY"
+        ]
+       }
+      },
+      {
+       "id": "datadog/python-supplychain",
+       "shortDescription": {
+        "text": "Potential supply chain vulnerability"
+       },
+       "fullDescription": {
+        "text": "In Python, Supply Chain (CWE-829 / OWASP LLM04:2026) occurs when AI model artifacts are fetched from a network source and loaded without cryptographic integrity verification, or when HuggingFace Hub downloads do not pin the artifact to a specific commit revision. Also covers slopsquatting (LLM API response input flows into subprocess pip install without an allowlist check) and unsigned artifact loading. An attacker who compromises the download URL, CDN, model repository, or pre-registers a hallucinated package name can silently substitute a backdoored model that executes arbitrary code or subverts model behavior when loaded. User input that supplies the download URL can also trigger loading of a malicious artifact.\n\nFor example (vulnerable):\n```python\nresponse = requests.get(request.json[\"model_url\"])\nmodel = pickle.loads(response.content)  # no hash verification\n```\n\n## How to remediate:\n- Verify a SHA-256 hash of downloaded bytes against a hardcoded expected value before loading: `if hashlib.sha256(data).hexdigest() != EXPECTED_HASH: raise ValueError(...)`\n- Pin HuggingFace Hub downloads to a specific commit: `hf_hub_download(repo_id=..., filename=..., revision='<commit_sha>')`\n- Load models only from developer-hardcoded local paths, never from runtime-supplied URLs"
+       },
+       "properties": {
+        "tags": [
+         "DATADOG_RULE_TYPE:datadog-ai-static-analyzer",
+         "CWE:829",
+         "SEVERITY:WARNING",
+         "CATEGORY:SECURITY"
+        ]
+       }
+      },
+      {
+       "id": "datadog/python-systempromptleakage",
+       "shortDescription": {
+        "text": "Potential hidden context exposure"
+       },
+       "fullDescription": {
+        "text": "In Python, Hidden Context Exposure (CWE-540, LLM08:2026) occurs when a developer-written system prompt \u2014 the internal instructions passed as the system= or system_prompt= input argument to an LLM API call \u2014 flows into a user-facing HTTP response or accessible log without redaction. The system prompt may contain sensitive business logic, internal escalation paths, or proprietary instructions that should not be exposed to end users. Hidden context also includes tool/function schema definitions passed to the LLM API and RAG-retrieved policy text assembled as developer-controlled LLM context.\n\nFor example (vulnerable):\n```python\nsystem_prompt = \"Internal assistant. Has access to customer records and pricing.\"\n\n@app.route(\"/debug\")\ndef debug():\n    return jsonify({\"prompt\": system_prompt})  # system prompt disclosed to any caller\n```\n\n## How to remediate:\n- Never return the system prompt in user-facing API responses\n- Log only prompt metadata (length, hash) rather than prompt content\n- Gate any endpoint that accesses the system prompt with admin-only authentication\n- Use response schemas (Pydantic models) that structurally exclude the system prompt field"
+       },
+       "properties": {
+        "tags": [
+         "DATADOG_RULE_TYPE:datadog-ai-static-analyzer",
+         "CWE:540",
+         "SEVERITY:WARNING",
+         "CATEGORY:SECURITY"
+        ]
+       }
+      },
+      {
+       "id": "datadog/python-trustboundary",
+       "shortDescription": {
+        "text": "Potential trust boundary violation"
+       },
+       "fullDescription": {
+        "text": "In Python, Trust Boundary Violation (CWE-501) occurs when untrusted user input is stored in session\nand used for authorization decisions without validation.\n\nFor example (vulnerable):\n```python\nrole = request.form.get(\"role\")\nsession[\"user_role\"] = role  # User controls their own role!\n```\n\n## How to remediate:\n- Never store user-controlled data for authorization without validation.\n- Look up roles from database based on authenticated user.\n- Use Flask-Login or Django's authentication framework."
+       },
+       "properties": {
+        "tags": [
+         "DATADOG_RULE_TYPE:datadog-ai-static-analyzer",
+         "CWE:501",
+         "SEVERITY:WARNING",
+         "CATEGORY:SECURITY"
+        ]
+       }
+      },
+      {
+       "id": "datadog/python-unboundedconsumption",
+       "shortDescription": {
+        "text": "Potential unbounded consumption"
+       },
+       "fullDescription": {
+        "text": "In Python, Unbounded Consumption (CWE-400) occurs when an LLM API call is made without a token limit (max_tokens=) or without a request timeout, allowing the model to generate an arbitrarily long response or block indefinitely. This can result in uncapped API costs, service degradation, or denial of service. The missing safeguard is observable statically as an absent max_tokens= argument in the LLM API call or constructor input.\n\nFor example (vulnerable):\n```python\nresponse = client.chat.completions.create(\n    model=\"gpt-4o\",\n    messages=messages,\n    # no max_tokens \u2014 response length is unbounded\n)\n```\n\n## How to remediate:\n- Set max_tokens= to a positive integer in all LLM API calls and constructors\n- Set timeout= on httpx or requests calls to LLM-compatible HTTP endpoints\n- Use langchain LLM constructors with max_tokens= to bound all downstream chain calls"
+       },
+       "properties": {
+        "tags": [
+         "DATADOG_RULE_TYPE:datadog-ai-static-analyzer",
+         "CWE:400",
+         "SEVERITY:WARNING",
+         "CATEGORY:SECURITY"
+        ]
+       }
+      },
+      {
+       "id": "datadog/python-vectorembeddingweaknesses",
+       "shortDescription": {
+        "text": "Potential vector and embedding weakness"
+       },
+       "fullDescription": {
+        "text": "In Python, Vector and Embedding Weaknesses (CWE-349 / OWASP LLM08) occurs when untrusted user-controlled input flows into a vector store mutation call without validation or sanitization, enabling RAG data poisoning. The attacker's content gets embedded and stored and is later retrieved by another user's similarity search and injected as input into their LLM prompt.\n\nFor example (vulnerable):\n```python\n@app.route(\"/ingest\", methods=[\"POST\"])\ndef ingest():\n    user_text = request.get_json()[\"content\"]\n    collection = client.get_collection(\"docs\")\n    collection.add(documents=[user_text], ids=[\"doc1\"])  # unvalidated user input stored in vector DB\n```\n\n## How to remediate:\n- Gate mutation endpoints behind admin or role-based authentication using a server-side session\n- Validate or sanitize user content against a strict allowlist before adding to the vector store\n- Enforce namespace isolation so users can only mutate their own verified partition"
+       },
+       "properties": {
+        "tags": [
+         "DATADOG_RULE_TYPE:datadog-ai-static-analyzer",
+         "CWE:349",
+         "SEVERITY:WARNING",
+         "CATEGORY:SECURITY"
+        ]
+       }
+      },
+      {
+       "id": "datadog/python-weakhash",
+       "shortDescription": {
+        "text": "Potential use of weak hash algorithm"
+       },
+       "fullDescription": {
+        "text": "In Python, Weak Hash (CWE-328) occurs when broken algorithms like MD5 or SHA-1 are used to\nhash sensitive input such as passwords or to generate tokens.\n\nFor example (vulnerable):\n```python\nhash = hashlib.md5(password.encode()).hexdigest()\n```\n\n## How to remediate:\n- Use bcrypt, argon2, or passlib for password hashing.\n- Use hashlib.sha256() for general cryptographic hashing.\n- MD5/SHA-1 are acceptable for non-security purposes."
+       },
+       "properties": {
+        "tags": [
+         "DATADOG_RULE_TYPE:datadog-ai-static-analyzer",
+         "CWE:328",
+         "SEVERITY:WARNING",
+         "CATEGORY:SECURITY"
+        ]
+       }
+      },
+      {
+       "id": "datadog/python-weakrandomness",
+       "shortDescription": {
+        "text": "Potential use of weak randomness"
+       },
+       "fullDescription": {
+        "text": "In Python, Weak Randomness (CWE-330) occurs when the random module is used to generate input for\nsecurity-sensitive operations like tokens, passwords, session IDs, or cryptographic keys.\n\nFor example (vulnerable):\n```python\nimport random\ntoken = ''.join(random.choices(string.ascii_letters, k=32))\n```\n\n## How to remediate:\n- Use secrets module for security-sensitive random generation.\n- random module is acceptable for non-security purposes (shuffling, tests, simulations).\n- Use os.urandom() for secure random bytes."
+       },
+       "properties": {
+        "tags": [
+         "DATADOG_RULE_TYPE:datadog-ai-static-analyzer",
+         "CWE:330",
+         "SEVERITY:WARNING",
+         "CATEGORY:SECURITY"
+        ]
+       }
+      },
+      {
+       "id": "datadog/python-xpathi",
+       "shortDescription": {
+        "text": "Potential XPath injection"
+       },
+       "fullDescription": {
+        "text": "In Python, XPath Injection (CWE-91) occurs when untrusted input is used to construct XPath queries, \nallowing attackers to access or modify XML data structures.\n\nFor example (vulnerable):\n```python\nexpr = \"//user[name/text()='%s']\" % username\nresult = root.xpath(expr)\n```\n\n## How to remediate:\n- Never concatenate user input into XPath expressions.\n- Use libraries that support variable binding or escaping (e.g., lxml with XPath variables).\n- Validate and sanitize input strictly before use.\n- Restrict XML data access and enforce schema validation."
+       },
+       "properties": {
+        "tags": [
+         "DATADOG_RULE_TYPE:datadog-ai-static-analyzer",
+         "CWE:643",
+         "SEVERITY:WARNING",
+         "CATEGORY:SECURITY"
+        ]
+       }
+      },
+      {
+       "id": "datadog/python-xss",
+       "shortDescription": {
+        "text": "Potential cross-site scripting"
+       },
+       "fullDescription": {
+        "text": "In Python web apps, Cross-Site Scripting (CWE-79) occurs when untrusted input is rendered into HTML\nwithout proper output encoding, allowing attacker-controlled script execution in users' browsers.\n\nFor example (vulnerable Flask):\n```python\nreturn f\"<div>{request.args.get('q')}</div>\"\n```\n\n## How to remediate:\n- Use templating engines with auto-escaping (Jinja2 with autoescape on, Django templates).\n- Apply context-appropriate escaping (HTML, attribute, JS) when injecting user data.\n- Validate inputs and avoid reflecting raw parameters.\n- Consider CSP to limit the impact of XSS."
+       },
+       "properties": {
+        "tags": [
+         "DATADOG_RULE_TYPE:datadog-ai-static-analyzer",
+         "CWE:79",
+         "SEVERITY:WARNING",
+         "CATEGORY:SECURITY"
+        ]
+       }
+      },
+      {
+       "id": "datadog/python-zipslip",
+       "shortDescription": {
+        "text": "Potential zip slip (archive path traversal)"
+       },
+       "fullDescription": {
+        "text": "In Python, Zip Slip (CWE-73) occurs when user-supplied archive member names are used to construct extraction paths without validating that the path stays within the destination directory. An attacker-controlled archive input can use `../` sequences to write files outside the intended directory.\n\nThe most common vulnerable patterns are:\n- `zf.extract(member, dest)` \u2014 `zipfile.ZipFile.extract` is safe by default in Python 3.12+ but vulnerable in earlier versions\n- `zf.extractall(dest)` \u2014 extracts all members using their filenames directly\n- `tf.extract(tarinfo, dest)` \u2014 `tarfile` extraction with unvalidated member names\n\nFor example (vulnerable):\n```python\nwith zipfile.ZipFile(archive_path) as zf:\n    for name in zf.namelist():\n        dest_path = os.path.join(dest, name)  # name may contain \"../\"\n        with zf.open(name) as src, open(dest_path, 'wb') as dst:\n            dst.write(src.read())\n```\n\nSafe (resolve and verify):\n```python\nwith zipfile.ZipFile(archive_path) as zf:\n    for name in zf.namelist():\n        dest_path = os.path.realpath(os.path.join(dest, name))\n        if not dest_path.startswith(os.path.realpath(dest) + os.sep):\n            raise ValueError(f\"Zip slip: {name}\")\n        # safe to extract...\n```\n\n## How to remediate:\n- Use `os.path.realpath` and verify the path starts with `os.path.realpath(dest) + os.sep`\n- `os.path.join` alone does NOT prevent zip slip"
+       },
+       "properties": {
+        "tags": [
+         "DATADOG_RULE_TYPE:datadog-ai-static-analyzer",
+         "CWE:73",
+         "SEVERITY:WARNING",
+         "CATEGORY:SECURITY"
+        ]
+       }
+      }
+     ],
+     "version": "1.0.1"
+    }
+   },
+   "artifacts": [
+    {
+     "location": {
+      "uri": "src/crewai_codeint_mini/__init__.py"
+     },
+     "length": 0
+    },
+    {
+     "location": {
+      "uri": "src/crewai_codeint_mini/tools/code_interpreter_tool/__init__.py"
+     },
+     "length": 0
+    },
+    {
+     "location": {
+      "uri": "src/crewai_codeint_mini/tools/__init__.py"
+     },
+     "length": 0
+    },
+    {
+     "location": {
+      "uri": "src/crewai_codeint_mini/_compat/__init__.py"
+     },
+     "length": 0
+    },
+    {
+     "location": {
+      "uri": "src/crewai_codeint_mini/_compat/typing.py"
+     },
+     "length": 0
+    },
+    {
+     "location": {
+      "uri": "src/crewai_codeint_mini/_compat/tools.py"
+     },
+     "length": 0
+    },
+    {
+     "location": {
+      "uri": "src/crewai_codeint_mini/_compat/pydantic.py"
+     },
+     "length": 0
+    },
+    {
+     "location": {
+      "uri": "src/crewai_codeint_mini/printer.py"
+     },
+     "length": 0,
+     "properties": {
+      "tags": [
+       "RULE_FAILURE:datadog/python-excessiveagency"
+      ]
+     }
+    },
+    {
+     "location": {
+      "uri": "src/crewai_codeint_mini/__main__.py"
+     },
+     "length": 0,
+     "properties": {
+      "tags": [
+       "RULE_FAILURE:datadog/python-excessiveagency"
+      ]
+     }
+    },
+    {
+     "location": {
+      "uri": "src/crewai_codeint_mini/llm.py"
+     },
+     "length": 0,
+     "properties": {
+      "tags": [
+       "RULE_FAILURE:datadog/python-xss"
+      ]
+     }
+    },
+    {
+     "location": {
+      "uri": "src/crewai_codeint_mini/_compat/docker.py"
+     },
+     "length": 0,
+     "properties": {
+      "tags": [
+       "RULE_FAILURE:datadog/python-cmdi,datadog/python-sensitiveinfodisclosure"
+      ]
+     }
+    },
+    {
+     "location": {
+      "uri": "src/crewai_codeint_mini/agent.py"
+     },
+     "length": 0,
+     "properties": {
+      "tags": [
+       "RULE_FAILURE:datadog/python-excessiveagency,datadog/python-promptinjection,datadog/python-systempromptleakage"
+      ]
+     }
+    },
+    {
+     "location": {
+      "uri": "src/crewai_codeint_mini/tools/code_interpreter_tool/code_interpreter_tool.py"
+     },
+     "length": 0,
+     "properties": {
+      "tags": [
+       "RULE_FAILURE:datadog/python-cmdi,datadog/python-excessiveagency,datadog/python-integeroverflow,datadog/python-xss"
+      ]
+     }
+    }
+   ],
+   "results": [],
+   "properties": {
+    "tags": [
+     "DATADOG_SAIST_OUTPUT_TOKENS:0",
+     "DATADOG_SAIST_INPUT_TOKENS:0"
+    ]
+   }
+  }
+ ]
+}

@@ -58,7 +58,7 @@ def test_an_unpinned_version_fails(tmp_path):
 def test_missing_scanner_fails_clearly(tmp_path):
     proc = run_install(tmp_path, tmp_path / "nowhere")
     assert proc.returncode == 2
-    assert "ERROR: sonar-scanner is not installed at" in proc.stdout and "sast-tools:0.4.0" in proc.stdout
+    assert "ERROR: sonar-scanner is not installed at" in proc.stdout and "sast-tools:0.5.0" in proc.stdout
     assert "INSTALL_RESULT" not in proc.stdout
 
 
