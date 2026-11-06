@@ -1,0 +1,97 @@
+#!/usr/local/bin/python3
+"""Entry point of the sast-grader image: /opt/grader/grade.
+
+Runs /opt/grader/grade.py (a byte-identical copy of task_format/grade.py) with
+the same arguments, then stamps which grader produced the result:
+
+- grading_detail.json gets ``grader_version`` (grade.py's GRADER_VERSION),
+  ``grader_image`` (the image reference baked in at build time) and
+  ``grader_image_version`` (the image's VERSION file).
+- reward.json gets ``grader_version_major``, ``grader_version_minor`` and
+  ``grader_version_patch`` from VERSION. Harbor rejects non-numeric values in
+  reward.json, so the strings go only into grading_detail.json.
+
+Scoring is untouched: grade.py computes every reward; this wrapper only adds
+keys after it has written its files. ``--check-truth`` is passed through as is.
+"""
+
+import json
+import os
+import runpy
+import sys
+from pathlib import Path
+
+GRADER_DIR = Path(__file__).resolve().parent
+GRADE_PY = GRADER_DIR / "grade.py"
+VERSION_FILE = GRADER_DIR / "VERSION"
+
+
+def _out_dir(argv: list[str]) -> Path:
+    out = "/logs/verifier"  # grade.py's default
+    for i, arg in enumerate(argv):
+        if arg == "--out" and i + 1 < len(argv):
+            out = argv[i + 1]
+        elif arg.startswith("--out="):
+            out = arg.split("=", 1)[1]
+    return Path(out)
+
+
+def _version() -> str:
+    try:
+        return VERSION_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        return "unknown"
+
+
+def _numeric_version(version: str) -> dict[str, int]:
+    parts = (version.split(".") + ["0", "0", "0"])[:3]
+    try:
+        major, minor, patch = (int(p) for p in parts)
+    except ValueError:
+        return {}
+    return {"grader_version_major": major, "grader_version_minor": minor, "grader_version_patch": patch}
+
+
+def _update_json(path: Path, extra: dict) -> None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return  # nothing to stamp; test.sh's fallback handles a missing reward
+    if not isinstance(data, dict):
+        return
+    data.update(extra)
+    path.write_text(json.dumps(data, indent=2))
+
+
+def main() -> int:
+    argv = sys.argv[1:]
+    sys.argv = [str(GRADE_PY), *argv]
+    code = 0
+    module_globals = {}
+    try:
+        module_globals = runpy.run_path(str(GRADE_PY), run_name="__main__")
+    except SystemExit as exc:  # grade.py ends with sys.exit
+        code = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
+    if "--check-truth" in argv:
+        return code
+
+    if not module_globals:
+        # run_path returns globals only when the module returns normally; read the
+        # version string without executing grade.py again.
+        for line in GRADE_PY.read_text(encoding="utf-8").splitlines():
+            if line.startswith("GRADER_VERSION = "):
+                module_globals = {"GRADER_VERSION": line.split("=", 1)[1].strip().strip("\"'")}
+                break
+    version = _version()
+    out = _out_dir(argv)
+    _update_json(out / "grading_detail.json", {
+        "grader_version": module_globals.get("GRADER_VERSION", "unknown"),
+        "grader_image": os.environ.get("GRADER_IMAGE", "unknown"),
+        "grader_image_version": version,
+    })
+    _update_json(out / "reward.json", _numeric_version(version))
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main())
