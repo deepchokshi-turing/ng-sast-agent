@@ -8,7 +8,7 @@ The reference for the layout is the pilot pair `pilot_v4/crewai-file-writer-a` /
 
 ```bash
 cd ng-sast-agent && uv sync            # tooling venv: ng-sast-agent/.venv
-uv tool install harbor==0.25.0         # only if `harbor --version` fails
+uv tool install harbor==0.26.0         # only if `harbor --version` fails
 gh auth status                         # advisory text and licence come from the GitHub API
 ```
 

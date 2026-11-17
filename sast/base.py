@@ -102,7 +102,11 @@ def _tail(text: str | None, limit: int = LOG_TAIL_CHARS) -> str:
 
 
 class ScannerAgent(BaseAgent):
-    capabilities = AgentCapabilities()
+    # Every scanner's options accept reasoning_effort (the model-backed ones use it, the
+    # static ones ignore it). Harbor 0.26 rejects that option unless the capability is
+    # declared; older Harbor versions have no such capability field.
+    capabilities = AgentCapabilities(
+        **({"reasoning_effort": True} if "reasoning_effort" in AgentCapabilities.model_fields else {}))
 
     #: The tool's name, as written in the SARIF driver.
     tool_name: ClassVar[str]

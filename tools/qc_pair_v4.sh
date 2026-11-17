@@ -321,7 +321,7 @@ if command -v harbor >/dev/null 2>&1; then
   res="$(harbor lint "$A" "$B" 2>&1)"; rc=$?
   if [ $rc = 0 ]; then record PASS harbor-lint "no findings ($(harbor --version 2>/dev/null))"; else record FAIL harbor-lint "findings (exit $rc)"; fi
   [ -n "$res" ] && printf '%s\n' "$res" | tail -30 | block
-else record FAIL harbor-lint "harbor CLI not found (uv tool install harbor==0.25.0)"; fi
+else record FAIL harbor-lint "harbor CLI not found (uv tool install harbor==0.26.0)"; fi
 
 # --------------------------------------------------------------------------------------------
 section "Repro tests, no network (own code must pass, twin code must fail)"
