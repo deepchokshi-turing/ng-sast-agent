@@ -9,7 +9,7 @@ requires-python = ">=3.12"
 dependencies = []
 
 [dependency-groups]
-dev = ["harbor==0.23.0", "pytest>=8", "ruamel.yaml==0.19.1"]
+dev = ["harbor==0.26.0", "pytest>=8", "ruamel.yaml==0.19.1"]
 
 [tool.uv]
 package = false
