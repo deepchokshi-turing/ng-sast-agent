@@ -75,7 +75,8 @@ these views:
   re-mapped before grading (SARIF run properties, else agent metadata).
 
 A task's role (positive or negative) and family come from, in order: the
-private variant map (``--variants``, default ``<tasks>/VARIANTS.json``, of the
+private variant map (``--variants``, default ``<tasks>/VARIANTS.json``, else
+``<tasks>/../VARIANTS.json`` when ``--tasks`` is one batch folder, of the
 form ``{"<task dir>": {"family": "...", "role": "positive"|"negative"}}``, an
 entry's ``former_name`` also matching jobs recorded before the rename), the
 task name ``task_<family>_<role>``, the ground truth (``variant_role``, else
@@ -238,11 +239,47 @@ def load_variants(path: Path | None) -> dict:
 
 
 def default_variants(tasks_dir: Path | None, explicit: Path | None) -> Path | None:
+    """--variants, else VARIANTS.json in the tasks dir, else in its parent (--tasks is one batch)."""
     if explicit is not None:
         return explicit
-    if tasks_dir is not None and (tasks_dir / "VARIANTS.json").is_file():
-        return tasks_dir / "VARIANTS.json"
+    if tasks_dir is not None:
+        for d in (tasks_dir, tasks_dir.parent):
+            if (d / "VARIANTS.json").is_file():
+                return d / "VARIANTS.json"
     return None
+
+
+def task_dirs(root: Path) -> list[Path]:
+    """Every folder that may hold a task: those directly under ``root`` and those inside its
+    ``batch-*`` folders (same logic as tools/label_rules/_common.py). ``root`` is the dataset root
+    (``tasks``; an old flat dataset has its tasks directly under it) or one batch (``tasks/batch-N``)."""
+    try:
+        entries = sorted(root.iterdir())
+    except OSError:
+        return []
+    out = []
+    for p in entries:
+        if not p.is_dir():
+            continue
+        if p.name.startswith("batch-"):
+            try:
+                out.extend(sorted(q for q in p.iterdir() if q.is_dir()))
+            except OSError:
+                continue
+        else:
+            out.append(p)
+    return out
+
+
+def task_dir(tasks_dir: Path, name: str) -> Path:
+    """<tasks>/<name>, else <tasks>/batch-*/<name>; the first path when neither exists."""
+    direct = tasks_dir / name
+    if direct.is_dir():
+        return direct
+    for p in sorted(tasks_dir.glob("batch-*")):
+        if (p / name).is_dir():
+            return p / name
+    return direct
 
 
 def parse_task_name(task: str) -> tuple[str, str]:
@@ -280,16 +317,16 @@ def family_and_role(task: str, truth: dict | None, variants: dict, rewards: dict
 
 
 def task_folders(trial: dict, tasks_dir: Path | None, variants: dict | None = None) -> list[Path]:
-    """Where the task's folder may be: <tasks>/<task name>, the folder a former name was renamed to,
-    and the task path recorded in the trial."""
+    """Where the task's folder may be: <tasks>/<task name> (or <tasks>/batch-*/<task name>), the folder
+    a former name was renamed to, and the task path recorded in the trial."""
     candidates = []
     if tasks_dir is not None:
         name = str(trial.get("task_name") or "").split("/")[-1]
         if name:
-            candidates.append(tasks_dir / name)
+            candidates.append(task_dir(tasks_dir, name))
             current = ((variants or {}).get(name) or {}).get("current_name")
             if current:
-                candidates.append(tasks_dir / current)
+                candidates.append(task_dir(tasks_dir, current))
     path = ((trial.get("config") or {}).get("task") or {}).get("path")
     if path:
         candidates.append(Path(path))
@@ -1566,9 +1603,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("inputs", type=Path, nargs="+",
                         help="a Harbor job or jobs directory, or one or more reward.json files")
-    parser.add_argument("--tasks", type=Path, help="folder holding the task directories, for ground truth")
+    parser.add_argument("--tasks", type=Path, help="dataset folder (task directories in its batch-* folders, or directly under it) "
+                        "or one batch folder, for ground truth")
     parser.add_argument("--variants", type=Path,
-                        help="private map of task dir to family and role (default: <tasks>/VARIANTS.json)")
+                        help="private map of task dir to family and role (default: <tasks>/VARIANTS.json, "
+                             "else the one in <tasks>/.. when --tasks is one batch)")
     parser.add_argument("--json", action="store_true", help="print the per-trial rows as JSON instead of tables")
     parser.add_argument("--write", type=Path, help="also write report.json and report.md into this directory")
     args = parser.parse_args()

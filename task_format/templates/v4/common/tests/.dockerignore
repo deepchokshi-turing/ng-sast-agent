@@ -1,0 +1,6 @@
+# Build context of the verifier image: only what tests/Dockerfile copies.
+*
+!Dockerfile
+!test.sh
+!ground_truth.json
+!evaluator_view.json

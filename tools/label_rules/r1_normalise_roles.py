@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """R1: normalise ground-truth and oracle path roles to the seven roles of the output contract.
 
-    python tools/label_rules/r1_normalise_roles.py <harbor-tasks dir> [--task NAME ...] [--check]
+    python tools/label_rules/r1_normalise_roles.py <tasks dir | tasks/batch-N> [--task NAME ...] [--check]
 
 The scanner contract (instruction.md) allows ``source``, ``root_cause``,
 ``context_assembly``, ``model_consumption``, ``model_decision``,
