@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """R4: LLM02 findings may only be satisfied by data controls, not by a generic policy gate.
 
-    python tools/label_rules/r4_sid_data_recs.py <harbor-tasks dir> [--task NAME ...] [--check] [--add REC ...]
+    python tools/label_rules/r4_sid_data_recs.py <tasks dir | tasks/batch-N> [--task NAME ...] [--check] [--add REC ...]
 
 Audit B4 A4: answering ``REC-POLICY-GATE`` alone earned full recommendation
 credit on most disclosure findings. For every finding whose rule id starts

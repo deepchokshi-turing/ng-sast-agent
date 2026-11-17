@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """R5: give every hard_negative_trap an explicit ``trap_rule_ids`` list.
 
-    python tools/label_rules/r5_trap_rule_ids.py <harbor-tasks dir> [--task NAME ...] [--check] [--recompute]
+    python tools/label_rules/r5_trap_rule_ids.py <tasks dir | tasks/batch-N> [--task NAME ...] [--check] [--recompute]
 
 ``trap_rule_prefixes`` (LLM02, LLM03) says which risk a trap baits. The new
 ``trap_rule_ids`` names the exact rule ids a scanner would wrongly claim at the

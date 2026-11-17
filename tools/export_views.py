@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
 """Generate the scanner-visible and evaluator-only JSON views of each task, and prove they are separate (spec 5.2).
 
-    python tools/export_views.py <harbor-tasks dir> [--task NAME ...] [--check]
+    python tools/export_views.py <dataset dir | one batch dir> [--task NAME ...] [--check]
+
+The dataset dir (``tasks``) holds the families in ``batch-*`` folders; every
+``batch-*`` folder is walked, plus task folders directly under the dataset dir
+(old flat datasets). One batch (``tasks/batch-N``) limits the run to it.
 
 Inputs per task: task.toml ``[metadata]``, environment/repo/security_manifest.json,
 tests/ground_truth.json, validation/provenance.json and the evaluator-only
-VARIANTS.json next to the task folders (for the twin and the role).
+VARIANTS.json at the dataset root (for the twin and the role; read from the given
+dir, else its parent when the given dir is one batch). A twin is found beside
+the task (same batch), else anywhere in the dataset.
 
 Outputs per task (JSON, sorted keys, two-space indent, LF, so a rerun on the
 same inputs writes the same bytes):
@@ -255,8 +261,46 @@ def prove(task: Path, metadata: dict, evaluator: dict, twin: Path | None) -> lis
     return problems
 
 
+def task_dirs(root: Path) -> list[Path]:
+    """Every folder that may hold a task: those directly under ``root`` and those inside its
+    ``batch-*`` folders (same logic as tools/label_rules/_common.py). ``root`` is the dataset root
+    (``tasks``; an old flat dataset has its tasks directly under it) or one batch (``tasks/batch-N``)."""
+    out = []
+    for p in sorted(root.iterdir()):
+        if not p.is_dir():
+            continue
+        if p.name.startswith("batch-"):
+            out.extend(sorted(q for q in p.iterdir() if q.is_dir()))
+        else:
+            out.append(p)
+    return out
+
+
+def dataset_file(root: Path, name: str) -> Path:
+    """A dataset-wide file (VARIANTS.json, vocabulary.json): in ``root``, else in its parent (when
+    ``root`` is one batch). Returns the path in ``root`` when neither exists."""
+    for d in (root, root.parent):
+        if (d / name).is_file():
+            return d / name
+    return root / name
+
+
+def find_twin(root: Path, task: Path, twin: str | None) -> Path | None:
+    """The twin's folder: the task's sibling (same batch), else any task folder of ``root`` or,
+    when ``root`` is one batch, of the dataset root above it."""
+    if not twin:
+        return None
+    if (task.parent / twin).is_dir():
+        return task.parent / twin
+    for base in (root, root.parent):
+        for p in task_dirs(base):
+            if p.name == twin:
+                return p
+    return None
+
+
 def load_variants(root: Path) -> dict:
-    f = root / "VARIANTS.json"
+    f = dataset_file(root, "VARIANTS.json")
     if not f.is_file():
         return {}
     data = _load_json(f)
@@ -272,8 +316,7 @@ def write(path: Path, text: str) -> None:
 
 def export(root: Path, only: list[str] | None = None, check: bool = False) -> dict[str, list[str]]:
     """Generate (or with check=True compare) both views for every task; returns problems per task."""
-    tasks = sorted(d for d in root.iterdir() if d.is_dir() and (d / "task.toml").is_file()
-                   and (d / "environment").is_dir())
+    tasks = [d for d in task_dirs(root) if (d / "task.toml").is_file() and (d / "environment").is_dir()]
     if only:
         tasks = [t for t in tasks if t.name in only]
     try:
@@ -289,7 +332,7 @@ def export(root: Path, only: list[str] | None = None, check: bool = False) -> di
             results[t.name] = [str(exc)]
             continue
         twin_name = (variants.get(t.name) or {}).get("twin")
-        twin = root / twin_name if twin_name and (root / twin_name).is_dir() else None
+        twin = find_twin(root, t, twin_name)
         problems = prove(t, metadata, evaluator, twin)
         outputs = {t / METADATA_FILE: dumps(metadata), t / EVALUATOR_FILE: dumps(evaluator)}
         if check:
@@ -306,7 +349,7 @@ def export(root: Path, only: list[str] | None = None, check: bool = False) -> di
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("tasks", type=Path, help="the harbor-tasks directory")
+    ap.add_argument("tasks", type=Path, help="the dataset directory (tasks) or one batch (tasks/batch-N)")
     ap.add_argument("--task", action="append", default=[], metavar="NAME", help="only this task (repeatable)")
     ap.add_argument("--check", action="store_true", help="write nothing; fail when a view is stale or leaks")
     args = ap.parse_args()

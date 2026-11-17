@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """R3 (mechanical part): accept the disclosure sink of every LLM02 finding, and trap it in the fixed twin.
 
-    python tools/label_rules/r3_sid_sink_locations.py <harbor-tasks dir> [--task NAME ...] [--check]
+    python tools/label_rules/r3_sid_sink_locations.py <tasks dir | tasks/batch-N> [--task NAME ...] [--check]
 
 Spec 2.3: a disclosure finding "must identify where protected data becomes
 available to an unauthorized recipient or channel" (audit D F-M4). So a

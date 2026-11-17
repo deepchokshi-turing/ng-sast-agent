@@ -1,0 +1,12 @@
+# Local files kept out of uploads, publication and the task content hash.
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+*.local
+*.local.*
+*.bak
+*.orig
+*.swp
+scratch/
+out/

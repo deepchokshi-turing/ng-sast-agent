@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """R6: copy task.toml's scanner_roots and excluded_paths into the ground truth's ``matching``.
 
-    python tools/label_rules/r6_matching_roots.py <harbor-tasks dir> [--task NAME ...] [--check]
+    python tools/label_rules/r6_matching_roots.py <tasks dir | tasks/batch-N> [--task NAME ...] [--check]
 
 The grader decides which results are in scope from the ground truth alone, so
 the scanner scope of task.toml ``[metadata]`` (``scanner_roots``,

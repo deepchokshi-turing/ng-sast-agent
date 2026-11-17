@@ -1,0 +1,85 @@
+version = "1.0"
+
+# v4 task format: the agent's only graded output is this SARIF file. Harbor collects it after
+# the agent phase and restores it at the same path in the separate verifier container.
+artifacts = ["/app/output"]
+
+[task]
+name = "turing/@@FOLDER@@"
+# Same text in both twins: task.toml is scanner-readable and must not tell the twins apart.
+description = "@@DESCRIPTION@@"
+authors = [{ name = "Turing" }]
+keywords = @@KEYWORDS@@
+
+[metadata]
+author_name = "Turing"
+category = "security-static-analysis"
+tags = ["owasp-llm-2026", "static-scanner-eval"]
+difficulty = "@@DIFFICULTY@@"
+
+# Spec 5.2 task-level fields (non-label)
+schema_version = "0.1"
+task_id = "@@TASK_ID@@"
+repository_id = "@@REPOSITORY_ID@@"
+family_id = "@@FAMILY_ID@@"
+variant_id = "@@VARIANT_ID@@"
+related_variant_ids = ["@@RELATED_VARIANT_ID@@"]
+source_origin = "@@SOURCE_ORIGIN@@"
+# source_url, source_commit, license and modifications are evaluator-only: validation/provenance.json
+languages = @@LANGUAGES@@
+# TODO(builder): controlled values from vocabulary.json, the same in both twins.
+frameworks = []
+# TODO(builder): exact pins (no ranges): the interpreter/toolchain in the task image plus the
+# upstream release the code was taken from, e.g. { python = "3.12.15", crewai-tools = "1.11.0" }.
+package_versions = {}
+# TODO(builder): one category from vocabulary.json (architecture), plus a free-text note.
+architecture = ""
+architecture_notes = ""
+# TODO(builder): repository-relative commands, verified in a clean container with no network.
+entrypoint = "@@ENTRYPOINT@@"
+build_command = "@@BUILD_COMMAND@@"
+test_command = "@@TEST_COMMAND@@"
+scanner_roots = @@SCANNER_ROOTS@@
+excluded_paths = @@EXCLUDED_PATHS@@
+
+[agent]
+timeout_sec = 1800.0
+# Applies to agent.run() only. agent.setup() keeps the public baseline from [environment],
+# because the scanner agents install their tools at setup (github.com, registry.npmjs.org,
+# nodejs.org, deb.debian.org, raw.githubusercontent.com). During the scan only the model and
+# scanner APIs are reachable.
+network_mode = "allowlist"
+allowed_hosts = [
+  "api.anthropic.com",                  # claude_review, cloudflare_audit, datadog_saist (Claude)
+  "api.openai.com",                     # codex_security, datadog_saist (OpenAI)
+  "api.promptfoo.app",                  # promptfoo code scanning (HTTPS and websocket)
+  "api.datadoghq.com",                  # datadog_saist rule endpoint
+  "generativelanguage.googleapis.com",  # datadog_saist (Gemini)
+]
+
+[verifier]
+# Separate verifier: built from tests/Dockerfile (FROM the sast-grader image, with test.sh and
+# the ground truth baked in). It sees only the declared artifacts, never the agent's container.
+environment_mode = "separate"
+timeout_sec = 120.0
+
+[verifier.environment]
+network_mode = "no-network"
+cpus = 1
+memory_mb = 1024
+build_timeout_sec = 600.0
+
+[environment]
+# Public baseline: image build and agent.setup() need it; [agent] narrows it for the scan.
+network_mode = "public"
+build_timeout_sec = @@BUILD_TIMEOUT@@
+cpus = 1
+memory_mb = @@MEMORY_MB@@
+
+[environment.env]
+# Declared so the platform forwards this project secret to Harbor's host process, where the
+# Promptfoo agent reads it; not used by the grader (v4 removed it from [verifier.env], so the
+# verifier never sees it). Values here are in the task container's environment for the whole
+# trial. Harbor 0.25 fails the trial when PROMPTFOO_TOKEN is unset on the host; set it empty
+# (PROMPTFOO_TOKEN=) for runs that do not use the Promptfoo agent.
+PROMPTFOO_API_KEY = "${PROMPTFOO_TOKEN}"

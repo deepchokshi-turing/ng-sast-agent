@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """Clean-environment check of each task's build_command, test_command and entrypoint (spec 5.2).
 
-    python tools/check_clean_build.py <harbor-tasks dir> [--task NAME ...] [--jobs N] [--write]
+    python tools/check_clean_build.py <tasks dir> [--task NAME ...] [--jobs N] [--write]
                                       [--timeout SEC] [--tools-image IMG]
+
+<tasks dir> is a flat tasks directory, one batch folder (tasks/batch-N) or the
+dataset root, whose batch-*/ folders are then searched as well (task folder
+names are unique across batches).
 
 For every task folder it:
 
@@ -190,10 +194,23 @@ def write_provenance(task: Path, result: dict) -> None:
     prov = task / "validation" / "provenance.json"
     if not prov.is_file():
         return
-    data = json.loads(prov.read_text(encoding="utf-8"))
+    raw = prov.read_bytes().decode("utf-8")
+    data = json.loads(raw)
     data.setdefault("qc", {})["build_verified_clean_env"] = result
-    with prov.open("w", encoding="utf-8", newline="\n") as fh:
-        fh.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+    # Keep the file's style (indent, ASCII escaping, trailing newline), as snippet_ids.py does.
+    lines = raw.split("\n")
+    indent = len(lines[1]) - len(lines[1].lstrip(" ")) if len(lines) > 1 else 2
+    text = json.dumps(data, indent=indent or 2, ensure_ascii=raw.isascii()) + ("\n" if raw.endswith("\n") else "")
+    prov.write_bytes(text.encode("utf-8"))
+
+
+def task_dirs(root: Path) -> list[Path]:
+    """Folders directly in root, plus those in root/batch-*/ (the dataset root of the batch layout)."""
+    dirs = [d for d in root.iterdir() if d.is_dir()]
+    for batch in sorted(root.glob("batch-*")):
+        if batch.is_dir():
+            dirs += [d for d in batch.iterdir() if d.is_dir()]
+    return dirs
 
 
 def summary_line(name: str, r: dict) -> str:
@@ -213,15 +230,16 @@ def summary_line(name: str, r: dict) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("tasks", type=Path, help="the harbor-tasks directory")
+    ap.add_argument("tasks", type=Path, help="tasks directory, batch folder or dataset root")
     ap.add_argument("--task", action="append", default=[], metavar="NAME", help="only this task (repeatable)")
     ap.add_argument("--jobs", type=int, default=4, help="tasks checked in parallel (default 4)")
     ap.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SEC, help="seconds per command (default 120)")
     ap.add_argument("--tools-image", help="SAST_TOOLS_IMAGE build argument (default: the Dockerfile ARG default)")
     ap.add_argument("--write", action="store_true", help="store results in validation/provenance.json qc")
     args = ap.parse_args()
-    tasks = sorted(d for d in args.tasks.iterdir()
-                   if d.is_dir() and (d / "task.toml").is_file() and (d / "environment" / "Dockerfile").is_file())
+    tasks = sorted((d for d in task_dirs(args.tasks)
+                    if (d / "task.toml").is_file() and (d / "environment" / "Dockerfile").is_file()),
+                   key=lambda d: d.name)
     if args.task:
         unknown = sorted(set(args.task) - {t.name for t in tasks})
         if unknown:

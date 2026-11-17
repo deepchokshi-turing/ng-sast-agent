@@ -10,7 +10,8 @@ same tool get distinct names (the job folder is added), and a folder with no
 trials is skipped with a warning instead of stopping the report.
 
 A task's family and role (positive or negative) come from the private variant
-map ``--variants`` (default ``<tasks>/VARIANTS.json`` when present, of the form
+map ``--variants`` (default ``<tasks>/VARIANTS.json`` when present, else
+``<tasks>/../VARIANTS.json`` when ``--tasks`` is one batch folder, of the form
 ``{"<task dir>": {"family": "...", "role": "positive"|"negative"}}``), else
 from a ``task_<family>_<role>`` name, else from the ground truth. The reward
 never decides a role. See tools/report.py.
@@ -197,15 +198,14 @@ def wrong_type_findings(detail: dict, results: list, truth: dict | None) -> list
 
 def full_task_set(tasks_dir: Path | None, variants: dict | None = None) -> dict | None:
     """How many apps (task folders) and app families the whole task set holds, or None when unknown.
-    A task folder holds a task.toml or a tests/ground_truth.json. Families come from the variant map."""
+    A task folder holds a task.toml or a tests/ground_truth.json; it sits in a batch-* folder of the
+    dataset or directly under it (report.task_dirs), and ``tasks_dir`` may be one batch.
+    Families come from the variant map."""
     if tasks_dir is None:
         return None
-    try:
-        names = sorted(p.name for p in Path(tasks_dir).iterdir()
-                       if p.is_dir() and not p.name.startswith((".", "_"))
-                       and ((p / "task.toml").is_file() or (p / "tests" / "ground_truth.json").is_file()))
-    except OSError:
-        return None
+    names = sorted(p.name for p in report.task_dirs(Path(tasks_dir))
+                   if not p.name.startswith((".", "_"))
+                   and ((p / "task.toml").is_file() or (p / "tests" / "ground_truth.json").is_file()))
     if not names:
         return None
     families = None
@@ -1404,7 +1404,7 @@ def coverage_line(data: dict, full: dict | None) -> str:
 
 
 def task_set_size(tasks_dir: Path | None, variants_file: Path | None = None) -> dict | None:
-    """full_task_set with the variant map read from --variants or <tasks>/VARIANTS.json."""
+    """full_task_set with the variant map read from --variants or the default (report.default_variants)."""
     if tasks_dir is None:
         return None
     return full_task_set(tasks_dir, report.load_variants(report.default_variants(tasks_dir, variants_file)))
@@ -1986,9 +1986,11 @@ CSV_COLUMNS = ["tool", "task", "family", "role", "status", "reward", "tp", "fp",
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("jobs", type=Path, nargs="+", help="Harbor job dirs or jobs folders, one per tool")
-    parser.add_argument("--tasks", type=Path, help="folder holding the task directories, for ground truth")
+    parser.add_argument("--tasks", type=Path, help="dataset folder (task directories in its batch-* folders, or directly under it) "
+                        "or one batch folder, for ground truth")
     parser.add_argument("--variants", type=Path,
-                        help="private map of task dir to family and role (default: <tasks>/VARIANTS.json)")
+                        help="private map of task dir to family and role (default: <tasks>/VARIANTS.json, "
+                             "else the one in <tasks>/.. when --tasks is one batch)")
     parser.add_argument("--out", type=Path, help="write eval_report.md, .json, .html, trials.csv and charts/*.svg here")
     args = parser.parse_args()
 

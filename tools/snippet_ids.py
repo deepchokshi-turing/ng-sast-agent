@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Stamp every location in each task's ground truth with a stable snippet id and hash.
 
-    python tools/snippet_ids.py <harbor-tasks dir> [--task NAME ...] [--check]
+    python tools/snippet_ids.py <tasks dir> [--task NAME ...] [--check]
+
+<tasks dir> is a flat tasks directory, one batch folder (tasks/batch-N) or the
+dataset root, whose batch-*/ folders are then searched as well (task folder
+names are unique across batches).
 
 Every object in ``tests/ground_truth.json`` that has a ``file`` and a
 ``start_line`` (primary and alternative locations, path steps and their
@@ -95,13 +99,23 @@ def process(task: Path, check: bool) -> list[str]:
     return problems
 
 
+def task_dirs(root: Path) -> list[Path]:
+    """Folders directly in root, plus those in root/batch-*/ (the dataset root of the batch layout)."""
+    dirs = [d for d in root.iterdir() if d.is_dir()]
+    for batch in sorted(root.glob("batch-*")):
+        if batch.is_dir():
+            dirs += [d for d in batch.iterdir() if d.is_dir()]
+    return dirs
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("root", type=Path, help="harbor-tasks directory")
+    ap.add_argument("root", type=Path, help="tasks directory, batch folder or dataset root")
     ap.add_argument("--task", action="append", default=[], help="only this task folder (repeatable)")
     ap.add_argument("--check", action="store_true", help="write nothing, exit 1 when a file would change")
     args = ap.parse_args()
-    tasks = sorted(p for p in args.root.iterdir() if (p / "tests" / "ground_truth.json").is_file())
+    tasks = sorted((p for p in task_dirs(args.root) if (p / "tests" / "ground_truth.json").is_file()),
+                   key=lambda p: p.name)
     if args.task:
         tasks = [t for t in tasks if t.name in args.task]
     bad = 0
