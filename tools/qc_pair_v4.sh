@@ -1,15 +1,29 @@
 #!/usr/bin/env bash
 # Mechanical QC of one v4 task pair (port of _poc/SAST_QC/run_mechanical_qc.sh for the v4 layout).
 #
-#   bash ng-sast-agent/tools/qc_pair_v4.sh <dataset> <family> [--skip-docker] [--skip-harbor] [--clean-build]
-#                                          [--no-write-provenance]
+#   bash ng-sast-agent/tools/qc_pair_v4.sh <pair folder> [options]              (tasker: a downloaded pair)
+#   bash ng-sast-agent/tools/qc_pair_v4.sh <dataset> <family> [options]         (lead: the build dataset)
 #
-# <dataset> is the dataset root (tasks/, whose batch-N/ folders hold the families) or one batch
+# Options: --skip-docker --skip-harbor --clean-build --no-write-provenance --tasker --lead
+#
+# Tasker mode (a pair downloaded from the platform, e.g. my_tasks/<family> holding <family>-a and
+# <family>-b): the family is the folder's name. It is chosen automatically when the build folder
+# <family>/_work/ holds none of slot.json, fix.diff or upstream-* (scaffold_pair.py writes them,
+# downloads never have them), or with --tasker; --lead forces lead mode. In tasker mode the script never modifies the task folders (it checks this at the end), writes
+# its report to <pair folder>/qc/qc.md, takes vocabulary.json from ng-sast-agent/task_format/ and the
+# VARIANTS entries from the twins' own tests/evaluator_view.json when no VARIANTS.json is at hand, and
+# reports leak-scan hits that only the missing upstream trees could clear as WARN with a link to the
+# upstream file to check. To refresh snippet ids, hashes, the oracle and the views after a label edit,
+# run tools/regen_pair_v4.sh (an explicit, separate step).
+#
+# Lead mode: <dataset> is the dataset root (tasks/, whose batch-N/ folders hold the families) or one batch
 # folder (tasks/batch-N), or an old flat dataset; relative paths are tried from the current
 # directory, then from the repository root. The family's folder holding <family>-a (positive),
 # <family>-b (negative) and <family>/_work is <dataset>/<family>-a if present, else the one
 # <dataset>/batch-*/ that holds it (none or several is an error). VARIANTS.json and
-# vocabulary.json are read from that folder, else its parent. Writes <family>/_work/qc.md and
+# vocabulary.json are read from that folder, else its parent (vocabulary.json else from
+# ng-sast-agent/task_format/; VARIANTS entries else from the twins' evaluator views, else task.toml).
+# Writes <family>/_work/qc.md and
 # exits 1 when any check FAILs. Runs in Git Bash on Windows (docker volume paths go through
 # cygpath) and in plain bash elsewhere.
 #
@@ -29,27 +43,38 @@
 # views (TODO markers, leak scan, export_views --check) on fresh copies; their result is part
 # of qc.md, and if one fails the three files are restored. Rerunning on an unchanged pair
 # changes nothing but the date. --no-write-provenance leaves the task files untouched.
+#
+# Docker must be running unless --skip-docker is given (checked first). The local Harbor run gets
+# PROMPTFOO_TOKEN exported (empty unless already set), which Harbor 0.26 needs to start the trial.
 set -uo pipefail
 
 usage() { awk 'NR > 1 && !/^#/ { exit } NR > 1' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
-[ $# -ge 2 ] || usage
-DATASET_IN="$1"; FAM="$2"; shift 2
-SKIP_DOCKER=0; SKIP_HARBOR=0; CLEAN_BUILD=0; WRITE_PROV=1
-FLAGS="$*"
+POS=(); SKIP_DOCKER=0; SKIP_HARBOR=0; CLEAN_BUILD=0; WRITE_PROV=1; TASKER=0
+FLAGS=""
 for arg in "$@"; do
   case "$arg" in
     --skip-docker) SKIP_DOCKER=1; SKIP_HARBOR=1 ;;
     --skip-harbor) SKIP_HARBOR=1 ;;
     --clean-build) CLEAN_BUILD=1 ;;
     --no-write-provenance) WRITE_PROV=0 ;;
-    *) usage ;;
+    --tasker) TASKER=1 ;;
+    --lead) TASKER=-1 ;;
+    -*) usage ;;
+    *) POS+=("$arg"); continue ;;
   esac
+  FLAGS="${FLAGS:+$FLAGS }$arg"
 done
+case ${#POS[@]} in
+  1) DATASET_IN="${POS[0]%/}"; FAM="" ;;
+  2) DATASET_IN="${POS[0]}"; FAM="${POS[1]}" ;;
+  *) usage ;;
+esac
 
 HERE="$(cd "$(dirname "$0")" && pwd)"; AG="$(dirname "$HERE")"; ROOT="$(dirname "$AG")"
 if [ -d "$DATASET_IN" ]; then DATASET="$(cd "$DATASET_IN" && pwd)"
 elif [ -d "$ROOT/$DATASET_IN" ]; then DATASET="$(cd "$ROOT/$DATASET_IN" && pwd)"
 else echo "dataset not found: $DATASET_IN" >&2; exit 2; fi
+[ -n "$FAM" ] || FAM="$(basename "$DATASET")"  # one-argument form: the pair folder is named after the family
 # The folder that holds the pair: the dataset itself (flat or a batch folder), else one batch-*/.
 if [ -d "$DATASET/$FAM-a" ] || [ -d "$DATASET/$FAM-b" ]; then TASKDIR="$DATASET"
 else
@@ -62,15 +87,41 @@ shared() { # shared <file name>: path in the task folder, else its parent, else 
   if [ -f "$TASKDIR/$1" ]; then printf '%s' "$TASKDIR/$1"
   elif [ -f "$(dirname "$TASKDIR")/$1" ]; then printf '%s' "$(dirname "$TASKDIR")/$1"; fi
 }
-VARIANTS_FILE="$(shared VARIANTS.json)"; VOCAB_FILE="$(shared vocabulary.json)"
 A="$TASKDIR/$FAM-a"; B="$TASKDIR/$FAM-b"
 for t in "$A" "$B"; do [ -f "$t/task.toml" ] || { echo "not a task: $t" >&2; exit 2; }; done
+# A pair the build tooling scaffolded has <family>/_work/slot.json next to it; a download does not.
+# A pair the build tooling scaffolded has build files in <family>/_work/; a download does not.
+if [ "$TASKER" = 0 ]; then
+  W="$TASKDIR/$FAM/_work"
+  if [ -f "$W/slot.json" ] || [ -f "$W/fix.diff" ] || [ -d "$W/upstream-positive" ] || [ -d "$W/upstream-negative" ]; then
+    TASKER=-1
+  else TASKER=1; fi
+fi
+[ "$TASKER" = 1 ] || TASKER=0
+VARIANTS_FILE="$(shared VARIANTS.json)"; VOCAB_FILE="$(shared vocabulary.json)"
+[ -n "$VOCAB_FILE" ] || VOCAB_FILE="$AG/task_format/vocabulary.json"
+if [ "$TASKER" = 1 ]; then WRITE_PROV=0; fi
+if [ "$SKIP_DOCKER" = 0 ] && ! docker info >/dev/null 2>&1; then
+  echo "Docker is not running (or the docker CLI is not on PATH): start Docker Desktop, wait until it shows" >&2
+  echo "'Engine running', then rerun. To run only the checks that need no Docker, add --skip-docker." >&2
+  exit 2
+fi
+# Harbor 0.26 fails the trial when PROMPTFOO_TOKEN is unset on the host; these runs use no Promptfoo agent.
+export PROMPTFOO_TOKEN="${PROMPTFOO_TOKEN-}"
 PY="$AG/.venv/Scripts/python.exe"; [ -x "$PY" ] || PY="$AG/.venv/bin/python"
 [ -x "$PY" ] || { echo "no tooling venv: run 'uv sync' in $AG" >&2; exit 2; }
 export PYTHONUTF8=1 PYTHONDONTWRITEBYTECODE=1
 TEMPLATE_INSTRUCTION="$AG/task_format/templates/v4/common/instruction.md"
 LANGS_JSON="$AG/task_format/templates/v4/languages.json"
-OUTDIR="$TASKDIR/$FAM/_work"; mkdir -p "$OUTDIR"; OUT="$OUTDIR/qc.md"
+if [ "$TASKER" = 1 ]; then
+  # The report goes next to the pair, never into it: <pair folder>/qc/ (or qc/<family>/ when the folder
+  # holding the pair is not named after the family).
+  if [ "$(basename "$TASKDIR")" = "$FAM" ]; then REPORTDIR="$TASKDIR/qc"; else REPORTDIR="$TASKDIR/qc/$FAM"; fi
+else
+  REPORTDIR="$TASKDIR/$FAM/_work"
+fi
+UPSTREAM_DIR="$TASKDIR/$FAM/_work"
+mkdir -p "$REPORTDIR"; OUT="$REPORTDIR/qc.md"
 
 WORK="$(mktemp -d)"
 cleanup() {
@@ -95,34 +146,24 @@ record() { # record STATUS step detail
 }
 
 # Scratch dataset (flat): the two tasks, a two-entry VARIANTS.json and the vocabulary.
-make_scratch() { # make_scratch <dir>
+make_scratch() { # make_scratch <dir>: prints where the VARIANTS entries came from
   mkdir -p "$1"
   cp -r "$A" "$B" "$1/"
-  if [ -n "$VOCAB_FILE" ]; then cp "$VOCAB_FILE" "$1/"
-  elif [ -f "$ROOT/_poc/harbor-tasks/vocabulary.json" ]; then cp "$ROOT/_poc/harbor-tasks/vocabulary.json" "$1/"; fi
-  "$PY" - "$1" "$FAM" "$VARIANTS_FILE" <<'EOF'
-import json, sys, tomllib
+  cp "$VOCAB_FILE" "$1/vocabulary.json"
+  "$PY" "$HERE/pair_variants.py" "$1" "$FAM" "$VARIANTS_FILE"
+}
+# Fingerprint of every file in both task folders, to prove tasker mode left them as they were.
+fingerprint() { "$PY" - "$A" "$B" <<'EOF'
+import hashlib, sys
 from pathlib import Path
-root, fam = Path(sys.argv[1]), sys.argv[2]
-names = (f"{fam}-a", f"{fam}-b")
-known = {}
-f = Path(sys.argv[3]) if sys.argv[3] else None
-if f and f.is_file():
-    known = json.loads(f.read_text(encoding="utf-8"))
-if all(n in known for n in names):
-    v = {n: known[n] for n in names}
-else:
-    v = {}
-    for letter, role, twin in (("a", "positive", "b"), ("b", "negative", "a")):
-        meta = tomllib.loads((root / f"{fam}-{letter}" / "task.toml").read_text(encoding="utf-8"))["metadata"]
-        v[f"{fam}-{letter}"] = {"family": fam, "family_id": meta.get("family_id"), "role": role,
-                                "twin": f"{fam}-{twin}", "task_id": meta.get("task_id"),
-                                "variant_id": meta.get("variant_id")}
-    print("VARIANTS.json has no entries for this pair; synthesised them from task.toml (a = positive)")
-(root / "VARIANTS.json").write_text(json.dumps(v, indent=2), encoding="utf-8")
+for t in map(Path, sys.argv[1:]):
+    for p in sorted(t.rglob("*")):
+        if p.is_file():
+            print(hashlib.sha256(p.read_bytes()).hexdigest(), f"{t.name}/{p.relative_to(t).as_posix()}")
 EOF
 }
-make_scratch "$WORK/tasks"
+if [ "$TASKER" = 1 ]; then fingerprint > "$WORK/before.txt" || { echo "could not fingerprint the task folders" >&2; exit 2; }; fi
+VARIANTS_SOURCE="$(make_scratch "$WORK/tasks")" || { echo "could not prepare the scratch copy: $VARIANTS_SOURCE" >&2; exit 2; }
 WA="$WORK/tasks/$FAM-a"; WB="$WORK/tasks/$FAM-b"
 
 # Small JSON readers.
@@ -237,14 +278,20 @@ else record SKIP twin-swap "no grader image"; fi
 
 section "Leak scan (tools/leak_scan.py)"
 # Unmodified upstream trees (from scaffold_pair.py): banned words in unchanged upstream code are not hits.
+# A downloaded pair has none: hits only those trees could clear become warnings (--warn-unverified-upstream).
 UPSTREAM_ARGS=()
 for side in positive negative; do
-  u="$OUTDIR/upstream-$side"
+  u="$UPSTREAM_DIR/upstream-$side"
   [ -d "$u" ] && UPSTREAM_ARGS+=(--upstream "$FAM-a=$(winpath "$u")" --upstream "$FAM-b=$(winpath "$u")")
 done
 say "- info: upstream trees for the leak scan: $(( ${#UPSTREAM_ARGS[@]} / 4 )) of 2 found in _work/"
+# Only in tasker mode: a lead pair without upstream trees keeps failing on such hits.
+[ ${#UPSTREAM_ARGS[@]} = 0 ] && [ "$TASKER" = 1 ] && UPSTREAM_ARGS+=(--warn-unverified-upstream)
 res="$("$PY" "$HERE/leak_scan.py" "$WORK/tasks" "${UPSTREAM_ARGS[@]}" 2>&1)"; rc=$?
-if [ $rc = 0 ]; then record PASS leak-scan "no problems"; else record FAIL leak-scan "problems found"; fi
+if [ $rc != 0 ]; then record FAIL leak-scan "problems found"
+elif printf '%s\n' "$res" | grep -q '^    warning: '; then
+  record WARN leak-scan "no problems; $(printf '%s\n' "$res" | grep -c '^    warning: ') banned word(s) in repo code may be unchanged upstream text (no upstream trees here): open each link below and confirm the line is upstream's, not task-authored"
+else record PASS leak-scan "no problems"; fi
 printf '%s\n' "$res" | block
 
 section "Views (tools/export_views.py --check)"
@@ -362,7 +409,7 @@ fi
 
 # --------------------------------------------------------------------------------------------
 section "Local Harbor run: oracle and nop (network policy forced to public)"
-say "This machine's Docker Desktop WSL2 kernel lacks CONFIG_NFT_FIB_INET, so Harbor 0.25's docker environment cannot enforce \`no-network\` or \`allowlist\` and rejects the tasks as written. These runs use scratch copies whose task.toml drops the \`[agent]\` allowlist and sets \`[verifier.environment] network_mode = \"public\"\`; everything else (Dockerfiles, artifacts, separate verifier, grader image) runs as committed. Network isolation itself is therefore NOT verified here (see pilot_v4/README.md)."
+say "This machine's Docker Desktop WSL2 kernel lacks CONFIG_NFT_FIB_INET, so Harbor 0.26's docker environment cannot enforce \`no-network\` or \`allowlist\` and rejects the tasks as written. These runs use scratch copies whose task.toml drops the \`[agent]\` allowlist and sets \`[verifier.environment] network_mode = \"public\"\`; everything else (Dockerfiles, artifacts, separate verifier, grader image) runs as committed. Network isolation itself is therefore NOT verified here (see pilot_v4/README.md)."
 say ""
 if [ "$SKIP_HARBOR" = 1 ]; then record SKIP harbor-run "--skip-harbor or --skip-docker"
 elif ! command -v harbor >/dev/null 2>&1; then record FAIL harbor-run "harbor CLI not found"
@@ -390,7 +437,6 @@ for f in sys.argv[1:]:
         out.append(line)
     open(f, "w", encoding="utf-8", newline="\n").write("\n".join(out) + "\n")
 EOF
-  export PROMPTFOO_TOKEN="${PROMPTFOO_TOKEN-}"
   hrun() { # job agent path n
     (cd "$H" && PYTHONUTF8=1 harbor run -y -q -p "$3" -a "$2" -e docker -o jobs --job-name "$1" -n "$4") > "$H/$1.log" 2>&1
   }
@@ -445,7 +491,8 @@ QC_TOOL="${HERE#"$ROOT"/}/$(basename "$0")${FLAGS:+ $FLAGS}"
 case "$OUT" in "$ROOT"/*) QC_REPORT="${OUT#"$ROOT"/}" ;; *) QC_REPORT="$OUT" ;; esac
 QC_DATE="$(date -u +%Y-%m-%d)"
 PROV_FILES=(validation/provenance.json task_metadata.json tests/evaluator_view.json)
-if [ "$WRITE_PROV" = 0 ]; then PROV_NOTE="not written (--no-write-provenance)"
+if [ "$TASKER" = 1 ]; then PROV_NOTE="not written (tasker mode never modifies the task folders)"
+elif [ "$WRITE_PROV" = 0 ]; then PROV_NOTE="not written (--no-write-provenance)"
 elif [ "$FAILS" != 0 ]; then PROV_NOTE="not written: the checks above have a FAIL"
 else
   section "Provenance qc block (validation/provenance.json of both twins) and re-checks"
@@ -523,11 +570,24 @@ EOF
   fi
 fi
 
+if [ "$TASKER" = 1 ]; then
+  section "Task folders unchanged (tasker mode)"
+  fingerprint > "$WORK/after.txt"
+  if cmp -s "$WORK/before.txt" "$WORK/after.txt"; then
+    record PASS read-only "no file in $FAM-a or $FAM-b was added, removed or changed by this run"
+  else
+    record FAIL read-only "the task folders changed during the run (a tooling bug: report it)"
+    diff "$WORK/before.txt" "$WORK/after.txt" | head -20 | block
+  fi
+fi
+
 # --------------------------------------------------------------------------------------------
 {
   echo "# Mechanical QC (v4): $FAM"
   echo
   echo "Run $(date -u +%Y-%m-%dT%H:%MZ) on \`$TASKDIR\` by \`$QC_TOOL\`. Grader image \`$GRADER\`. Language \`$LANG_KEY\`."
+  echo
+  echo "Mode: $([ "$TASKER" = 1 ] && echo "tasker (read-only)" || echo "lead (build dataset)"). Vocabulary: \`$VOCAB_FILE\`. $VARIANTS_SOURCE."
   echo
   echo "| Status | Check | Detail |"
   echo "|---|---|---|"

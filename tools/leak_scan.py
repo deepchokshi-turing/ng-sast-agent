@@ -43,6 +43,15 @@ For every task folder (one holding task.toml or environment/):
    is not a hit anywhere outside comments, so an import re-pointed at a
    stand-in, the stand-in's own definition or a config key can keep the
    upstream name.
+   With ``--warn-unverified-upstream``, a task that has no upstream tree
+   (a pair downloaded from the platform has no ``_work/``) gets warnings
+   instead of problems for the hits an upstream tree could have cleared:
+   a path under environment/repo/, and a word outside comments in a
+   code file under environment/repo/. Each warning names the upstream
+   file to compare (``source_url`` and ``source_commit`` of
+   validation/provenance.json). Hits in comments, docstrings, prose
+   files and everything outside environment/repo/ stay problems, exactly
+   as with an upstream tree.
 2. Evaluator-only files (ground truth, repro tests, provenance) must not be
    under environment/.
 3. Ground-truth prose must not appear in environment/. Every string in
@@ -406,26 +415,44 @@ def code_part(line: str, spans: list[tuple[int, int]]) -> str:
     return "".join(out).strip()
 
 
-def banned_hits(files: dict[str, bytes], upstream: list[Path] | None = None) -> list[str]:
+def banned_hits(files: dict[str, bytes], upstream: list[Path] | None = None,
+                unverified: list[str] | None = None, source: str | None = None) -> list[str]:
     """Banned words in names and text under environment/.
 
     With ``upstream`` trees (see ``upstream_dirs``), real upstream code is not a hit: a word in a file path
     that exists upstream, or in a line under environment/repo/ that occurs unchanged in the upstream file at
     the same path, outside comments and docstrings. Identifiers, string values and enum members of the
     upstream project stay as they are (renaming them changes functional code). Comments, docstrings, docs and
-    every line the task author wrote are still checked, since that is where prose can state the label."""
+    every line the task author wrote are still checked, since that is where prose can state the label.
+
+    With no upstream tree and an ``unverified`` list, the hits an upstream tree could have cleared (a path under
+    repo/, a word outside comments in a code file under repo/) go to ``unverified`` instead, each with a pointer
+    to the upstream file (``source``: ``<url>@<commit>`` or a GitHub blob URL prefix)."""
     hits = []
     up = _Upstream(upstream) if upstream else None
+    downgrade = up is None and unverified is not None
+
+    def check_upstream(rel: str, line_no: int | None = None) -> str:
+        sub = rel[len("repo/"):]
+        where = f"{source}/{sub}" if source else f"the upstream project's {sub}"
+        if line_no is not None and source and source.startswith("https://github.com/"):
+            where += f"#L{line_no}"
+        return f"check it is unchanged upstream code: {where}"
+
     for rel, data in files.items():
         sub = rel[len("repo/"):] if rel.startswith("repo/") else None
         m = BANNED_RE.search(rel)
         if m and not (up and sub and up.has_path(sub)):
-            hits.append(f"banned word '{m.group(0)}' in path {rel}")
+            if downgrade and sub:
+                unverified.append(f"banned word '{m.group(0)}' in path {rel} (no upstream tree to compare; "
+                                  f"{check_upstream(rel)})")
+            else:
+                hits.append(f"banned word '{m.group(0)}' in path {rel}")
         if b"\0" in data[:4096]:
             continue  # binary
         text = data.decode("utf-8", errors="replace")
         upstream_lines = up.lines(sub) if up and sub else None
-        spans = comment_spans(text, rel) if up else None
+        spans = comment_spans(text, rel) if up or (downgrade and sub) else None
         for n, line in enumerate(text.splitlines(), 1):
             # A line counts as upstream when it is unchanged, or when only its comment was reworded (its code
             # part matches the code part of an upstream line).
@@ -437,6 +464,10 @@ def banned_hits(files: dict[str, bytes], upstream: list[Path] | None = None) -> 
                     continue  # unchanged upstream code
                 if up and not in_comment and up.has_identifier(_identifier_at(line, m)):
                     continue  # an upstream identifier reused in task code (an import, a stand-in, a config key)
+                if downgrade and sub and not in_comment:
+                    unverified.append(f"banned word '{m.group(0)}' at environment/{rel}:{n} outside comments (no "
+                                      f"upstream tree to compare; {check_upstream(rel, n)})")
+                    break
                 hits.append(f"banned word '{m.group(0)}' at environment/{rel}:{n}")
                 break
     return hits
@@ -915,8 +946,28 @@ def scan(root: Path) -> dict[str, list[str]]:
     return scan_paths(root)[0]
 
 
-def scan_paths(root: Path) -> tuple[dict[str, list[str]], dict[str, Path]]:
-    """(problems per task name, task folder per name) for every task under ``root`` (batches included)."""
+def upstream_source(task: Path) -> str | None:
+    """Where the task's upstream code can be read: a GitHub blob URL prefix (``<url>/blob/<commit>``) or
+    ``<url>@<commit>``, from validation/provenance.json; None when it does not say."""
+    try:
+        prov = json.loads((task / "validation" / "provenance.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    url, commit = prov.get("source_url"), prov.get("source_commit")
+    if not isinstance(url, str) or not url:
+        return None
+    url = url.rstrip("/").removesuffix(".git")
+    if not isinstance(commit, str) or not commit:
+        return url
+    return f"{url}/blob/{commit}" if url.startswith("https://github.com/") else f"{url}@{commit}"
+
+
+def scan_paths(root: Path, warnings: dict[str, list[str]] | None = None
+               ) -> tuple[dict[str, list[str]], dict[str, Path]]:
+    """(problems per task name, task folder per name) for every task under ``root`` (batches included).
+
+    With a ``warnings`` dict, hits that only an upstream tree could clear are put there, per task, for tasks
+    that have no upstream tree (see ``banned_hits``)."""
     tasks = find_tasks(root)
     problems = {t.name: [] for t in tasks}
     scanned = _by_name(tasks, problems)
@@ -929,7 +980,9 @@ def scan_paths(root: Path) -> tuple[dict[str, list[str]], dict[str, Path]]:
         files = env_files(t)
         if not files:
             problems[t.name].append("no files under environment/")
-        problems[t.name] += banned_hits(files, upstream_dirs(t)) + visible_file_hits(t) + evaluator_files(files)
+        unverified = warnings.setdefault(t.name, []) if warnings is not None else None
+        problems[t.name] += (banned_hits(files, upstream_dirs(t), unverified, upstream_source(t))
+                             + visible_file_hits(t) + evaluator_files(files))
         problems[t.name] += overlap_problems(t, files) + dockerfile_problems(t) + toml_id_problems(t)
     # Twins are looked up across the whole dataset: when only one batch is scanned, a twin in a sibling
     # batch still takes part in the twin checks (it is not reported itself).
@@ -1134,6 +1187,10 @@ def main() -> int:
     ap.add_argument("--upstream", action="append", default=[], metavar="NAME=DIR",
                     help="unmodified upstream source tree of task folder NAME (repeat for more trees or tasks); "
                          "default: <family>/_work/upstream-positive and -negative next to the task folder")
+    ap.add_argument("--warn-unverified-upstream", action="store_true",
+                    help="for a task with no upstream tree (a downloaded pair), report banned words in "
+                         "environment/repo/ code outside comments, and in repo paths, as warnings that name "
+                         "the upstream file to check, not as problems")
     args = ap.parse_args()
     for item in args.upstream:
         name, sep, path = item.partition("=")
@@ -1146,7 +1203,8 @@ def main() -> int:
         return main_image(args.tasks, args.task, args.tools_image)
     if args.tools_image:
         ap.error("--tools-image needs --image")
-    problems, paths = scan_paths(args.tasks)
+    warnings: dict[str, list[str]] | None = {} if args.warn_unverified_upstream else None
+    problems, paths = scan_paths(args.tasks, warnings)
     if not problems:
         print(f"no task folders under {args.tasks}")
         return 1
@@ -1157,9 +1215,13 @@ def main() -> int:
             ap.error(f"no such task: {', '.join(unknown)}")
         problems = {n: problems[n] for n in args.task}
     for name, items in problems.items():
-        print(f"{name}  {'FAIL' if items else 'pass'}" + (f"  ({len(items)} problems)" if items else ""))
+        warns = (warnings or {}).get(name) or []
+        status = f"FAIL  ({len(items)} problems)" if items else "pass"
+        print(f"{name}  {status}" + (f"  ({len(warns)} warnings)" if warns else ""))
         for item in items:
             print(f"    {item}")
+        for item in warns:
+            print(f"    warning: {item}")
         if args.write_qc:
             write_qc(paths[name], not items)
     failed = sum(1 for v in problems.values() if v)
