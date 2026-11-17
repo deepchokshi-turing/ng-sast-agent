@@ -1,6 +1,6 @@
 # Task pair automation (v4)
 
-Three steps turn a slot of the plan workbook into a registered v4 task pair: scaffold, build, QC. The tools do the mechanical parts (fetching upstream code, laying out the two task folders, ids, ground-truth and oracle skeletons, every check that can be run); the builder does the creative part (trimming the code, stand-ins for third-party libraries, the manifest and fixtures, labels, repro tests).
+Three steps turn a slot of the plan workbook into a registered v4 task pair: scaffold, build, QC. Taskers who download a pair from the platform only need [QC of a downloaded pair](#qc-of-a-downloaded-pair-taskers). The tools do the mechanical parts (fetching upstream code, laying out the two task folders, ids, ground-truth and oracle skeletons, every check that can be run); the builder does the creative part (trimming the code, stand-ins for third-party libraries, the manifest and fixtures, labels, repro tests).
 
 The reference for the layout is the pilot pair `pilot_v4/crewai-file-writer-a` / `-b` (see `pilot_v4/README.md`): separate verifier built from `tests/Dockerfile` on the `sast-grader:3` image, `artifacts = ["/app/output"]`, no-network verifier, agent allowlist, `.harborignore` / `.dockerignore`, `[task]` authors and keywords.
 
@@ -24,7 +24,7 @@ python ng-sast-agent/tools/scaffold_pair.py --slot P001 --family-name ag2-shell-
 |---|---|
 | `--slot` | Plan slot id (sheet "Task slots" of `planning/SAST_500_Plan.xlsx`) |
 | `--family-name` | Kebab-case family name. Default: the repo's short name plus two words of the Weakness (purpose-built slots: `pb-` plus two words), made unique in the dataset. Words that leak_scan bans in task.toml (injection, traversal, bypass, ...) or role words are never used |
-| `--dataset` | Dataset directory, relative to the repository root (default `tasks`); created with `VARIANTS.json` and a copy of `_poc/harbor-tasks/vocabulary.json` if missing. The family goes into the batch folder that `<dataset>/BATCHES.json` gives for the slot (`batch-1` … `batch-10`, `batch-buffer`, `batch-extra`); passing a batch folder such as `tasks/batch-2` also works if it is the slot's batch. A dataset with no `BATCHES.json` and no `batch-*` folders is flat (old layout); `--flat` forces it |
+| `--dataset` | Dataset directory, relative to the repository root (default `tasks`); created with `VARIANTS.json` and a copy of `ng-sast-agent/task_format/vocabulary.json` if missing. The family goes into the batch folder that `<dataset>/BATCHES.json` gives for the slot (`batch-1` … `batch-10`, `batch-buffer`, `batch-extra`); passing a batch folder such as `tasks/batch-2` also works if it is the slot's batch. A dataset with no `BATCHES.json` and no `batch-*` folders is flat (old layout); `--flat` forces it |
 | `--batch` | Put the family in this batch folder instead of the one `BATCHES.json` gives (needed for a slot the map doesn't list, or to move a buffer pair into the batch it replaces) |
 | `--plan` | Another workbook |
 | `--force` | Rewrite an existing family. Keeps its opaque ids from `VARIANTS.json`; everything else, including `_work/`, is regenerated |
@@ -85,7 +85,7 @@ By default `sync_oracle.py` only fills oracle values that are missing or placeho
 bash ng-sast-agent/tools/qc_pair_v4.sh tasks <family> [--skip-docker] [--skip-harbor] [--clean-build] [--no-write-provenance]
 ```
 
-The dataset can be `tasks` (the script finds the batch that holds the family) or a batch folder such as `tasks/batch-2`. Writes `<batch>/<family>/_work/qc.md` (summary table first, details below) and exits 1 on any FAIL. The checks run on copies. When there is no FAIL, the script then writes the `qc` block (tool, date, result, report) into both twins' `validation/provenance.json`, regenerates their views and re-runs the checks that read them (`post-*` rows); if one of those fails, the files are restored. `--no-write-provenance` skips that step.
+This is lead mode: the script picks it when `<batch>/<family>/_work/slot.json` exists (the scaffold writes it). Without that file, or with `--tasker`, it runs in tasker mode (next section). The dataset can be `tasks` (the script finds the batch that holds the family) or a batch folder such as `tasks/batch-2`. Writes `<batch>/<family>/_work/qc.md` (summary table first, details below) and exits 1 on any FAIL. The checks run on copies. When there is no FAIL, the script then writes the `qc` block (tool, date, result, report) into both twins' `validation/provenance.json`, regenerates their views and re-runs the checks that read them (`post-*` rows); if one of those fails, the files are restored. `--no-write-provenance` skips that step.
 
 | Check | Pass condition |
 |---|---|
@@ -96,16 +96,68 @@ The dataset can be `tasks` (the script finds the batch that holds the family) or
 | oracle | `solution/findings.sarif` scores 1.0 on both twins (grader image) |
 | empty-sarif | An empty SARIF scores 0 on the positive and 1.0 on the negative |
 | twin-swap | The positive's oracle scores 0 against the negative's truth |
-| leak-scan | `tools/leak_scan.py` on the pair (VARIANTS entries and vocabulary of the dataset) |
+| leak-scan | `tools/leak_scan.py` on the pair (VARIANTS entries and vocabulary of the dataset; banned words in unchanged upstream code are cleared with the `_work/upstream-*` trees) |
 | export-views | `tools/export_views.py --check` |
 | twin-diff | `environment/` of the twins differs exactly in the positive's `fix_changed_files` (WARN when a listed file is identical) |
 | instruction | Twins byte-identical; identical to the v4 template except the scope sentence, which must match task.toml (WARN otherwise) |
 | harbor-lint | `harbor lint` on both, no findings |
 | repro | `validation/repro_test.py` of each twin passes on its own code and fails on the twin's, `--network none`, in `python:3.12-slim` (Python) or in the twin's own environment image (other languages) |
-| harbor-run | Harbor 0.25 local run: oracle 1.0 on both, nop 0.0 on both (no SARIF is no answer) |
+| harbor-run | Harbor 0.26 local run: oracle 1.0 on both, nop 0.0 on both (no SARIF is no answer). The script exports `PROMPTFOO_TOKEN` (empty unless already set), which Harbor needs to start a trial |
 | clean-build | Optional: `tools/check_clean_build.py` (build, test, entrypoint in fresh no-network containers) |
 
 The Harbor run uses scratch copies whose task.toml drops the `[agent]` allowlist and sets `[verifier.environment] network_mode = "public"`: this machine's Docker Desktop WSL2 kernel lacks `CONFIG_NFT_FIB_INET`, so Harbor's docker environment cannot enforce `no-network` / `allowlist` and rejects the tasks as written. Network isolation is not verified locally; qc.md says so.
+
+The script checks first that Docker is running (`docker info`) and stops with a message if it is not; `--skip-docker` runs only the checks that need no Docker.
+
+## QC of a downloaded pair (taskers)
+
+A pair downloaded from the eval platform is two folders, `<family>-a` and `<family>-b`, with no `_work/`, `VARIANTS.json` or `vocabulary.json`. Put them in a folder named after the family (for example `my_tasks/<family>/<family>-a` and `my_tasks/<family>/<family>-b`), start Docker Desktop, and from the repository root run in Git Bash:
+
+```bash
+bash ng-sast-agent/tools/qc_pair_v4.sh my_tasks/<family> --clean-build
+```
+
+That is the whole command: nothing has to be copied in and no environment variable has to be set. Prerequisites are the same as for the lead (Setup above): the tooling venv (`uv sync` in `ng-sast-agent`), Harbor 0.26.0, Docker Desktop running and the grader image tag present.
+
+Tasker mode is chosen automatically because the download has no `<family>/_work/slot.json` (`--tasker` forces it). In tasker mode the script:
+
+- never modifies the two task folders: every check runs on copies, no `qc` block is written to `provenance.json`, no view is regenerated, and the last check (`read-only`) compares a SHA-256 of every file in both folders before and after the run and FAILs if anything changed;
+- writes its report to `my_tasks/<family>/qc/qc.md` (when the folder holding the pair is not named after the family: `<folder>/qc/<family>/qc.md`); the console shows the FAIL, WARN and SKIP rows;
+- reads `vocabulary.json` from the pair's folder or its parent when present, else the copy shipped in `ng-sast-agent/task_format/vocabulary.json`;
+- takes the pair's `VARIANTS.json` entries (opaque task ids, roles, twin) from a `VARIANTS.json` in the pair's folder or its parent when it lists both twins, else from each twin's own `tests/evaluator_view.json` (`variant_map_entry`), else from `task.toml` (a = positive); the report's "Mode" line says which;
+- runs the leak scan with `--warn-unverified-upstream` (below).
+
+What each row of the report means for a tasker:
+
+| Check | What it tells you | If it is not PASS |
+|---|---|---|
+| todo | No scaffold placeholder (`TODO`, `_todo`) is left in the task files | Report it: the pair was shipped unfinished |
+| grader-image | The grader image named in `tests/Dockerfile` is available locally | Build or load it (`grader_image/README.md`); the grading checks below are skipped until then |
+| check-truth | Every ground-truth location points at real lines, and each line hash still matches the code | A label points at the wrong lines, or the code changed under it |
+| snippet-ids | Every location's `snippet_id` and `snippet_sha256` are current | After a label edit: run `regen_pair_v4.sh` (below) |
+| oracle | The reference answer `solution/findings.sarif` scores 1.0 on both versions | The answer key and the reference answer disagree |
+| empty-sarif | No answer scores 0 on -a (vulnerable) and 1.0 on -b (fixed) | The answer keys do not separate the versions |
+| twin-swap | -a's reference answer scores 0 against -b's answer key | -b would reward reporting the fixed bug |
+| leak-scan | No label text reaches what a scanner can see (banned words, ground-truth prose, evaluator files, twin differences, task.toml ids and vocabulary) | FAIL: a real leak to report. WARN: see below |
+| export-views | `task_metadata.json` and `tests/evaluator_view.json` are what `export_views.py` writes from the current files | After a label edit: run `regen_pair_v4.sh` |
+| twin-diff | `environment/` of the two versions differs exactly in the fix files the answer key lists | The versions differ in more than the fix (or not at all) |
+| instruction-twins / instruction-template | `instruction.md` is identical in both versions and matches the template, scope sentence included | WARN: the scope sentence does not match `scanner_roots` / `excluded_paths` |
+| harbor-lint | `harbor lint` finds nothing | Read the findings in the report |
+| repro | Each version's `validation/repro_test.py` passes on its own code and fails on the other's, with no network | The repro tests do not show the contrast |
+| harbor-run | A local Harbor 0.26 run scores the reference answer 1.0 and an empty agent 0.0 on both versions | Read the log tails in the report |
+| clean-build | With `--clean-build`: build, tests and entrypoint pass in fresh no-network containers | The task does not build or run from its own files |
+| read-only | The run left both task folders byte for byte as they were | A tooling bug: report it |
+
+**Leak-scan WARN.** The lead's build keeps the unmodified upstream trees in `<family>/_work/`, and the leak scan uses them to clear banned words (`fixed`, `patch`, `bypass`, ...) that sit in unchanged upstream code. A download has no such trees, so with `--warn-unverified-upstream` a banned word in `environment/repo/` code outside comments, or in a repo file path, is a warning instead of a FAIL. Each warning ends with a link to the same file and line at the upstream commit (`source_url` and `source_commit` of `validation/provenance.json`). Open it: if the line is the same upstream, the hit is fine; if the line is task-authored, report it as a leak. Hits in comments, docstrings, prose files and everything outside `environment/repo/` are still a FAIL, exactly as in the lead's run.
+
+**After editing labels.** QC never writes into the pair. When you have edited `tests/ground_truth.json` (or the code under a label), refresh the generated parts explicitly, then run QC again:
+
+```bash
+bash ng-sast-agent/tools/regen_pair_v4.sh my_tasks/<family> --check
+bash ng-sast-agent/tools/regen_pair_v4.sh my_tasks/<family>
+```
+
+`regen_pair_v4.sh` works on a scratch copy and runs `tools/snippet_ids.py` (snippet ids and hashes), `tools/label_rules/sync_oracle.py` (the reference answer follows the answer key; no `--overwrite`) and `tools/export_views.py` (both views). Only when all three succeed does it copy back the files whose bytes changed, and it lists each one; `--check` only lists them and exits 1 when any would change. If a step needs a human decision (for example `sync_oracle.py` cannot fill a value), nothing is copied back.
 
 ## 4. Register
 
@@ -126,7 +178,7 @@ Not automated. When qc.md has no FAIL: record the QC outcome in each `validation
 
 ## Known gaps
 
-- `vocabulary.json` (copied from the POC) lists only `python` under `languages` and only the POC frameworks. The language templates write `typescript`, `go`, `java`, `csharp` and `rust`, which leak_scan rejects until the dataset's vocabulary.json is extended (a controlled-vocabulary decision, not made by the tool). Java/Kotlin slots get `java` and `TypeScript/JavaScript` slots get `typescript`; change them per task when the code is Kotlin or JavaScript.
+- `ng-sast-agent/task_format/vocabulary.json` is a copy of `tasks/vocabulary.json`; when the dataset's vocabulary changes, copy it again (`tests/test_tasker_qc.py` fails while they differ). Java/Kotlin slots get `java` and `TypeScript/JavaScript` slots get `typescript`; change them per task when the code is Kotlin or JavaScript.
 - `instruction.md` is the v4 template (`common/instruction.md`, the pilot's text) with its scope sentence written from the language's `scanner_roots` and the merged `excluded_paths`, in the wording QC expects. When the builder changes `scanner_roots` / `excluded_paths` in task.toml (they usually do: upstream layouts rarely match the defaults), they edit that sentence the same way in both twins; QC reports a mismatch as WARN.
 - Upstream paths (for example `ag2/tools/...`) rarely match the default `scanner_roots` (`src`, ...). The builder either keeps the upstream layout and changes the roots or re-roots the code and remaps the prefilled locations.
 - The default family name is a heuristic; pass `--family-name` for anything that will be kept.

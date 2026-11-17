@@ -1,0 +1,59 @@
+{
+  "vocabulary_version": "0.1",
+  "_about": "Controlled values for the task.toml [metadata] fields of spec 5.2 (languages, frameworks, architecture, source_origin). tools/leak_scan.py fails a task whose value is not listed here. package_versions values must be exact version strings (no range operators); python is the exact interpreter version in the task image.",
+  "source_origin": [
+    "adapted_open_source",
+    "purpose_built_synthetic"
+  ],
+  "languages": [
+    "csharp",
+    "go",
+    "java",
+    "javascript",
+    "kotlin",
+    "python",
+    "rust",
+    "typescript"
+  ],
+  "frameworks": [
+    "ag2",
+    "bedrock-agentcore",
+    "crewai",
+    "deepagents",
+    "effect",
+    "fastmcp",
+    "hermes-agent",
+    "langchain",
+    "langchain-core",
+    "langchain-openai",
+    "langflow",
+    "langfuse",
+    "langgraph",
+    "langroid",
+    "litellm",
+    "mcp",
+    "openhands",
+    "openharness",
+    "opentelemetry",
+    "praisonaiagents",
+    "pydantic-ai",
+    "react",
+    "vercel-ai-sdk"
+  ],
+  "architecture": [
+    "batch_agent_pipeline",
+    "llm_chain",
+    "multi_agent",
+    "single_agent",
+    "single_agent_rag",
+    "single_agent_tool_calling"
+  ],
+  "architecture_descriptions": {
+    "batch_agent_pipeline": "An agent or chain run once per input record in a batch job (for example one model call per CSV row).",
+    "llm_chain": "A fixed chain or prompt pipeline around a model call, with no agent loop choosing tools.",
+    "multi_agent": "Two or more agents that hand work or messages to each other.",
+    "single_agent": "One agent loop without tools that reach outside the process (instructions, validation, tracing).",
+    "single_agent_rag": "One agent whose tools retrieve documents or web pages into the model context.",
+    "single_agent_tool_calling": "One agent that calls tools acting on files, code, URLs, databases or other resources."
+  }
+}

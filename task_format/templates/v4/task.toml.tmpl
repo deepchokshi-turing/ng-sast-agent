@@ -80,6 +80,6 @@ memory_mb = @@MEMORY_MB@@
 # Declared so the platform forwards this project secret to Harbor's host process, where the
 # Promptfoo agent reads it; not used by the grader (v4 removed it from [verifier.env], so the
 # verifier never sees it). Values here are in the task container's environment for the whole
-# trial. Harbor 0.25 fails the trial when PROMPTFOO_TOKEN is unset on the host; set it empty
-# (PROMPTFOO_TOKEN=) for runs that do not use the Promptfoo agent.
+# trial. Harbor (0.25 and 0.26) fails the trial when PROMPTFOO_TOKEN is unset on the host; set
+# it empty (PROMPTFOO_TOKEN=) for runs that do not use the Promptfoo agent.
 PROMPTFOO_API_KEY = "${PROMPTFOO_TOKEN}"

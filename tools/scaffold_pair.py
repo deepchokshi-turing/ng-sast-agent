@@ -49,7 +49,7 @@ Reads the slot's row from the "Task slots" sheet of the plan workbook and writes
   marked ``TODO``. Paths written into the generated text name the real folder (e.g.
   ``tasks/batch-2/<family>``).
 * ``<root>/VARIANTS.json`` (evaluator-only twin map with the opaque ids) and, when missing,
-  ``<root>/vocabulary.json`` (a copy of ``_poc/harbor-tasks/vocabulary.json``).
+  ``<root>/vocabulary.json`` (a copy of ``ng-sast-agent/task_format/vocabulary.json``).
 
 Third-party code is only fetched and exported (``git clone --filter=blob:none --no-checkout``,
 ``git fetch``, ``git archive``, ``git diff``); nothing from the repository is installed, built or
@@ -93,7 +93,8 @@ ROOT = AGENT_ROOT.parent
 TEMPLATES = AGENT_ROOT / "task_format" / "templates" / "v4"
 DEFAULT_PLAN = ROOT / "planning" / "SAST_500_Plan.xlsx"
 CACHE = ROOT / ".cache" / "repos"
-POC_VOCABULARY = ROOT / "_poc" / "harbor-tasks" / "vocabulary.json"
+#: The controlled vocabulary shipped with the tooling (a copy of tasks/vocabulary.json).
+POC_VOCABULARY = AGENT_ROOT / "task_format" / "vocabulary.json"
 SHEET = "Task slots"
 BATCHES = "BATCHES.json"
 BATCH_DIR = re.compile(r"batch-[a-z0-9]+(-[a-z0-9]+)*")
