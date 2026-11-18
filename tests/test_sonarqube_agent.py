@@ -295,21 +295,23 @@ def test_happy_path_token_only_in_a_file(tmp_path, server_env):
                                             "sonar-scanner.log"}
 
 
-def test_recorded_mapped_result_reaches_the_sarif(tmp_path, server_env):
-    """The real dc4b7a negative run: two python:S5332 issues (CWE-200, 319) become LLM02.SID.HIGH under cwe-map-4."""
+def test_recorded_s5332_is_not_disclosure_under_cwe_map_5(tmp_path, server_env):
+    """The real dc4b7a negative run: two python:S5332 issues (CWE-200, 319).
+
+    cwe-map-4 emitted both as LLM02.SID.HIGH, and the one at safe_requests.py:77
+    failed the negative next to the fix. cwe-map-5 treats clear-text transport
+    as not disclosure, so both are dropped and counted under CWE-319.
+    """
     sandbox = FakeSandbox(recorded="task_dc4b7a_negative")
     _, context, go = run_agent(tmp_path, sandbox)
     asyncio.run(go())
     meta = context.metadata
-    assert meta["status"] == "ok" and meta["cwe_map"] == "cwe-map-4"
-    assert meta["results_by_cwe_decision"] == {"none": 0, "unmapped": 0, "mapped": 2, "ambiguous": 0}
+    assert meta["status"] == "ok" and meta["cwe_map"] == "cwe-map-5"
+    assert meta["results_by_cwe_decision"] == {"none": 0, "unmapped": 2, "mapped": 0, "ambiguous": 0}
     results = json.loads(sandbox.files["/app/output/findings.sarif"])["runs"][0]["results"]
-    assert [(r["ruleId"], r["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
-             r["locations"][0]["physicalLocation"]["region"]["startLine"]) for r in results] == [
-        ("LLM02.SID.HIGH", "src/crewai_rag_web_mini/_compat/requests.py", 115),
-        ("LLM02.SID.HIGH", "src/crewai_rag_web_mini/security/safe_requests.py", 77),
-    ]
-    assert all(r["properties"]["cwe"] == ["CWE-200", "CWE-319"] and "codeFlows" not in r for r in results)
+    assert results == []
+    assert meta["unmapped_by_cwe"] == {"CWE-319": 2}
+    assert meta["results_emitted"] == 0
     assert meta["sonarqube"]["findings_by_sonar_type"] == {"VULNERABILITY": 2, "SECURITY_HOTSPOT": 0}
     assert_token_nowhere(tmp_path, sandbox, context)
 
@@ -386,11 +388,19 @@ def test_every_tool_step_runs_under_timeout_within_one_budget(tmp_path, server_e
     assert deadline <= bounded_seconds(collect) - 30
 
 
+def assert_outcome(context, sandbox, reason: str, pattern: str) -> None:
+    """A tool outcome: a normal return, no SARIF, the reason in the metadata."""
+    meta = context.metadata
+    assert meta["status"] == "tool_outcome" and meta["tool_outcome"]["reason"] == reason
+    assert re.search(pattern, meta["tool_outcome"]["message"]), meta["tool_outcome"]["message"]
+    assert "/app/output/findings.sarif" not in sandbox.files
+
+
 def test_too_small_a_budget_fails_before_the_scanner(tmp_path, server_env):
     sandbox = FakeSandbox()
     _, context, go = run_agent(tmp_path, sandbox, scan_budget_sec=100)
-    with pytest.raises(ScannerError, match="budget"):
-        asyncio.run(go())
+    asyncio.run(go())
+    assert_outcome(context, sandbox, "deadline", "budget")
     assert not sandbox.commands_with("/bin/sonar-scanner")
     assert not sandbox.commands_with("fetch.py delete")  # no project was created
 
@@ -409,8 +419,8 @@ def test_budget_spent_by_the_scanner_still_deletes_the_project(tmp_path, server_
     monkeypatch.setattr(agent_module, "time", types.SimpleNamespace(monotonic=clock.monotonic))
     sandbox = FakeSandbox(clock=clock, scanner_seconds=590)
     _, context, go = run_agent(tmp_path, sandbox, scan_budget_sec=600)
-    with pytest.raises(ScannerError, match="ran out before collecting the results"):
-        asyncio.run(go())
+    asyncio.run(go())
+    assert_outcome(context, sandbox, "deadline", "ran out before collecting the results")
     assert not sandbox.commands_with("fetch.py collect")
     (delete, _, delete_exec), = sandbox.commands_with("fetch.py delete")
     # Cleanup gets its fixed slice although no budget is left.
@@ -424,8 +434,8 @@ def test_collect_timeout_deletes_the_project(tmp_path, server_env):
     sandbox = FakeSandbox(collect_exit=124, collect_stdout="[fetch] still waiting")
     _, context, go = run_agent(tmp_path, sandbox)
     sandbox.document["deleted"] = False  # killed before its own delete ran
-    with pytest.raises(ScannerError, match="collecting the SonarQube results ran out of time"):
-        asyncio.run(go())
+    asyncio.run(go())
+    assert_outcome(context, sandbox, "deadline", "collecting the SonarQube results ran out of time")
     assert sandbox.commands_with("fetch.py delete")
     assert context.metadata["sonarqube"]["deleted"] is True
     assert_token_nowhere(tmp_path, sandbox, context)
@@ -567,16 +577,17 @@ def _failed_task(status):
     return edit
 
 
-@pytest.mark.parametrize("status, exit_code", [("FAILED", 4), ("CANCELED", 4), ("PENDING", 5)])
-def test_background_task_not_success_is_an_error(tmp_path, server_env, status, exit_code):
-    """No recording of a failed task: the recorded document with its task status changed."""
+@pytest.mark.parametrize("status, exit_code, reason", [("FAILED", 4, "tool_crashed"), ("CANCELED", 4, "tool_crashed"),
+                                                      ("PENDING", 5, "deadline")])
+def test_background_task_not_success_is_an_error(tmp_path, server_env, status, exit_code, reason):
+    """No recording of a failed task: the recorded document with its task status changed. The server's
+    analysis failing or not finishing in time is a tool outcome: scored 0, not re-run."""
     sandbox = FakeSandbox(collect_exit=exit_code, collect_stdout=f"[fetch] ERROR: the background task ended {status}",
                           edit_document=_failed_task(status))
     _, context, go = run_agent(tmp_path, sandbox)
-    with pytest.raises(ScannerError, match=f"collecting the SonarQube results failed \\(exit {exit_code}\\).*{status}"):
-        asyncio.run(go())
+    asyncio.run(go())
+    assert_outcome(context, sandbox, reason, f"collecting the SonarQube results failed \\(exit {exit_code}\\).*{status}")
     meta = context.metadata
-    assert meta["status"] == "error"
     assert meta["sonarqube"]["ce_task"]["status"] == status and meta["sonarqube"]["deleted"] is True
     assert not sandbox.commands_with("fetch.py delete")  # fetch.py already deleted it
     assert "/app/output/findings.sarif" not in sandbox.files
@@ -588,8 +599,8 @@ def test_scanner_timeout_is_an_error_and_cleans_up(tmp_path, server_env):
     """No recording: sonar-scanner stopped by ``timeout`` (exit 124)."""
     sandbox = FakeSandbox(scanner_exit=124, scanner_stdout="INFO: still indexing")
     _, context, go = run_agent(tmp_path, sandbox)
-    with pytest.raises(ScannerError, match="ran out of time"):
-        asyncio.run(go())
+    asyncio.run(go())
+    assert_outcome(context, sandbox, "deadline", "ran out of time")
     assert sandbox.commands_with("fetch.py delete")
     # The delete after a timeout is recorded in the metadata, not in a throwaway dict.
     assert context.metadata["sonarqube"]["deleted"] is True
@@ -611,21 +622,26 @@ def _no_active_rules(document):
     document["quality_profiles"]["profiles"][0]["activeRuleCount"] = 0
 
 
-@pytest.mark.parametrize("sandbox_args, message", [
+@pytest.mark.parametrize("sandbox_args, message, outcome", [
     ({"measures": None, "edit_document": lambda d: d.update(measures=measures_response(d["project_key"], 0, 0, ""))},
-     "analysed 0 files"),
+     "analysed 0 files", True),
     ({"edit_document": lambda d: d.update(measures=measures_response(d["project_key"], 3, 40, "xml=40"))},
-     "holds 4 Python files but SonarQube analysed no Python"),
-    ({"edit_document": lambda d: d.update(measures=None)}, "measures .* were not read"),
-    ({"edit_document": _no_active_rules}, "'Sonar way' has no active rules"),
-    ({"edit_document": lambda d: d.update(quality_profiles={"profiles": []})}, "no Python quality profile"),
+     "holds 4 Python files but SonarQube analysed no Python", True),
+    # The server's setup, not the tool on this code: infrastructure errors.
+    ({"edit_document": lambda d: d.update(measures=None)}, "measures .* were not read", False),
+    ({"edit_document": _no_active_rules}, "'Sonar way' has no active rules", False),
+    ({"edit_document": lambda d: d.update(quality_profiles={"profiles": []})}, "no Python quality profile", False),
 ])
-def test_a_scan_that_analysed_nothing_is_an_error(tmp_path, server_env, sandbox_args, message):
+def test_a_scan_that_analysed_nothing_is_an_error(tmp_path, server_env, sandbox_args, message, outcome):
     """No recording analysed nothing: the recorded document with its measures or profile changed."""
     sandbox = FakeSandbox(**sandbox_args)
     _, context, go = run_agent(tmp_path, sandbox)
-    with pytest.raises(ScannerError, match="SonarQube did not analyse the code: .*" + message):
+    if outcome:
         asyncio.run(go())
+        assert_outcome(context, sandbox, "tool_saw_nothing", "SonarQube did not analyse the code: .*" + message)
+    else:
+        with pytest.raises(ScannerError, match="SonarQube did not analyse the code: .*" + message):
+            asyncio.run(go())
     assert "/app/output/findings.sarif" not in sandbox.files
     assert context.metadata["sonarqube"]["deleted"] is True
     assert_token_nowhere(tmp_path, sandbox, context)
@@ -754,3 +770,14 @@ def test_hotspot_rule_counts_reach_the_metadata(tmp_path, server_env):
     assert sonar["hotspot_rules_total"] == 0 and sonar["hotspot_rules_active"] == 0
     assert sonar["hotspot_rules_qprofile"] == sandbox.document["quality_profiles"]["profiles"][0]["key"]
     assert sonar["hotspot_rules_error"] is None
+
+
+def test_sonar_scanner_failing_on_the_code_is_a_tool_outcome(tmp_path, server_env):
+    """A non-zero exit with no sign of a server or network problem: the tool on this code, scored 0."""
+    sandbox = FakeSandbox(scanner_exit=2, scanner_stdout="ERROR: Error during SonarScanner execution\n"
+                                                         "ERROR: java.lang.StackOverflowError")
+    _, context, go = run_agent(tmp_path, sandbox)
+    asyncio.run(go())
+    assert_outcome(context, sandbox, "tool_crashed", "sonar-scanner exited 2")
+    assert sandbox.commands_with("fetch.py delete")
+    assert_token_nowhere(tmp_path, sandbox, context)

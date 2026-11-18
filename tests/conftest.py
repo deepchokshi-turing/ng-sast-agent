@@ -10,11 +10,8 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "tests" / "fixtures"
-#: Sample tasks the tests run against, tracked in git. dev/tasks is a local,
-#: untracked working area. These are a copy of it and are what the tests read.
+#: Sample tasks the tests run against, tracked in git. Harbor can run them in place.
 SAMPLE_TASKS = FIXTURES / "tasks"
-#: Old name, kept for test modules that still import it.
-DEV_TASKS = SAMPLE_TASKS
 
 # The sample tasks carry their own repos and repro tests. They are data here,
 # not part of this suite.

@@ -45,6 +45,7 @@ PARTS = {
     "semgrep": ("bin", "venv", "python", "rules", "rules-merged", "install.json"),
     "codeql": ("codeql",),
     "sonar-scanner": ("sonar-scanner",),
+    "claude-review": ("claude-review",),
 }
 
 #: Which pins key holds each tool's version.
@@ -52,6 +53,7 @@ VERSION_KEYS = {
     "semgrep": "semgrep_version",
     "codeql": "codeql_version",
     "sonar-scanner": "sonar_scanner_version",
+    "claude-review": "claude_code_version",
 }
 
 

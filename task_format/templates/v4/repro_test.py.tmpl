@@ -1,0 +1,43 @@
+"""Reproduction assertions for @@FOLDER@@. Evaluator only.
+
+    python3 validation/repro_test.py
+
+TODO(builder): describe the trigger and the observable outcome (canary written, read or sent).
+The tests find the code at ../environment/repo. QC runs this file against this twin's code (it
+must pass) and against the twin's code (it must fail) with no network.
+
+@@LANGUAGE_NOTE@@
+"""
+
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[1] / "environment" / "repo"
+sys.path.insert(0, str(REPO / "src"))
+
+CANARY = "CNRY-TODO"
+
+
+class ReproBase(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+
+class @@CLASS@@(ReproBase):
+    def test_TODO(self):
+        # TODO(builder): drive the labelled path deterministically (stub model, no network) and
+        # assert the outcome. @@ASSERT_HINT@@
+        self.fail("TODO(builder): write the reproduction")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

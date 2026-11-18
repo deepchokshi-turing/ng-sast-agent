@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from sast import manifest
+from sast.claude_review import pins as claude_review_pins
 from sast.codeql import pins as codeql_pins
 from sast.semgrep import pins as semgrep_pins
 from sast.sonarqube import pins as sonar_pins
@@ -22,7 +23,8 @@ from tests.conftest import ROOT
 
 DOCKERFILE = ROOT / "images" / "sast-tools" / "Dockerfile"
 BUILD_SCRIPT = ROOT / "tools" / "build_tools_image.sh"
-ALL_PINS = {"semgrep": semgrep_pins.as_dict(), "codeql": codeql_pins.as_dict(), "sonar-scanner": sonar_pins.as_dict()}
+ALL_PINS = {"semgrep": semgrep_pins.as_dict(), "codeql": codeql_pins.as_dict(), "sonar-scanner": sonar_pins.as_dict(),
+            "claude-review": claude_review_pins.as_dict()}
 
 
 def exe(path: Path, text: str) -> None:

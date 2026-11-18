@@ -1,6 +1,8 @@
 # sast-agents
 
-Static-analysis scanners as Harbor agents, with no LLM. Each agent installs its
+Security scanners as Harbor agents. Semgrep, CodeQL and SonarQube are static
+analysis with no LLM. The Claude Code security review agent is the exception: it
+calls an Anthropic model to do the review. Each agent installs its
 tool inside the task sandbox, scans `/app/repo`, and writes
 `/app/output/findings.sarif` in the task's SARIF profile. The task's own verifier
 (`tests/grade.py`) then scores it exactly as it scores an LLM agent.
@@ -8,11 +10,9 @@ tool inside the task sandbox, scans `/app/repo`, and writes
 | Agent | Import path | Status |
 |---|---|---|
 | Semgrep OSS 1.179.0 | `sast.semgrep.agent:SemgrepAgent` | ready |
-| CodeQL 2.27.1 (research use only) | `sast.codeql.agent:CodeQLAgent` | ready, run with Harbor on the 0.4.0 image (see [CodeQL agent](#codeql-agent)) |
+| CodeQL 2.27.1 (research use only) | `sast.codeql.agent:CodeQLAgent` | ready, run with Harbor on the 0.5.0 image (see [CodeQL agent](#codeql-agent)) |
 | SonarQube (server you host) | `sast.sonarqube.agent:SonarQubeAgent` | ready, run with Harbor against SonarQube Community Build 26.9 (see [SonarQube agent](#sonarqube-agent)) |
-
-The design, and the red-team review behind it, is in
-[docs/semgrep-agent-plan.md](docs/semgrep-agent-plan.md).
+| Claude Code security review (anthropics/claude-code-security-review at 0c6a49f, calls a model) | `sast.claude_review.agent:ClaudeReviewAgent` | run against the real model on 10 dataset tasks with a subscription token (`auth=oauth`: the CLI review, then the upstream filter's regex rules only, no API preflight), once per task, in stock and scoped mode. Not yet run with an API key, so the upstream per-finding Claude filter, the API preflight and `cli_auth` have run against fakes only (see [Claude Code security review agent](#claude-code-security-review-agent)) |
 
 ## Register on ng-eval-platform
 
@@ -38,8 +38,8 @@ the agent records it as `model_ignored` and never calls it.
 
 ```bash
 uv sync
-PYTHONPATH=$PWD .venv/bin/harbor run -y -p dev/tasks -n 4 -a sast.semgrep.agent:SemgrepAgent -o jobs/semgrep
-python3 tools/report.py jobs/semgrep --tasks dev/tasks
+PYTHONPATH=$PWD .venv/bin/harbor run -y -p tests/fixtures/tasks -n 4 -a sast.semgrep.agent:SemgrepAgent -o jobs/semgrep
+python3 tools/report.py jobs/semgrep --tasks tests/fixtures/tasks
 ```
 
 Expected on the sample tasks (agent 0.2.0 checked in Harbor on 2026-10-07. The
@@ -56,9 +56,8 @@ which still pass at 0.4.0):
 
 These sample tasks are test fixtures for the agents, not dataset tasks. The
 tracked copy lives in `tests/fixtures/tasks/`, and that is what the unit tests
-read (a missing folder fails the run, it is never skipped). `dev/tasks/` is an
-untracked local working area (in `.gitignore`). To use it, copy the fixtures
-there first: `mkdir -p dev/tasks && cp -a tests/fixtures/tasks/. dev/tasks/`.
+read (a missing folder fails the run, it is never skipped). Harbor runs them
+in place with `-p tests/fixtures/tasks`.
 They use
 grader v2 ([task_format/](task_format/README.md)): optional `fixed_locations`
 for twins and `fix_changed_files` for positive tasks; without them a task is
@@ -80,17 +79,17 @@ for Intel/AMD machines and most Linux servers, `arm64` for Apple-silicon Macs.
 They load it once:
 
 ```bash
-docker load -i sast-tools_0.4.0_amd64.tar.gz    # gives the local tag sast-tools:0.4.0
+docker load -i sast-tools_0.5.0_amd64.tar.gz    # gives the local tag sast-tools:0.5.0
 ```
 
-After that, task Dockerfiles with `ARG SAST_TOOLS_IMAGE=sast-tools:0.4.0` build
+After that, task Dockerfiles with `ARG SAST_TOOLS_IMAGE=sast-tools:0.5.0` build
 locally as-is. This covers local `harbor run` only: Daytona can't see a loaded
 image, so platform runs still install at setup until the image is in a registry.
 
 Then, in each task's `environment/Dockerfile`:
 
 ```dockerfile
-ARG SAST_TOOLS_IMAGE=<registry path>/sast-tools:0.4.0
+ARG SAST_TOOLS_IMAGE=<registry path>/sast-tools:0.5.0
 FROM ${SAST_TOOLS_IMAGE} AS sast-tools
 
 FROM python:3.11-slim            # the task's own base image, unchanged
@@ -109,7 +108,7 @@ builds) and sonar-scanner. Daytona must be able to pull the image, so it has to
 live in a registry. A local `docker save` only helps local runs. The tag is the
 agent version, read from `pyproject.toml` (the script stops if it differs from
 `sast.__version__`), so bump both together and rebuild. The sample task
-Dockerfiles pin `sast-tools:0.4.0`, and a unit test checks that they match the
+Dockerfiles pin `sast-tools:0.5.0`, and a unit test checks that they match the
 agent version.
 
 The image holds `/opt/sast/MANIFEST.json`, written by the last build stage
@@ -144,6 +143,8 @@ PowerShell with Docker Desktop. The tools image named by the Dockerfile's
 `ARG SAST_TOOLS_IMAGE=` default (or `--tools-image <image>`) must be present
 locally. It removes the images it builds. See the script's docstring for the
 checks.
+
+The leak scan also requires `task_id` in task.toml to equal the task folder name, rejects role words (positive, negative, vulnerable, patched, fixed, benign, and pos, neg, vuln, fix, safe, unsafe, bad or good as a whole id part) in `task_id`, `variant_id` and `related_variant_ids`, and requires the twins' `instruction.md` files to be byte-identical. An unreadable or malformed VARIANTS.json fails every task with a message instead of a traceback.
 
 ## What a run does
 
@@ -188,15 +189,23 @@ checks.
     author lists first.
   - CodeQL and SonarQube name no primary CWE. CodeQL lists its `external/cwe`
     tags in numeric order and SonarQube's cwe facet is an unordered set, so
-    their CWEs are decided as a set (`cwe_map.decide_unordered`, `cwe-map-4`):
-    unmapped CWEs are ignored, a set whose mapped CWEs all fall in one family
-    is reported under that family, and a set that spans two families is
-    dropped as ambiguous and counted. The answer never depends on the order.
+    their CWEs are decided as a set (`cwe_map.decide_unordered`, `cwe-map-5`):
+    unmapped CWEs are ignored, a generic CWE (200, 284, 668) decides only when
+    no specific mapped CWE is present, a set whose deciding CWEs all fall in
+    one family is reported under that family, and a set that spans two
+    families is dropped as ambiguous and counted. The answer never depends on
+    the order.
+  - A generic CWE never carries a result that also names clear-text
+    transport, credential or storage CWEs (`NOT_DISCLOSURE_CWES`), for any
+    tool (`cwe-map-5`). So SonarQube `python:S5332` (CWE-200, CWE-319) is no
+    longer reported as `LLM02.SID.HIGH`.
   - LLM02 covers disclosure *flows* only: exposure, logs, errors, sent data, and
     authorisation on data. Hard-coded secrets (CWE-798), weak transport or
     storage, and XXE aren't mapped.
   - Unmapped CWEs (XSS, crypto, CSRF, ...) are outside the five ruleIds and are
     not reported; they're still counted in the metadata.
+  - No CWE maps to `LLM03.EA.AUTONOMY`, so no CWE-mapped agent ever emits that ruleId. Missing authorisation (CWE-862, and CWE-285, 284 and 863) maps to `LLM02.SID.HIGH`. Whether such a result can still match an Autonomy finding is decided by the grader, not by this map, and it is not a zero by construction. The grader matches a result to a finding of its own risk family (LLM02 or LLM03) within the line tolerance; since v3.2 (audit A1) it also matches across families when the CWE sets intersect and no finding of the result's own family accepts the location, with detection credit and no rule credit (`task_format/grade.py`). So a result whose CWE the finding also lists can match at the right lines: an LLM03 result such as CWE-749 (FUNCTIONALITY) on an Autonomy finding of the same family, or an LLM02 result from CWE-862 on one whose CWEs include 862. A correct report whose CWE the finding does not list cannot. The Claude review in scoped mode names the ruleId itself, as the task instruction asks, so it can report Autonomy. The map was deliberately not changed for this: CWE-862, 863, 285 and 284 are also the usual CWEs for retrieval without authorisation, which spec section 3 lists under disclosure, and changing the map after seeing results would be tuning.
+  - Findings merged into one result (same file, line and family) keep the family they were merged under, and the combined CWEs only choose LLM02 HIGH or MEDIUM (`cwe_map.family_rule`). Before, the rule was recomputed from the combined list, and a generic CWE next to a `NOT_DISCLOSURE_CWES` entry (for example CodeQL's bind-socket {200} and clear-text-logging {359, 532, 312} on one line) gave no rule and crashed the SARIF writer (PR #4 review, item 1). No recorded result changes.
 - **LLM02 severity (cwe-map-3).** The CWE still picks the family. An LLM02
   result is `LLM02.SID.HIGH` when any of its CWEs is CWE-201, 918, 319, 532 or
   359 (weaknesses defined by data leaving its boundary). Otherwise it's
@@ -242,13 +251,7 @@ checks.
   with 5 merged files. Rule ids are set to what Semgrep would have reported, so
   results are unchanged: `tools/check_merged_rules.sh` compared all 6,191
   findings on the rules repo's own test corpus and they were identical.
-- **Failures are errors, not zeroes.** An install failure, any Semgrep exit
-  other than 0, unreadable output, out-of-memory, or a scan over its budget
-  raises `ScannerError`. Semgrep writes `"results": []` even when it fails
-  (exit 2, 7, ...), so the exit code decides, not the file. Harbor
-  then skips the verifier and the platform shows the trial as errored, so it can
-  be re-run. The scan budget is the agent timeout minus 120 s, because Harbor
-  grades a trial that hits its own timeout as 0.
+- **A failed scan is never a clean one.** Semgrep writes `"results": []` even when it fails (exit 2, 7, ...), so the exit code decides, not the file. An install failure, unreadable output or a configuration exit code (4, 5, 7, 8: our own rules or options) is an infrastructure failure and raises `ScannerError`: Harbor skips the verifier and the trial shows as errored, so it can be re-run. Semgrep failing on the repository (any other non-zero exit, out of memory) or a scan over its budget is a tool outcome: no SARIF, a normal return, and the verifier scores the trial 0 (see [Failure policy](#failure-policy-infrastructure-errors-and-tool-outcomes)). The scan budget is the agent timeout minus 120 s, so the agent, not Harbor, ends a scan that runs long and records why.
 - **Unknown `--ak` keys are recorded, not rejected.** Harbor validates options
   once per job, so one stray key would fail every trial.
 
@@ -266,6 +269,25 @@ checks.
 The Semgrep version and the rules are pinned in
 [sast/semgrep/pins.py](sast/semgrep/pins.py) and are not options.
 
+## Failure policy: infrastructure errors and tool outcomes
+
+Harbor 0.23 records `AgentTimeoutError` and `NonZeroAgentExitCodeError` and still runs the verifier; any other exception skips it, so the trial shows as errored and can be re-run. Every agent splits its failures the same way (`sast/errors.py`):
+
+- **Infrastructure failure, `ScannerError`**: the tool could not be installed, the sandbox, Docker or Harbor misbehaved, a credential is missing or refused, the Anthropic API or the SonarQube server could not be reached, the agent's own output could not be read. Nothing was learnt about the tool. The agent raises, the verifier does not run, and `status` is `error` in the metadata.
+- **Tool outcome, `ToolOutcome`**: the tool did not deliver on this repository. The scan budget or review deadline ran out (`deadline`), the tool was killed (`tool_killed`) or crashed on the code (`tool_crashed`), analysed none of the in-scope code (`tool_saw_nothing`), the review said it was incomplete (`review_incomplete`) or reviewed no file (`files_reviewed_zero`), the Claude CLI hit its turn or budget limit (`cli_limit`), and a few more listed in `sast/errors.py`. The agent writes **no SARIF**, records `status: tool_outcome` and `tool_outcome: {reason, message}` (and `sarif_written: false`) in the metadata, keeps its logs and artifacts, and returns normally. Harbor then runs the verifier, and the grader scores a missing SARIF 0 on a positive and on a negative task alike, so an unfinished scan never earns the credit of a clean one.
+
+The scan budget is Harbor's agent timeout minus 120 s, so the agent, not Harbor, ends a scan that runs long: the trial is scored exactly as after Harbor's own timeout (0), but with the reason and the logs kept.
+
+### What the SARIF's `runs[0].properties` records
+
+Every agent writes `runs[0].properties.sastAgent`: an account of what it dropped or re-mapped between the tool's output and the results, for reports to show next to the scores. The grader never reads it, and it does not change which results are written. Each entry is `{"count": n, "items": [...]}` with at most 20 items (the full lists are in the run metadata).
+
+- `dropped.unmappedCwe`: findings left out because no CWE maps to a task ruleId (`[tool rule, CWEs, file, line]`).
+- `dropped.ambiguousCwe`: findings whose CWEs point to more than one ruleId family.
+- `dropped.outOfScope`: findings outside the scanner roots or under an excluded path.
+- `dropped.badLocation`: findings with no usable location (outside the repository, no line, a line outside the file).
+- Claude review only: `dropped.categoryNotInMap` (stock categories the category map does not know, with counts), `remapped` (findings whose ruleId the harness derived from the category or CWE table rather than the model's own `rule_id`: category, CWEs, CWE source, ruleId, `file:line`), `upstreamFilterExclusions` (each finding the upstream filter excluded: stage, reason, category, `file:line`), and `mode`, `filterMode`, `categoryMap`, `scanInstructionsSource` and `filterExclusionsDropped`.
+
 ## What the platform keeps from a trial
 
 - `result.json` → `agent_result.metadata`: versions, rules digest, CWE map and
@@ -281,6 +303,11 @@ The Semgrep version and the rules are pinned in
 
 `tools/report.py <job dir> --tasks <tasks dir>` prints a per-trial table and,
 as the headline for SAST, **detection pooled across tasks**:
+
+- Every report (`report.py` and `eval_report.py`) states what the results were graded under: agent version, CWE map, heuristics, Claude category map, and the task set's git commit and whether its work tree is dirty (when `--tasks` is a git work tree). Different versions within or across jobs are listed as warnings.
+- A measurement is shown as "not supported by this tool" only when the tool matched at least one finding and no graded result carries the field. With no matched result it is "n/a (no results)".
+- For Claude review jobs the report shows the mode (stock or scoped), the auth and the results label. Stock-mode scores depend on the frozen category map (`ccsr-category-map-2`, whose table is unchanged from `-1`): categories outside it are dropped before grading, and the report counts them.
+- Reading `reward.json` files directly, the task name comes from the trial's `result.json`, or from the folder name without Harbor's `__<suffix>`.
 
 - precision, recall and F1 from the verifier's tp/fp/fn. Precision (and so F1)
   is shown as n/a when the tool reported nothing to take it over;
@@ -315,12 +342,7 @@ the expected scan time plus 120 s.
   whole repo and matches by ±10 lines and OWASP prefix.
 - On full repos, extra findings lower F1. A zero-finding (fixed-twin) task scores
   1.0 only if the SARIF is completely empty.
-- The grader matches greedily: each result, in file order, takes the first
-  unmatched finding near it. A partial-credit result (say `LLM02.SID.MEDIUM`
-  one line above) can therefore take a finding that a full-credit result
-  further down would have matched, and the full-credit one becomes a false
-  positive. Agents merge results of one family on one line, so this needs two
-  results on different lines. It was seen in a crafted case only, not in a run.
+- The grader matches results to findings one to one by an optimal assignment that maximises the task reward (`assign` in `task_format/grade.py`), not greedily in file order, so a partial-credit result no longer takes a finding from a full-credit one and the order of the results does not matter.
 - On a negative task, a result near the fix marks every contrast category with
   the same risk prefix as detected (`cat.<category>.detected`), the same
   prefix-level match positives use. A `LLM03.EA.PERMISSIONS` result near a
@@ -337,7 +359,7 @@ revisited if a contract follows, so don't use it in client work until then.
 ### Run
 
 The normal place for the bundle is the task image at `/opt/sast/codeql`, which
-the `sast-tools:0.4.0` image provides for both amd64 and arm64. Setup
+the `sast-tools:0.5.0` image provides for both amd64 and arm64. Setup
 (`sast/codeql/install.py`, standard library only) checks it: the CLI must
 report 2.27.1, the bundle's `codeql/python-queries` pack must be exactly
 1.8.11 and the suite file must be there. When it matches, nothing is
@@ -402,22 +424,18 @@ as for the Semgrep agent.
 
 ### Failure policy
 
-These fail the trial with `ScannerError`, so it is recorded as errored and never
-graded as "found nothing".
+None of these is ever graded as "found nothing". Infrastructure failures raise `ScannerError`, so the trial is recorded as errored and can be re-run:
 
 - No Python file in the scope, or none of the scan roots exists.
-- `database create` or `database analyze` exits non-zero, runs out of time
-  (124) or is killed (137). The error text quotes CodeQL's real error lines
-  only: its "A fatal error occurred" line, a line tagged `[ERROR]`, and the
-  extractor's Python exception line as the cause. A line that merely contains
-  the word, such as "0 errors", is never picked.
-- A missing or unreadable SARIF file, or a run CodeQL marks with
-  `executionSuccessful: false`.
-- The `py/summary/lines-of-code` metric is 0. CodeQL then extracted nothing and
-  still exits 0, which was checked on a repository with no Python in scope.
-- The metric is missing from the SARIF. The suite always reports it, so its
-  absence means the run cannot show that any code was analysed.
-- An extraction notification at error level that names an in-scope file.
+- A missing or unreadable SARIF file.
+- The `py/summary/lines-of-code` metric is missing from the SARIF. The suite always reports it, so its absence means the wrong suite ran and the run cannot show that any code was analysed.
+
+CodeQL failing on the repository is a tool outcome (`tool_outcome` in the metadata): no SARIF is written, the agent returns normally and the verifier scores the trial 0, on a positive and a negative task alike:
+
+- `database create` or `database analyze` exits non-zero (`tool_crashed`), runs out of the scan budget (124, `deadline`) or is killed (137, `tool_killed`). The message quotes CodeQL's real error lines only: its "A fatal error occurred" line, a line tagged `[ERROR]`, and the extractor's Python exception line as the cause. A line that merely contains the word, such as "0 errors", is never picked.
+- A run CodeQL marks with `executionSuccessful: false` (`tool_crashed`).
+- The `py/summary/lines-of-code` metric is 0 (`tool_saw_nothing`). CodeQL then extracted nothing and still exits 0, which was checked on a repository with no Python in scope.
+- An extraction notification at error level that names an in-scope file (`tool_crashed`).
 
 **Extraction problems, and why only error level fails.** Every run's
 `toolExecutionNotifications` are read. Notes and level "none" are telemetry and
@@ -513,8 +531,7 @@ writes the same SARIF as the Semgrep agent. It keeps both issues of type
 VULNERABILITY and Security Hotspots, but on the server version used here
 (Community Build 26.9.0.129388) a hotspot can never appear, because that
 server has no hotspot rules at all (see "No Security Hotspots on Community
-Build 26.9" below). The design is in
-[docs/superpowers/specs/2026-10-07-codeql-sonarqube-agents-design.md](docs/superpowers/specs/2026-10-07-codeql-sonarqube-agents-design.md).
+Build 26.9" below).
 
 ### 1. Start the server
 
@@ -574,11 +591,11 @@ prints it. The unit tests check all of this.
 ### 4. Run
 
 The task image must carry the scanner, so build it from the tools image
-`sast-tools:0.4.0` (see "Pre-built tools image" above). The scanner is not
+`sast-tools:0.5.0` (see "Pre-built tools image" above). The scanner is not
 downloaded at setup.
 
 ```bash
-PYTHONPATH=$PWD .venv/bin/harbor run -y -p dev/tasks -n 2 -a sast.sonarqube.agent:SonarQubeAgent -o jobs/sonarqube
+PYTHONPATH=$PWD .venv/bin/harbor run -y -p tests/fixtures/tasks -n 2 -a sast.sonarqube.agent:SonarQubeAgent -o jobs/sonarqube
 ```
 
 Keep `-n` small: every trial is analysed by the same server, which handles one
@@ -635,11 +652,7 @@ all.
      and deletes the project. The delete gets its own short time slice, also
      when the deadline has passed. A delete that fails does not fail the run,
      and the metadata says the project was left.
-   - **A scan that looked at nothing is an error.** The agent counts the `.py`
-     files in the task's scope before scanning. After the collection it
-     raises `ScannerError` when SonarQube analysed 0 files, when the scope has
-     Python files but `ncloc_language_distribution` has no Python, or when the
-     Python quality profile has no active rule (`activeRuleCount` 0). The
+   - **A scan that looked at nothing is never a clean scan.** The agent counts the `.py` files in the task's scope before scanning. After the collection, SonarQube having analysed 0 files, or no Python although the scope has Python files (`ncloc_language_distribution`), is a tool outcome (`tool_saw_nothing`: no SARIF, scored 0). A Python quality profile with no active rule (`activeRuleCount` 0), no profile at all, or measures that could not be read are the server's setup and raise `ScannerError`. The
      background task's `warnings` and any "Unable to parse file" lines of the
      scanner output go into the metadata (`ce_task.warnings`,
      `files_not_parsed`).
@@ -647,20 +660,16 @@ all.
      format 1 has no CWE and would report nothing without saying so.
    - Each issue's own `type` is checked again, and anything other than
      `VULNERABILITY` is skipped and counted (`issues_not_vulnerability`).
-   - The CWEs are mapped with the same table as Semgrep (`cwe-map-4`), with
+   - The CWEs are mapped with the same table as Semgrep (`cwe-map-5`), with
      the rule below.
-3. **Failures are errors**: a server that is down, a refused token (HTTP 401)
-   or missing permission (403), a scanner error, a background task that ends
-   `FAILED` or `CANCELED`, a rule lookup error, an incomplete page, an
-   analysis of nothing, or running out of budget raises `ScannerError`. The
-   project is deleted on every exit path once the scanner has started,
-   including a timeout and a budget that runs out between steps.
+3. **Failures**: a server that is down, a refused token (HTTP 401) or missing permission (403), a sonar-scanner error that names the server or the network, a rule lookup error or an incomplete page raises `ScannerError` (errored, re-run). Running out of budget (`deadline`), sonar-scanner failing on the code with no sign of a server problem (`tool_crashed`), a background task that ends `FAILED` or `CANCELED` (`tool_crashed`) or is still pending at the deadline (`deadline`), and an analysis of nothing (`tool_saw_nothing`) are tool outcomes: no SARIF, scored 0. The project is deleted on every exit path once the scanner has started, including a timeout and a budget that runs out between steps.
 
 #### How a rule's CWE set is mapped
 
 The cwe facet is an unordered set and Sonar names no primary CWE, so the
-agent uses `cwe_map.decide_unordered` (`cwe-map-4`, the same rule as the
-CodeQL agent). Unmapped CWEs are ignored. When the mapped CWEs all fall in one
+agent uses `cwe_map.decide_unordered` (`cwe-map-5`, the same rule as the
+CodeQL agent). Unmapped CWEs are ignored, and a generic CWE (200, 284, 668)
+gives way to a specific mapped one. When the deciding CWEs all fall in one
 family, that family is reported, and the CWEs are passed on with that family's
 CWEs first, so the SARIF ruleId is that family and `task_rule` still sees
 every CWE when it picks HIGH or MEDIUM. When they fall in more than one
@@ -668,8 +677,10 @@ family, the result is dropped as ambiguous and listed in
 `results_cwe_ambiguous`. When no CWE is mapped, the result is counted as
 unmapped and not reported. `results_by_cwe_decision` counts the four outcomes
 (`none`, `unmapped`, `mapped`, `ambiguous`). For example `python:S4423`
-(CWE-295, 326, 327) is unmapped, and `python:S5332` (CWE-200 and CWE-319) is
-`LLM02.SID.HIGH`: CWE-200 gives LLM02, and CWE-319 is a boundary CWE.
+(CWE-295, 326, 327) is unmapped, `python:S5332` (CWE-200 and CWE-319) is
+unmapped because clear-text transport is not disclosure, and
+`docker:S6471` (CWE-250 and CWE-284) is `LLM03.EA.PERMISSIONS` through the
+specific CWE-250.
 
 An honest note on that example. The rule the agent used before (drop a result
 when any of its CWEs is unmapped) was chosen after `python:S5332`'s CWEs
@@ -678,6 +689,18 @@ ignores unmapped CWEs instead, so S5332 is now reported. On the dc4b7a twins
 it fires in shared code, so it is a false positive there and lowers
 precision. The rule is kept because it is the principled one, not because of
 that outcome.
+
+`cwe-map-5` (2026-10-12) changes that outcome on purpose, after the QC review
+against spec sections 2.3 and 3: a disclosure finding needs protected data to
+reach an unauthorised recipient, and clear-text transport describes the
+channel, not the recipient. S5332 was SonarQube's only cause of failed
+negatives (454a7f and dc4b7a). Regrading the v0.4.0 SARIFs with S5332 removed
+and S6471 added turns both negatives from 0.0 to 1.0 and changes nothing else.
+The SonarQube job has to be run again for the published numbers to reflect
+`cwe-map-5`. See the `sast/cwe_map.py` docstring for the full decision,
+including why Semgrep's CWE-939 stays unmapped.
+
+`cwe-map-5` is forward-only. It was adopted after its effect on the v0.4.0 results had been checked, so the published v0.4.0 numbers stay under `cwe-map-4`, `cwe-map-5` applies to new runs only, and the lead signed it off on 2026-10-12 on that basis (PR #4 review, item 2). The map, the Claude category map (`ccsr-category-map-1`), the heuristics table and the task ground truth are frozen for the final runs, and every report states the versions it was graded under.
 
 #### No Security Hotspots on Community Build 26.9
 
@@ -738,6 +761,440 @@ kept to check that the normaliser refuses them. No recording holds a Security
 Hotspot, and none can on 26.9 (see above). The recordings also predate the
 hotspot rule count, so its tests use a stubbed answer. The real values (0 and
 0) will come from the next recording.
+
+## Claude Code security review agent
+
+This agent runs Anthropic's open-source
+[claude-code-security-review](https://github.com/anthropics/claude-code-security-review)
+(pinned at commit `0c6a49f`, 2026-02-11) on a task. Unlike the other agents it
+calls a model: the Claude Code CLI (2.1.296, pinned) does the review, and the
+upstream false-positive filter calls the Anthropic API once per finding. It
+needs an Anthropic API key (or a Claude subscription token, with the limits
+described below) and HTTPS access to `api.anthropic.com` from the task
+container. The design and what was and was not verified are in
+[docs/claude-review-agent.md](docs/claude-review-agent.md).
+
+The upstream tool reviews a GitHub pull request. The agent uses its library
+code without GitHub: the in-scope files (the task's `scanner_roots` minus
+`excluded_paths`) become one pull request that adds them all, against an empty
+base. Our own driver (`sast/claude_review/driver.py`) builds the upstream
+prompt, runs the CLI, runs the upstream filter and checks every step.
+
+### 1. Build the tools image
+
+The CLI binary, the upstream files and a Python venv with `anthropic` 0.79.0
+and `requests` 2.32.5 come with the tools image, in `/opt/sast/claude-review`.
+Every file is checked against a pinned hash while the image builds: the CLI
+tarball against its sha256 and npm integrity, each upstream file against its
+sha256, and every wheel through `requirements.lock` (`--require-hashes`).
+
+```bash
+uv sync
+tools/build_tools_image.sh                 # sast-tools:0.5.0, now with the claude-review part
+```
+
+See [Pre-built tools image](#pre-built-tools-image) for `--save` and registry builds.
+
+The image grows by about 260 MB (the CLI is a 257 MB native binary). The venv
+is built from the Semgrep part's CPython, so the task image must copy all of
+`/opt/sast`, as the sample task Dockerfiles do. Without the baked part, setup
+installs it into the work directory instead. That needs the sandbox to reach
+registry.npmjs.org, raw.githubusercontent.com and pypi.org, a glibc Linux on
+x86_64 or aarch64, and Python 3.9 or newer.
+
+### 2. Set the credential
+
+The agent takes one of two credentials from the host where Harbor runs. The
+`auth` option picks which (`--ak auth=api_key`, `--ak auth=oauth`, or the
+default `auto`, which uses the API key when `ANTHROPIC_API_KEY` is set and
+otherwise the subscription token). When both are set, `auto` uses the API key
+and the metadata says so. A missing credential stops the job before any trial
+starts. Do not pass either one with `--ae`, since Harbor writes agent env
+values into the job config.
+
+**An API key (recommended).**
+
+```bash
+export ANTHROPIC_API_KEY=<key>
+```
+
+The key must be enabled for the Claude API and for Claude Code. This is the
+configuration the rest of this section describes, and the one to use for
+numbers you report to a client.
+
+**A Claude subscription token.** If you have a Claude plan instead of an API
+key, make a long-lived token with `claude setup-token` on your own machine and
+put it in the repo's `.env` file (`.gitignore` lists it, never commit it):
+
+```bash
+CLAUDE_CODE_OAUTH_TOKEN=<token from claude setup-token>
+```
+
+Then load it and run (bash, or Git Bash on Windows), with `R` set to the repo
+folder:
+
+```bash
+R=$PWD
+set -a; source "$R/.env"; set +a
+PYTHONPATH=$R .venv/bin/harbor run -y --force-build -p tests/fixtures/tasks -n 1 \
+  -a sast.claude_review.agent:ClaudeReviewAgent -o jobs/claude-review-oauth \
+  --include-task-name smoke_eval \
+  --agent-timeout-multiplier 3 \
+  --ak auth=oauth --ak model=claude-opus-5-5 --ak timeout_sec=2400
+```
+
+In Git Bash on Windows the venv's Harbor is `.venv/Scripts/harbor`. `--ak
+auth=auto` works too when `ANTHROPIC_API_KEY` is not set. Know what
+changes with a token before you use it:
+
+- The token works for Claude Code only. It is not an API key, so the upstream
+  filter's per-finding Claude check cannot run. The filter runs its regex
+  rules only (`filter=hard_rules`), which is a different configuration from
+  the upstream stock one. Label such results "stock CLI + hard-rule filter"
+  (the metadata's `results_label` says the same) and do not compare them
+  directly with API-key runs. Asking for `--ak filter=claude` with a token
+  fails before any trial starts.
+- There is no fast preflight check. With an API key the driver sends one tiny
+  request per model before the review. A token cannot do that, so a refused
+  token or an unavailable model only shows up when the CLI starts. A refused
+  token fails the trial with "the subscription token was refused. Run `claude
+  setup-token` again" and is not retried.
+- Every review counts against your plan's usage limits. A long job can hit
+  them halfway, and the remaining trials then fail.
+- Subscription tokens are meant for your own personal use of Claude Code.
+  Check your plan's terms before you run large automated jobs with one.
+
+For results you report to a client, use an API key.
+
+How the credential reaches the sandbox: the same way as SonarQube's token. It
+is uploaded as a file into a mode 700 directory under the work dir, copied
+under umask 077 into a mode 600 file, and the whole directory is removed when
+the review ends, also after a failure. The driver reads it in-process. An API
+key goes to the CLI through an `apiKeyHelper` (`cat <key file>`) in a private
+settings file, so it is in no command line and in no process environment, and
+to the filter as an argument. A subscription token goes only into the CLI
+process's own environment as `CLAUDE_CODE_OAUTH_TOKEN` (no `apiKeyHelper`),
+and the driver replaces the `anthropic` package with a stand-in that refuses
+to make a client, so nothing else in the driver can send it anywhere. Neither
+credential is ever on a command line, in Harbor's exec env, a log, an artifact
+or the run metadata, and all output that is kept is scrubbed of it. The unit
+tests check all of this.
+
+### 3. Run
+
+The agent uses the upstream tool's default model, `claude-opus-4-1-20250805`,
+unless you name another one with `--ak model=<model id>` or the host variable
+`CLAUDE_REVIEW_MODEL`. Anthropic may retire that model, and your key may not
+have it enabled, so naming the model is usually the safer choice. The examples
+below use `claude-opus-5-5`. Use any model your key can use.
+
+The agent checks the model at run time, not from a fixed list. The driver
+sends one tiny request per model before the review, so a retired or unknown
+model fails in seconds. Then it reads the CLI's first message, which names the
+model the CLI will really use. If that is not the requested model, the CLI is
+stopped before the review spends anything and the trial fails with an error
+that says to pass `--ak model=<model id>`.
+
+```bash
+PYTHONPATH=$PWD .venv/bin/harbor run -y --force-build -p tests/fixtures/tasks -n 2 \
+  -a sast.claude_review.agent:ClaudeReviewAgent -o jobs/claude-review \
+  --include-task-name smoke_eval \
+  --agent-timeout-multiplier 3 \
+  --ak model=claude-opus-5-5 --ak timeout_sec=2400
+```
+
+The same with the benchmark's scope added to the prompt, three attempts per
+task:
+
+```bash
+PYTHONPATH=$PWD .venv/bin/harbor run -y --force-build -p tests/fixtures/tasks -n 2 -k 3 \
+  -a sast.claude_review.agent:ClaudeReviewAgent -o jobs/claude-review-scoped \
+  --include-task-name smoke_eval \
+  --agent-timeout-multiplier 3 \
+  --ak model=claude-opus-5-5 --ak mode=scoped --ak timeout_sec=2400
+```
+
+The sample tasks give the agent 900 s, which is often too short for a model
+review. `timeout_sec` is the agent's own limit for the whole review, and
+Harbor's limit (task timeout times `--agent-timeout-multiplier`) must stay at
+least 120 s above it, or Harbor stops the agent first and grades a missing
+SARIF as 0. Without `timeout_sec` the agent uses the task's timeout minus
+120 s, as the other agents do. Harbor does not tell an agent its multiplied
+limit (0.23 and 0.24 pass it only to the oracle agent), so the agent cannot
+check it. When `timeout_sec` is longer than the task's timeout allows, the
+metadata gets a `budget_note` and `harbor_limit_needed_sec` as a reminder. It
+is not an error, and with the multiplier above it is expected.
+
+The task environment must allow outbound HTTPS to `api.anthropic.com`. The
+driver checks that first and fails with a clear message if it cannot connect.
+
+### Options
+
+Every option is `--ak key=value` or the host variable `CLAUDE_REVIEW_<KEY>`
+(for example `CLAUDE_REVIEW_MODEL`). `--ak` wins.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `model` | upstream default, `claude-opus-4-1-20250805` (may be retired, see above) | model for the review and, unless `filter_model` is set, the filter. Without it, Harbor's `-m` is used when it names an Anthropic model (`anthropic/<id>` or a bare `claude-*` id); any other `-m` is ignored and recorded (`harbor_model_name`, `model_source`) |
+| `filter_model` | `model` | model for the per-finding filter |
+| `mode` | `scoped` | `stock`: upstream prompts and filter unchanged. `scoped`: builds custom scan instructions from the task's own output contract (the Scope table, the field vocabularies and the Recommendation catalogue of the instruction Harbor passes to the agent), tells the reviewer to read `security_manifest.json` first, asks for a `rule_id`, CWE list, path, control status, residual risk and catalogue recommendation ids per finding, and uses the upstream filter text without hard exclusions 7 ("lack of hardening") and 14 ("user content in AI prompts is not a vulnerability"). See [Scoped mode](#scoped-mode) |
+| `auth` | `auto` | `api_key` (`ANTHROPIC_API_KEY`), `oauth` (`CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`), or `auto`: the API key when it is set, else the token |
+| `filter` | `claude` with an API key, `hard_rules` with a token | `claude`: the upstream regex rules plus the per-finding API check (needs an API key). `hard_rules`: the regex rules only |
+| `max_turns` | none | Claude Code `--max-turns` |
+| `max_budget_usd` | none | Claude Code `--max-budget-usd` for the review (the filter is not counted) |
+| `reasoning_effort` | none (the CLI's default, as upstream) | Claude Code `--effort` for the review: `low`, `medium`, `high`, `xhigh` or `max`. Upstream sets no effort, so a value is a recorded deviation (metadata `reasoning_effort`, SARIF `reasoningEffort`). The filter's API calls are not affected |
+| `timeout_sec` | task timeout minus 120 s | wall-clock limit for the whole review |
+| `cli_share` | 0.6 | share of that limit the CLI may use, the filter gets the rest |
+| `cli_attempts` | 3 | CLI attempts, as upstream |
+| `cli_auth` | `api_key_helper` | `env` puts the API key into the CLI process's own environment instead (a fallback, never a command line). Not used with a token |
+| `scan_roots`, `exclude` | the task's | as for the other agents |
+
+### What a run does
+
+1. **setup**: `install.py` checks `/opt/sast/claude-review` (CLI version, every
+   upstream file's sha256, the venv's `anthropic` and `requests` versions, and
+   that it imports the upstream package) and rehashes the part against the
+   image's `MANIFEST.json`. If the part is missing or wrong, it installs it
+   into the work dir.
+2. **run**: the agent lists the in-scope files, uploads a request (no secret in
+   it) and the key file, and runs the driver under `timeout -k 10 <seconds>`.
+   The driver:
+   - removes every `ANTHROPIC_*` and `CLAUDE_CODE_*` variable from its own
+     environment, gives the CLI only an allow-list of variables (PATH, locale,
+     temp dir, CA bundles and proxies, plus HOME and Claude Code's switches
+     that turn off telemetry), so no host setting such as
+     `CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST` can choose the model, checks that `api.anthropic.com` answers, and sends one tiny
+     request per model, so a bad key, a retired model or a blocked network
+     fails in seconds. With a subscription token the per-model request is
+     skipped (`"preflight": "skipped_oauth"` in the metadata).
+   - builds the pull request (a file whose diff holds `@generated` is left
+     out, as upstream does, and so are binary files) and the upstream prompt.
+   - copies the in-scope files (same relative paths) and `security_manifest.json` into a scratch folder, `<work dir>/scope`, and runs the CLI there, so the review cannot open an out-of-scope file, and a `Read` rule denies `/app/repo` itself. Finding and path files under the scratch folder are made relative again, so they name the repository's own paths, and the filter reads finding files from the copy too. Every `tool_use` of the CLI's stream-json is kept (tool name and only its `file_path`, `path`, `pattern` or `glob`, scrubbed), and a call outside the copy, or at a file that is not in scope, is flagged.
+   - runs the CLI with the upstream command line plus `-p`,
+     `--output-format stream-json --verbose` (the last line is the same result
+     object as upstream's `json` output), `--settings` and `--setting-sources
+     user` (the repository's own `.claude` settings are not loaded),
+     `--strict-mcp-config` and `--no-session-persistence`. The settings deny
+     Bash, WebFetch, WebSearch, Edit, MultiEdit, Write and NotebookEdit, and
+     reads of the key and the CLI home folders. The CLI's first message is
+     checked before the review spends anything: it must use the requested
+     model, take its key from the apiKeyHelper (with a token: report no API
+     key in use, `"apiKeySource": "none"`), and offer none of the denied
+     tools, or the CLI is stopped at once.
+   - retries a failed attempt (3 in all) and, when the prompt is too long,
+     runs once more with the file list only, as upstream does.
+   - runs the upstream `FindingsFilter`. Its API access check uses the
+     filter's own model instead of the hard-coded `claude-3-5-haiku-20241022`,
+     which is retired.
+   - writes one JSON result, scrubbed of the key.
+3. The agent maps the kept findings and writes the SARIF.
+
+**Failures are never a clean scan.** The upstream code treats several failures as "no findings". The agent does not. Infrastructure failures raise `ScannerError` (errored, re-run): the key is missing, the API cannot be reached or refuses the key, the model is not available, the CLI would use another model, credential or tool set, every CLI attempt failed (`is_error`, a subtype other than `success`, no findings JSON), the filter cannot reach the API (upstream silently falls back to the regex rules), or a per-finding filter call fails (upstream keeps that finding at confidence 10). A review that did not deliver is a tool outcome (no SARIF, scored 0, `tool_outcome` in the metadata): the time ran out (`deadline`), the model said `review_completed` false (`review_incomplete`) or `files_reviewed` 0 (`files_reviewed_zero`), the CLI stopped at `--max-turns` or `--max-budget-usd` (`cli_limit`), the prompt is too long even without the diff (`prompt_too_long`), the model's findings are not JSON objects (`bad_review_output`), or more than 5,000 files are in scope (`too_many_files`).
+
+### Scoped mode
+
+Every task's `instruction.md` carries the output contract: the Scope table of the five ruleIds and their definitions, the SARIF fields with the path roles and the `controlStatus` and `residualRisk` values, and the Recommendation catalogue. Harbor passes that text to the agent's `run`. In scoped mode the agent reads the contract from it (`sast/claude_review/contract.py`) and builds the custom scan instructions at run time: a fixed preamble that tells the reviewer to read `security_manifest.json` first and to add six JSON fields to each upstream finding (`rule_id`, `cwe`, `path` with file, line and role per step, `control_status`, `residual_risk`, `recommendation_ids`), with the role and value vocabularies taken from the contract, then the task's own Scope table and Recommendation catalogue. Only when the instruction carries no contract (a placeholder, for example) does it fall back to the bundled `scoped_scan_instructions.txt`, written from the same contract. `scan_instructions_source` and `scan_instructions_sha256` in the metadata say which text was used. A test checks that the generated text shares no six-word run with any ground truth.
+
+The scoped filter text, `scoped_filter_instructions.txt`, is the upstream default without 2 of its 16 hard exclusions: 7 ("A lack of hardening measures") and 14 ("Including user-controlled content in AI system prompts is not a vulnerability"), because both rule out risks the task scores. Scoped runs therefore keep findings the stock filter would drop. This is recorded per run in `filter_exclusions_dropped` (and in the SARIF's `filterExclusionsDropped`). The text is read only by the Claude filter stage, so with a subscription token (hard-rule filter) it has no effect, which `filter_exclusions_dropped_apply` says.
+
+Scoped results are harness-instructed and use a loosened filter, so report them next to stock results, never as stock upstream.
+
+### Mapping
+
+- **CWE, stock mode**: the review gives a free-text `category` and no CWE. A
+  frozen table (`sast/claude_review/category_map.py`, version
+  `ccsr-category-map-2`; the table is the same as in `-1`) maps the normalised category to one CWE, for example
+  `sql_injection` to CWE-89, `command_injection` to CWE-78 and
+  `sensitive_data_logging` to CWE-532. A category that is not in the table is
+  counted in `unmapped_by_category` and not reported.
+- **CWE, scoped mode**: the model's own `cwe` list is used when at least one entry is a well-formed CWE id (`CWE-<n>`, or a spelling such as `cwe 89` or `89`), else the table. Any well-formed id is accepted (`ccsr-category-map-2`; `-1` had an allow-list that rejected ids the ground truth accepts, such as CWE-184 and CWE-1289): the model's `rule_id` decides the family in scoped mode, so an unusual CWE cannot move a finding. Malformed values are counted in `cwes_rejected` and `cwes_rejected_count`, and each finding's `cweSource` says which source was used.
+- **RuleId, stock mode**: the CWEs go through `cwe_map.decide_unordered` and `task_rule`, like CodeQL and SonarQube results, so the ruleId follows the same frozen CWE table as every scanner. `LLM03.EA.AUTONOMY` has no CWE and is never reported in stock mode.
+- **RuleId, scoped mode**: the model's own `rule_id` when it is one of the five task ruleIds, which is what the task instruction asks every scanner to report. Then the CWEs do not decide the ruleId, an ambiguous or unmapped CWE set does not drop the finding, and Autonomy can be reported. Without a valid `rule_id` the CWEs decide as in stock mode. `rule_source` and `rule_ids_rejected` in the metadata count both.
+- **Stock-mode caveat**: stock scores depend on the frozen category map, because a category outside it is dropped (`unmapped_by_category`). The map is not extended with names seen in runs. Quote stock numbers with that caveat, next to scoped numbers.
+- **Location**: the finding's `file` must be one of the in-scope text files
+  and its `line` a positive integer within the file. Anything else is dropped
+  and counted (`dropped_bad_location`, `dropped_out_of_scope`).
+- **Level and residual risk**: HIGH gives `error` and `high`, MEDIUM `warning`
+  and `medium`, LOW `note` and `low`.
+- **codeFlows, stock mode: none.** The review describes the exploit in prose and gives no path, so no trace is made up.
+- **codeFlows, scoped mode**: the model's own `path` list (file, line, role per step). Each step must pass the same location checks as the finding, else it is dropped and counted (`path_steps_dropped`). The roles are written when all of them are profile roles, else the first step is `source` and the last `sink`. At most 20 steps.
+- **Control status, residual risk and recommendations, stock mode** come from the fixed heuristics, under `properties.heuristics`, and are never scored.
+- **The same, scoped mode**: the model's own `control_status`, `residual_risk` and `recommendation_ids` (catalogue ids only) go to the scored top-level `controlStatus`, `residualRisk` and `recommendations`. Unknown values are dropped and counted (`assessed_values_rejected`, `recommendations_rejected`), and `assessed_fields` counts how many findings carried each field. A field the model left out is not scored, and the heuristics stay under `properties.heuristics` either way.
+- The review's own recommendation text, category, severity, confidences and exploit scenario are kept under `toolProperties`.
+
+### What the metadata records
+
+Under `claude_review`: `auth` (`api_key` or `oauth`) and `auth_choice` (how
+it was chosen), `cli_credential_source` (the credential source the CLI
+reported, a name such as `apiKeyHelper` or `none`, never a value),
+`filter_mode` and where it came from, `results_label`, mode, model and filter
+model, the upstream commit, the
+pinned and reported Claude Code version, the `anthropic`, `requests` and Python
+versions, the exact CLI command line, the CLI settings, the CLI's init message
+(model, key source, tools), the sha256 of the prompt, the request and the
+scoped instruction texts, every attempt with its outcome, `total_cost_usd`,
+`num_turns`, `usage` and `modelUsage` from the CLI, token counts of the direct
+API calls per model, the filter's summary and every excluded finding with its
+reason. At the top level: `model`, `filter_model`, `mode`, `filter_mode`, `auth`,
+`harbor_model_name_ignored`, and the mapping counts above. Harbor's agent info
+names the model the review used. The driver's full result is kept as the
+artifact `claude_review.json`.
+
+Also under `claude_review`: `scan_instructions_source` (`task_instruction` when the scoped text was built from the instruction's output contract, `bundled` for the fallback file, null in stock mode) with `scan_instructions_sha256`, `contract` (the rule ids, REC ids, roles and values read from the instruction) and `contract_ids_not_accepted` (any of them the normaliser does not accept; empty lists when the two agree), `filter_exclusions_dropped` (the two upstream hard exclusions the scoped filter text leaves out, with their upstream numbers and text; empty in stock mode) and `filter_exclusions_dropped_apply` (whether they matter: only the Claude filter reads that text), `scope_copy` (the scratch folder and how many files it holds), `paths_relativised`, `tool_uses_count`, `tool_uses` (the first 500; all of them are in `claude_review.json` under `cli.tool_uses`), and `tool_uses_outside_scope` with its count.
+
+### Cost, time and caveats
+
+- The agent has run against the real model on 10 dataset tasks with a subscription token only, which reports no per-call API cost, so the figures here are still estimates and the API-key path (per-finding filter calls, preflight) has not been costed. Claude Code's own system prompt is about 15,000 tokens, read again
+  (mostly from cache) on every turn. A review of a small repository with an
+  Opus-class model takes a few minutes to about 15 minutes and roughly $0.50 to
+  $5, and each finding that reaches the filter costs one more call that holds
+  the whole file. `total_cost_usd` in the metadata covers the CLI only, and the
+  filter's tokens are recorded separately.
+- **Run it 3 times per task.** Neither the CLI nor the upstream filter sets a
+  temperature, so results vary between runs. Use `-k 3` and report the spread.
+- **The stock prompts leave out some risks in scope.** They exclude rate
+  limiting and resource exhaustion, ask for at least 80% confidence and HIGH or
+  MEDIUM findings only, and their categories do not name LLM risks. The
+  default filter drops "lack of hardening measures" and "user-controlled
+  content in AI prompts", and its regex rules drop findings that mention
+  unbounded loops or missing rate limits. Expect low recall on LLM02 and on
+  excessive permissions and autonomy in stock mode. Scoped mode addresses part
+  of this and is a different scanner, so report the two modes separately.
+- The upstream prompt is framed as a pull request review ("focus only on
+  security implications newly added by this PR"). Since every file is new in
+  the synthetic pull request, the whole scope counts as new.
+- Findings in `.md` files are always dropped by the upstream regex rules.
+- The upstream README says the tool is not hardened against prompt injection.
+  The key cannot be reached by the review's tools (no Bash, no web, reads of
+  the key folder denied), but the review's findings can still be steered by
+  repository content.
+
+## Codex security review agent
+
+`sast.codex_security.agent:CodexSecurityAgent` runs a security review with the open-source OpenAI Codex CLI 0.162.1 (`codex exec`, non-interactive) and calls an OpenAI model. Its engine is named "codex exec security review" in the metadata and the SARIF. It is not OpenAI's Codex Security product (`@openai/codex-security`), whose scans need Codex Security access that a plain API key may not have. Design, deviations from Codex's defaults, and what is and is not verified: [docs/codex-security-agent.md](docs/codex-security-agent.md). Status: tested with fakes and with the real Codex binary against a local fake API; not yet run against the real model (no key yet).
+
+Setup installs the pinned Codex release assets (`codex`, `codex-code-mode-host`, `bwrap`, sha256-checked) from github.com into the work dir, so the sandbox needs HTTPS egress to github.com and api.openai.com. Not baked into the tools image yet.
+
+Set the key on the host, never in a job config: `OPENAI_API_KEY` (or `CODEX_API_KEY`). The key reaches Codex only through `codex login --with-api-key` on stdin, into a private `CODEX_HOME` that is deleted after the review.
+
+Codex reviews a copy of the in-scope files plus `security_manifest.json`. By default (`sandbox=read-only`) its commands run in Codex's own read-only sandbox, which also denies `/app/repo`, the key and Codex's home. That sandbox needs unprivileged user namespaces, which a default Docker container (and so Harbor's Docker environment) does not allow: the trial then fails early with `sandbox_unavailable`. Under Harbor, pass `--extra-docker-compose harbor/codex-sandbox.compose.yaml`: that overlay turns off the container's seccomp filter for the task container only, so Codex's own read-only sandbox runs (checked in a real Harbor run on 2026-10-13: sandbox probe ok, and without the overlay the trial stops with `sandbox_unavailable`). `--ak sandbox=container` turns Codex's sandbox off and leaves the task container as the only boundary (the model can then read excluded files and the key, write files and use the network); it is an explicit opt-in, see the docs.
+
+```bash
+export OPENAI_API_KEY=...   # on the host that runs Harbor
+PYTHONPATH=$PWD .venv/bin/harbor run -y -p ../harbor-tasks -n 1 \
+  -a sast.codex_security.agent:CodexSecurityAgent -o jobs/codex-security \
+  --include-task-name crewai-code-interpreter-a \
+  --agent-timeout-multiplier 3 \
+  --ak timeout_sec=2400 --ak mode=scoped \
+  --extra-docker-compose harbor/codex-sandbox.compose.yaml
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `model` | `gpt-5.6-sol` (Codex Security's default scan model) | `codex exec -m`. Without it, Harbor's `-m` is used when it names an OpenAI model (`openai/<id>` or a bare `gpt-*`/`codex-*` id); any other `-m` is ignored and recorded (`harbor_model_name`, `model_source`) |
+| `reasoning_effort` | the model's own default | Codex `model_reasoning_effort` (Codex Security uses `xhigh`) |
+| `mode` | `scoped` | `stock`: fixed security review prompt, Codex's own review finding shape plus category and CWE. `scoped`: adds the task's output contract (ruleIds, path roles, control status, residual risk, catalogue) to the prompt and, as enums, to the output schema |
+| `sandbox` | `read-only` | `read-only` or `container` (see above) |
+| `auth` | `auto` | `openai_api_key`, `codex_api_key`, or `auto` (`OPENAI_API_KEY` first) |
+| `timeout_sec` | task timeout minus 120 s | wall-clock limit for the whole review; keep Harbor's limit 120 s above it |
+| `attempts` | 2 | `codex exec` attempts when an answer is unusable |
+| `scan_roots`, `exclude` | the task's | as for the other agents |
+
+Every option is also a host variable `CODEX_SECURITY_<KEY>`. Codex reports tokens (in the metadata), not cost, and has no cost or turn cap; only `timeout_sec` bounds a run.
+
+## Promptfoo Code Scanning agent
+
+`sast.promptfoo.agent:PromptfooCodeScanAgent` runs Promptfoo Code Scanning (`promptfoo code-scans run`, promptfoo 0.124.1 on Node.js 24.21.0). The CLI is open source; the scan runs on the hosted Promptfoo service (`api.promptfoo.app`), which picks the model and reports no cost. Design, deviations from promptfoo's defaults, and what is and is not verified: [docs/promptfoo-agent.md](docs/promptfoo-agent.md). Status: install and the run up to the service's authentication verified in the task base image; the scan itself only with fakes (the key is on the owner's host only).
+
+promptfoo scans git changes, so the agent copies the in-scope files and `security_manifest.json` outside `/app/repo`, makes them the whole change of a two-commit repository (pinned git 2.47.3 from Debian, since the task images have none), and runs `code-scans run <copy> --base main --compare scan -f json` there, from an empty private working directory. Setup installs Node.js (nodejs.org, sha256), git (deb.debian.org or snapshot.debian.org, sha256) and the 372 packages of `sast/promptfoo/npm/package-lock.json` (registry.npmjs.org, each checked against its sha512 integrity, no install scripts) in about 20 s; the sandbox needs HTTPS egress to those hosts and to api.promptfoo.app. Not baked into the tools image yet.
+
+Set the key on the host, never in a job config: `PROMPTFOO_API_KEY`. It reaches promptfoo only as that variable in the promptfoo process's own environment, read from a mode 600 file that is deleted after the scan.
+
+In `stock` mode promptfoo's findings name no task ruleId, so none can be scored: the SARIF has no results and every finding is kept in `runs[0].properties.sastAgent.toolFindings` and the metadata. In `scoped` mode the task's output contract goes to promptfoo as `--guidance-file`, asking for a header `RULE=...; CWE=...; CONTROL=...; RISK=...; RECS=...` plus `PATH:` lines at the start of every finding; only that header is read, and a finding without a valid `RULE` is dropped and counted.
+
+```bash
+export PROMPTFOO_API_KEY=...   # on the host that runs Harbor
+PYTHONPATH=$PWD .venv/bin/harbor run -y -p ../harbor-tasks -n 1 \
+  -a sast.promptfoo.agent:PromptfooCodeScanAgent -o jobs/promptfoo \
+  --include-task-name crewai-code-interpreter-a \
+  --agent-timeout-multiplier 3 \
+  --ak timeout_sec=2400 --ak mode=scoped
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `mode` | `scoped` | `stock`: promptfoo's own prompt, nothing scorable. `scoped`: the task's contract as guidance, findings scored from their header |
+| `timeout_sec` | task timeout minus 120 s | wall-clock limit for the whole scan; keep Harbor's limit 120 s above it |
+| `min_severity` | not passed (promptfoo: medium) | `--min-severity` (`low`, `medium`, `high`, `critical`) |
+| `diffs_only` | `false` (promptfoo's default) | `--diffs-only`: the service gets the change set only, no filesystem MCP access to the copy |
+| `scan_roots`, `exclude` | the task's | as for the other agents |
+
+Every option is also a host variable `PROMPTFOO_SCAN_<KEY>`. There is no model, cost, turn or API host option: promptfoo has none, and the key only goes to promptfoo's default host.
+
+## Cloudflare security-audit skill agent
+
+`sast.cloudflare_audit.agent:CloudflareAuditAgent` runs Cloudflare's open-source security-audit agent skill (cloudflare/security-audit-skill at commit `c1c8a8c`) in the pinned Claude Code CLI 2.1.296: a full audit with reconnaissance, hunter and verifier sub-agents, whose `findings.json` records (`confirmed`, `needs_validation`, `rejected`, each with an `entrypoint -> propagation -> sink` trace, and a remediation for confirmed ones) become the SARIF. Design, mapping, deviations from the skill's defaults, and what is and is not verified: [docs/cloudflare-audit-agent.md](docs/cloudflare-audit-agent.md).
+
+Setup installs Claude Code (npm, sha256 and integrity), Node.js 24.21.0 (nodejs.org, sha256; for the skill's validators) and the 19 skill files (raw.githubusercontent.com, sha256 each) into the work dir, so the sandbox needs HTTPS egress to those hosts and to api.anthropic.com. Not baked into the tools image yet.
+
+Set the credential on the host, never in a job config: `CLAUDE_CODE_OAUTH_TOKEN` (a subscription token from `claude setup-token`) or `ANTHROPIC_API_KEY`. It reaches only the Claude Code process, from a mode 600 file that is deleted after the audit.
+
+The audit runs in a copy of the in-scope files plus `security_manifest.json`, with `--permission-mode dontAsk` and rules that allow reading the copy, the skill and the output folder, writing the output folder, and only read-only shell commands plus the two validators. The skill's schema has no CWE, ruleId or contract fields, so the request also asks for a side file `sast-annotations.json` per fingerprint: CWEs only in `stock` mode; in `scoped` mode (the default) the task's contract is added as guidance and the side file also carries ruleId, location, trace roles, control status, residual risk and REC ids. The skill's own fix text is kept verbatim under `properties.toolProperties` for a later judge.
+
+```bash
+export CLAUDE_CODE_OAUTH_TOKEN=...   # on the host that runs Harbor
+PYTHONPATH=$PWD .venv/bin/harbor run -y -p ../harbor-tasks -n 1 -e docker \
+  -a sast.cloudflare_audit.agent:CloudflareAuditAgent -o jobs/cloudflare-audit \
+  --include-task-name crewai-code-interpreter-a \
+  --agent-timeout-multiplier 4 \
+  --ak auth=oauth --ak model=claude-opus-5-5 --ak timeout_sec=3300 --ak mode=scoped
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `model` | `claude-opus-5-5` | Claude Code `--model` (Harbor's `-m` when it names an Anthropic model); checked in the CLI's init message |
+| `mode` | `scoped` | `stock`: the skill's audit plus a CWE side file. `scoped`: plus the task's contract and the full side file |
+| `auth` | `auto` | `oauth`, `api_key`, or `auto` (`ANTHROPIC_API_KEY` first) |
+| `profile` | `quick` | the skill's run profile (`quick`, `standard`, `deep`; the skill's own default is `standard`) |
+| `agent_budget` | none | the skill's strict budget of agent invocations |
+| `include_needs_validation` | `true` | report `needs_validation` records (no target code is executed, so most leads end there) |
+| `max_turns`, `max_budget_usd`, `reasoning_effort` | none | Claude Code limits and `--effort` |
+| `timeout_sec` | task timeout minus 120 s | wall-clock limit for the audit; keep Harbor's limit 120 s above it |
+| `attempts` | 1 | CLI runs when a run ends without `findings.json` |
+| `scan_roots`, `exclude` | the task's | as for the other agents |
+
+Every option is also a host variable `CLOUDFLARE_AUDIT_<KEY>`. A run whose `run-metadata.json` does not say `run_status: complete` is a tool outcome (no SARIF, scored 0).
+
+## Datadog SAIST agent
+
+`sast.datadog_saist.agent:DatadogSaistAgent` runs Datadog's open-source AI SAST engine, datadog-saist v0.0.32 (DataDog/datadog-saist, Apache-2.0, preview), locally in the sandbox: for each (file, rule) pair its keyword prefilter selects, a detection model reports violations and a validation model confirms them, and it writes SARIF. Its rules come from Datadog's public endpoint at run time (no Datadog account, not pinnable; a digest of the rules used is recorded). Design, the frozen rule mapping, deviations from the tool's defaults, and what is and is not verified: [docs/datadog-saist-agent.md](docs/datadog-saist-agent.md).
+
+Setup downloads the pinned release zip from github.com (zip and executable sha256-checked) into the work dir, so the sandbox needs HTTPS egress to github.com, api.datadoghq.com and the model provider. Not baked into the tools image yet.
+
+Set the provider's key on the host, never in a job config: `OPENAI_API_KEY` for the default models (`ANTHROPIC_API_KEY` or `GOOGLE_API_KEY` for those providers' models). It reaches only the datadog-saist process's own environment, from a mode 600 file that is deleted after the scan.
+
+datadog-saist takes no extra instructions and its answer is fixed (rule id, one location, the model's reason), so there is no scoped mode: `--ak mode=scoped` is accepted and runs as stock, recording `mode_effective: stock`. Its rule ids are mapped to the task ruleIds by a frozen table (`datadog-map-1`, in the docs); there are never `codeFlows`, `controlStatus`, `residualRisk` or `recommendations`. The model's reason and the rule's generic remediation text are kept verbatim under `properties.toolProperties` for a later judge.
+
+```bash
+export OPENAI_API_KEY=...   # on the host that runs Harbor
+PYTHONPATH=$PWD .venv/bin/harbor run -y -p ../harbor-tasks -n 1 -e docker \
+  -a sast.datadog_saist.agent:DatadogSaistAgent -o ../harbor-jobs/datadog-saist-test \
+  --include-task-name crewai-code-interpreter-a
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `model` | `openai-gpt5.2` (Harbor's `-m` when it names a supported OpenAI model) | `--detection-model`: a name the binary knows or its API id (`gpt-5.2`, `gpt-5-mini`, `claude-sonnet-4-5`, ...) |
+| `validation_model` | the detection model | `--validation-model`, same provider |
+| `mode` | `stock` | `scoped` is accepted and runs as stock (see above) |
+| `rules` | `api` | `api`: Datadog's rule endpoint (the tool's default). `embedded`: `--local-prompts`, the 12 rules compiled into the binary, none of them an LLM rule |
+| `request_timeout_sec` | 120 (tool: 30) | `--request-timeout-sec`, per model call |
+| `file_concurrency` | 20 | `--file-concurrency` |
+| `skip_indexing` | `false` | `--skip-indexing` |
+| `timeout_sec` | task timeout minus 120 s | wall-clock limit for the whole scan |
+| `scan_roots`, `exclude` | the task's | as for the other agents |
+
+Every option is also a host variable `DATADOG_SAIST_<KEY>`. The tool reports total input and output tokens; the cost estimate prices them all as uncached input (an upper bound). A refused key makes datadog-saist exit 0 with every scan tagged `RULE_FAILURE`; the agent turns that into an infrastructure error instead of an empty result.
 
 ## Development
 

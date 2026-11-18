@@ -4,7 +4,8 @@
   rule is looked up in the driver and in the query packs (``tool.extensions``),
   where CodeQL lists the rules it ran. CodeQL names no primary CWE and lists the
   tags in numeric order, so the first tag means nothing. The tags are decided
-  as an unordered set with ``sast.cwe_map.decide_unordered`` (cwe-map-4):
+  as an unordered set with ``sast.cwe_map.decide_unordered`` (cwe-map-5,
+  see its docstring for generic CWEs):
   unmapped CWEs are ignored, a set whose mapped CWEs are all in one family is
   passed on with that family's CWEs first, and a set that spans two families is
   dropped as ambiguous and counted (``results_by_cwe_decision``,

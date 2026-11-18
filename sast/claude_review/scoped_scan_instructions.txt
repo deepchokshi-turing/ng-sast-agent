@@ -1,0 +1,34 @@
+**GenAI Sensitive Information Disclosure (OWASP LLM02):**
+- Sensitive data (PII, PHI, financial data, credentials, confidential business data, privileged documents) reaching model-visible state (prompt, RAG results, memory, tool results, logs of prompts, completions or traces) without controls that preserve its authorisation boundary
+- The same data able to cross an authorisation or trust boundary (email, HTTP or webhook, tool arguments, external API, shared store, broadly readable logs, cross-tenant retrieval, external model provider)
+- Retrieval without user, tenant or document authorisation in the query, full records appended to prompts, and raw sensitive fields passed to the model
+
+**GenAI Excessive Agency (OWASP LLM03):**
+- Tools or tool operations beyond what the intended task requires (excessive functionality)
+- A tool's credential or authorisation scope that exceeds what its operation requires (excessive permissions)
+- A model decision that can trigger a high-impact action with no independent policy or approval gate (excessive autonomy)
+
+**Application context and output for this review:**
+- The file security_manifest.json at the repository root, when it exists, describes the application's intended task, its actors, trust boundaries, and what data, actions, purposes and recipients are authorised. Read it before reviewing and judge every potential issue against it. Data or capability that the manifest authorises is not a finding.
+- Report each finding at the code that must change to fix it, one finding per independently fixable weakness.
+- In addition to the fields of the required output schema, give every finding a field "cwe" holding a JSON list of the CWE IDs that best describe the weakness, most specific first, for example ["CWE-532"] or ["CWE-78", "CWE-77"]. Use real CWE IDs only.
+- Also give every finding a field "rule_id" naming its risk: "LLM02.SID.MEDIUM" when sensitive data reaches model-visible state without controls, "LLM02.SID.HIGH" when that data can also cross an authorisation or trust boundary, "LLM03.EA.FUNCTIONALITY" for tools or tool operations beyond the intended task, "LLM03.EA.PERMISSIONS" for a credential or authorisation scope wider than the operation needs, or "LLM03.EA.AUTONOMY" for a high-impact action that a model decision can trigger with no independent gate. A weakness that is both a disclosure and an agency risk is two findings, one per rule_id.
+- Also give every finding a field "path" holding a JSON list of the steps of the reachable path in order, from where the data or the model decision originates to where the disclosure or the action happens, for example [{"file": "src/app/tools.py", "line": 12, "role": "model_decision"}, {"file": "src/app/client.py", "line": 40, "role": "sink"}]. Each step names a file relative to the repository root, a line in it and a role, which is one of source, root_cause, context_assembly, model_consumption, model_decision, control_point or sink.
+- Also give every finding a field "control_status": "none" when no control is on the path, "partial" when a control exists but does not close the path, or "complete".
+- Also give every finding a field "residual_risk": "low", "medium" or "high".
+- Also give every finding a field "recommendation_ids" holding a JSON list of the IDs from the recommendation catalogue below that would close the path. List only the controls that apply to this finding. The free text "recommendation" field stays as it is.
+
+**Recommendation catalogue:**
+- REC-AUTHZ-BEFORE-RETRIEVAL: enforce user, tenant or document authorisation inside the retrieval query
+- REC-MINIMIZE-CONTEXT: send only task-required fields to the model
+- REC-SENSITIVE-DATA-FILTER: detect and redact sensitive values before prompting and before output (classifier or NER plus patterns)
+- REC-SINK-SIDE-IFC: deterministic information-flow check at the sink against the data's classification
+- REC-DISABLE-AUTO-CONTEXT: remove automatic full-record context unless justified
+- REC-MINIMIZE-TOOLS: register only tools the scenario needs
+- REC-SPLIT-READ-WRITE: separate read operations from write, delete or send operations
+- REC-NARROW-TYPED-TOOLS: replace general-purpose tools with narrow, typed, allow-listed ones
+- REC-LEAST-PRIVILEGE: scope credentials to the minimum actions and resources
+- REC-USER-SECURITY-CONTEXT: execute in the end user's security context, not a shared privileged identity
+- REC-COMPLETE-MEDIATION: downstream systems authorise every request independently of the model
+- REC-ACTION-BOUND-APPROVAL: human approval bound to the exact resolved action and parameters
+- REC-POLICY-GATE: deterministic policy gate that rejects unauthorised actions

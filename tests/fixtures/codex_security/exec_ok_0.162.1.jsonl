@@ -1,0 +1,11 @@
+{"type":"thread.started","thread_id":"01a13174-624a-7f22-89e0-573b0eaf7e98"}
+{"type":"turn.started"}
+{"type":"error","message":"Reconnecting... 2/5 (unexpected status 404 Not Found: not here, url: ws://127.0.0.1:8765/v1/responses)"}
+{"type":"error","message":"Reconnecting... 3/5 (unexpected status 404 Not Found: not here, url: ws://127.0.0.1:8765/v1/responses)"}
+{"type":"error","message":"Reconnecting... 4/5 (unexpected status 404 Not Found: not here, url: ws://127.0.0.1:8765/v1/responses)"}
+{"type":"error","message":"Reconnecting... 5/5 (unexpected status 404 Not Found: not here, url: ws://127.0.0.1:8765/v1/responses)"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Falling back from WebSockets to HTTPS transport. unexpected status 404 Not Found: not here, url: ws://127.0.0.1:8765/v1/responses"}}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/bash -lc 'cat src/app.py'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/bash -lc 'cat src/app.py'","aggregated_output":"import os\nprint(os.environ)\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"{\"findings\": [{\"title\": \"[P2] demo\", \"line\": 2}]}"}}
+{"type":"turn.completed","usage":{"input_tokens":2000,"cached_input_tokens":200,"cache_write_input_tokens":0,"output_tokens":100,"reasoning_output_tokens":20}}

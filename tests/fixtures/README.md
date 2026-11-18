@@ -87,6 +87,3 @@ See `sonarqube_26.9_PROVENANCE.txt`.
   task's `task.toml`, `tests/grade.py` and `tests/ground_truth.json`, copied
   unchanged on 2026-10-08, which is all the CodeQL grading tests read. They are
   not runnable tasks.
-
-`grade_v1.py` is the original task grader, kept to check that grader v2 scores
-tasks without the v2 fields exactly as v1 did.

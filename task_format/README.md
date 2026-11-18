@@ -1,12 +1,9 @@
-# Task format: grader v3
+# Task format: grader v3.3
 
-`grade.py` here is the task grader. Every field added since v1 is optional. A
-ground truth without the v3 fields is graded exactly as by v2, and one without
-the v2 fields exactly as by the original grader (`tests/test_grader_v2.py`
-checks this). Tasks can move over one at a time.
+`grade.py` here is the task grader, and the only one: every task in harbor-tasks and every sample task under `tests/fixtures/tasks` carries a byte-identical copy. Every field added since v1 is optional, so older ground truths still grade; the earlier graders and their comparison test were removed on 2026-10-12.
 
 To use it, copy `grade.py` into each task's `tests/grade.py`. `test.sh` doesn't
-change. The same file is kept as `v3/common/grade_v3.py`.
+change.
 
 ## What the grader measures
 
@@ -39,7 +36,7 @@ category gets a TPR, an FPR and a score of TPR minus FPR. Our mapping is below.
 | true test case | a positive task, labelled with the rule ids of its findings |
 | false test case | a minimal-contrast negative, labelled with its `contrast_rule_ids` |
 | exact CWE match | `matching.require_cwe` with the finding's `acceptable_cwes` |
-| results outside test case files ignored | `fp_outside_scope`, never a false positive (on a negative, anything away from the fix and the traps) |
+| results outside test case files ignored | `fp_outside_scope`, never a false positive: from v3.2 a result outside the scanner roots or in an excluded path (before v3.2, outside `fix_changed_files` on a positive, and away from the fix and the traps on a negative) |
 
 The category outcome is TP when a finding of that category is matched and FN
 when none is. On a negative it is FP when a result of the same OWASP risk family
@@ -63,7 +60,9 @@ and its own weighted measurement scores, so the reward is a sum over the pairs
 and the grader finds the best matching exactly with the Hungarian algorithm,
 using exact fractions. A result that matches through a location outside the
 fix files gets the same detection credit in that sum, which is a close
-approximation. No current task has such a location. When two matchings give
+approximation. It applies only to findings with an accepted location (primary
+or alternative) outside `fix_changed_files`, for example a linked disclosure
+finding whose primary location is where the data leaves. When two matchings give
 the same reward, the grader reads the results in file order and gives each one
 the earliest finding it can, and prefers matching a result to leaving it
 unmatched. That is what the earlier greedy pass did, so a SARIF that greedy
@@ -103,6 +102,8 @@ positive when it lies inside `fix_changed_files`.
 
 A negative scores 1.0 unless one of its results falls in a failure bucket.
 
+From v3.2 there is a third bucket, `in_scope` (any contrast-family result in scope), a `"complete"` result never fails, and traps may name exact `trap_rule_ids`; see "v3.2" below. The rest of this section describes the v3 rules, which still apply.
+
 - `near_fix` is a result whose rule id starts with one of the contrast prefixes
   (LLM02 or LLM03, taken from `contrast_rule_ids`) and that lands within
   `line_tolerance` of `fixed_locations`.
@@ -130,6 +131,98 @@ the results in both buckets.
 excessive-agency finding that exposes a disclosure, `ea_exposes_sid`) are
 copied into that finding's entry in `grading_detail.json`. Each linked finding is
 still matched and scored on its own.
+
+## v3.1: complete controls on negatives
+
+A negative may list the complete controls its fix adds, next to `fixed_locations`:
+
+```json
+"controls": [{"name": "path_confinement", "status": "complete",
+              "at": {"file": "src/mini/tools/file_tool.py", "start_line": 20, "end_line": 24},
+              "contrast_of": "F1", "note": "..."}],
+"control_status": "complete",
+"residual_risk": "low"
+```
+
+`at` is one of the negative's `fixed_locations`. Every negative in harbor-tasks uses `residual_risk: "low"`: the client spec asks to "assess residual risk" but never calls it none, and the negatives keep traps and residual review notes.
+
+A result names a complete control when its rule id has a contrast prefix, its `properties.controlStatus` is `"complete"`, and it lands within `line_tolerance` of the control's `at`. Such a result is not a failure (whichever bucket it would otherwise fall in) and is listed under `complete_control_recognised` in `grading_detail.json`. Each control scores 0.75 when a result names it, plus 0.25 when that result's `residualRisk` equals the negative's `residual_risk`, and the mean over the controls is the negative-side controls sub-score `neg.controls` in `reward.json` (with `neg.complete_control_recognised`, the number of such results). `complete_controls` in `grading_detail.json` shows each control, whether it was recognised and by which result.
+
+`neg.controls` is reported but does not enter the reward. A silent negative still scores 1.0, any other result is judged by the near-fix and trap rules above, and a negative without `controls` is graded exactly as before (no `neg.controls` key). A SARIF that recognises a control and also has a failing result still fails. The oracle SARIF of every negative names each of its complete controls, so it scores 1.0 with `neg.controls` 1.0.
+
+## v3.2: scoring changes made in response to the external audit
+
+These are scoring changes made in response to the external audit (`external_audit/B4-agent-summary.md` items A3, A5, A6, A7, with A1 added and then reverted and `external_audit/D-tasks-critique-summary.md` items F-B1, F-M1, F-M5, m9). They were signed off as part of "fix all valid audit items" on 2026-10-12. `GRADER_VERSION` in `grade.py` is `v3.2` and is written to `grading_detail.json` as `grader_version`. The grader scores exactly what the shared output contract (`instruction.md`, identical in every task) asks for. Where a v3.2 rule reads a new ground-truth field and the field is absent, the grader falls back to the older field as stated below.
+
+### Scope
+
+The scope is where a result is scored. It is `matching.scanner_roots` minus `matching.excluded_paths` (both copied from `task.toml`) when the ground truth has scanner roots, else `fix_changed_files` minus the excluded paths, else the whole repo minus the excluded paths. A root or excluded path matches the path itself and everything under it, and a pattern with `*`, `?` or `[` is a glob. `grading_detail.json` names the mode used under `scope` (`scanner_roots`, `fix_changed_files` or `repo`). Results outside the scope are `fp_outside_scope` and cost nothing.
+
+### Negatives fail on a false alarm anywhere in scope (F-B1, A7)
+
+Before v3.2 a negative failed only on a result near `fixed_locations` or on one of its traps, so a confident false alarm elsewhere in the code scored 1.0. A negative now also fails on any result in scope whose OWASP prefix (LLM02 or LLM03) is the prefix of one of its `contrast_rule_ids`. This is a third failure bucket, `in_scope`, with the flat flag `neg.fail.in_scope` in `reward.json` and the list `results_in_scope` in `grading_detail.json`. The buckets are checked in the order `near_fix`, `trap`, `in_scope`, each result is counted once, and `failure_bucket` joins the buckets that fired with `+` (for example `near_fix+in_scope`). `fp` counts the results in all three buckets.
+
+A result whose `properties.controlStatus` is `"complete"` says that a control closes the path, so it is never a failure, wherever it lands (at the fix, on a trap or elsewhere). Near one of the negative's complete `controls` it still earns the v3.1 `neg.controls` credit. Any other such result is listed under `complete_claims` and is not counted in `fp_outside_scope`.
+
+An empty SARIF still scores 1.0 on a negative: the tool said the code is clean. A missing SARIF (the tool wrote no answer, for example after a timeout) still scores 0 on a negative as on a positive, with `sarif_missing: 1`, so not finishing is never rewarded (A5).
+
+From v3.3 (2026-10-13, final audit D2) the `in_scope` bucket takes a result of either risk family, LLM02 or LLM03, not only the contrast family. Every negative's task-level label is "neither" (client spec, measurement 1), so an SID claim on a negative whose contrast is EA only, or the reverse, is a false alarm too. Before v3.3 such a claim landed in `fp_outside_scope` and the negative scored 1.0 on 6 of the 15 negatives. Results with a rule id outside LLM02/LLM03 are still not scored (OWASP Benchmark: a result counts only in its own category).
+
+### Positives count false positives across the scanner roots (F-M1)
+
+An unmatched result is a false positive when it is in scope, not only when it is in `fix_changed_files`. A tool that adds 30 unrelated results in the scanner roots to one correct result now gets a detection F1 of 2/32 instead of 1.0. Results outside the roots or in excluded paths stay `fp_outside_scope`. A ground truth without scanner roots is graded as before (false positives only inside `fix_changed_files`).
+
+A result with `controlStatus: "complete"` claims no weakness, so on a positive it neither matches a finding nor counts as a false positive. It is listed under `complete_claims` and the finding it sits on stays a miss. Without this, a tool could mark every result "complete" and pass every negative at no cost on the positives.
+
+### No cross-family match (A1 reverted)
+
+A result matches only a finding of its own risk family. A cross-family match on a shared CWE was added in v3.2 for scanners whose rule id comes from a CWE map, and reverted on 2026-10-12: the client spec is followed first and OWASP Benchmark where it is silent, and an OWASP Benchmark result counts only in its own category. Those CWE-map scanners (Semgrep, CodeQL, SonarQube) are to be dropped from the benchmark, which will evaluate AI-based scanners that choose the rule id themselves. `per_finding` still carries `cross_family`, always false, so older readers keep working.
+
+### Path score (A3)
+
+The path score used to be the share of required steps covered, so a reversed path with every role set to `sink` scored 1.0. It is now
+
+`path = coverage * (0.2 + 0.8 * order * role) * precision`
+
+- `coverage`: the share of required ground-truth steps that some emitted threadFlow location lands within `path_line_tolerance` of (the step or one of its `alternatives`), as before.
+- `order`: over the covered steps, the longest chain of them, in ground-truth order, whose covering emitted locations do not go backwards in the flow (two steps may share one emitted location), divided by the number of covered steps.
+- `role`: the share of covered steps whose covering location carries the step's role in the threadFlow location's `properties.role`. `source` and `model_decision` are one start role. Legacy ground-truth roles are read as their contract roles: `tool_output` as `model_consumption`, `pass_through` as `context_assembly`, `action` as `sink`, `control` as `control_point`.
+- `precision`: `min(1, (len(path) + 2) / emitted steps)`, where `len(path)` counts every ground-truth step (required or not) and emitted steps are all threadFlow locations of the result. A flow far longer than the labelled path loses credit, so blanket coverage no longer pays.
+
+Order and role multiply rather than add because steps within tolerance of each other cannot be ordered by line (order is 1 whichever way the flow runs), so only their roles tell a reversed path from the right one. The additive form first suggested (`0.7 + 0.15 * order + 0.15 * role`) cannot go below 0.7 for a fully covered path, so it could not meet the 0.6 target. A correct oracle path scores exactly 1.0. Reversing every positive oracle's flows and setting every role to `sink` gives at most 0.6 per finding (0.6 only for a two-step path whose steps sit within tolerance of each other, where the sink role is right), and typically 0.25 to 0.47. A correct path without roles scores 0.2, and one with only the first step as `source` and the last as `sink` (as the pattern scanners write it) scores 0.2 plus 0.8 times the share of covered steps those two roles get right. A finding with no required steps still scores 1.0. `path_steps` in `per_finding` now shows `role_ok` per step.
+
+### Traps name the wrong claim (F-M5)
+
+A `hard_negative_trap` entry may list `trap_rule_ids`, the exact rule ids that would be a wrong claim there. When it does, only a result with one of those rule ids within tolerance of the trap hits it, so a different weakness reported a few lines away no longer hits the trap. A trap without `trap_rule_ids` (or with an empty list) keeps the prefix rule (`trap_rule_prefixes`). This applies to trap hits on negatives and on positives. On a negative a contrast-family result in scope still fails under the `in_scope` rule above, so `trap_rule_ids` decides only for results outside the contrast family and for traps outside the scope. `--check-truth` accepts a trap with `trap_rule_ids` and no `trap_rule_prefixes`, and reports a `trap_rule_ids` that is not a list of strings.
+
+### Category outcomes on negatives (A6)
+
+A failing result on a negative used to count against the contrast category that shares its prefix, so an `LLM03.EA.PERMISSIONS` result on an AUTONOMY contrast was an AUTONOMY false positive. It now counts against the category it claims: `reward.json` gets `cat.LLM03.EA.PERMISSIONS.truth: 0` and `cat.LLM03.EA.PERMISSIONS.detected: 1`, and the contrast category stays `truth: 0, detected: 0` (TN) unless a result of that category fails too. The key names are unchanged (`cat.<category>.truth` and `cat.<category>.detected`), so `tools/report.py` reads them as before; a negative can now carry a category key that is not one of its contrast categories. A rule id that names no known category (`LLM02.SID`, `LLM03.EA.FUNCTIONALITY`, `.PERMISSIONS`, `.AUTONOMY`) falls back to the contrast categories of its prefix.
+
+### Paths in SARIF (m9)
+
+`norm_uri` now also strips a `file://` scheme (any case), everything up to and including `/app/repo/` wherever it appears, any leading `/` and `./`, and a leading `repo/`, and reads a backslash as `/`. `file:///app/repo/src/a.py`, `/home/runner/app/repo/src/a.py` and `repo/src/a.py` all give `src/a.py`.
+
+### What the ground truth must provide
+
+`matching.scanner_roots` and `matching.excluded_paths` (copied from `task.toml`) on every ground truth, so that the negative `in_scope` rule and the positive false-positive count use the scanner's scope, and `trap_rule_ids` on every `hard_negative_trap`. `--check-truth` reports roots or excluded paths that are not lists of paths.
+
+## Ground truth gt-0.2
+
+`schema_version: "gt-0.2"` adds evaluator-only annotation fields. None of them changes how a positive is graded, and `--check-truth` requires them only from gt-0.2 on (and checks their shape whenever they are present).
+
+- `snippet_id` and `snippet_sha256` on every location (primary and alternative locations, path steps and their alternatives, control locations, `negative_analyses`, `fixed_locations`). `snippet_id` is `<task_id>:<file>:<start_line>-<end_line>`, the primary key that ties a label to a code snippet (spec comment SS1). `snippet_sha256` is the SHA-256 of those lines of `environment/repo/<file>`, read with CRLF as LF and joined with `
+` (`snippet_sha256` in `grade.py`). Line numbers are unchanged. Regenerate with `python tools/snippet_ids.py ../harbor-tasks` from `ng-sast-agent` (`--check` writes nothing and exits 1 when a file is out of date). The tool is deterministic and keeps each file's indent and key order.
+- `affected_asset` per finding (spec 1, measurement 2): `fixture_ids`, `data_class`, `classification` and `canary_ids` from the manifest `fixtures` and `data_classification`, matched through `evidence.canary_id`. An excessive-agency finding without data names the `resource` and the `manifest_path` it comes from instead.
+- `egress` on every path step whose role is `sink` or `action`: `{"kind": "external" | "internal", "boundary": "<trust_boundaries id>"}` (spec comment SS3, internal and external egress points).
+- `consequence` on every excessive-agency finding: one sentence of the finding's own `rationale`.
+- `violates` per finding: a list of `{"manifest_path": "authorized_recipients[1].data_scope", "summary": "..."}`, the manifest entries the finding breaks.
+- The first `source` or `model_decision` path step of every finding is `required` (spec 1, measurement 2, "from source or model decision to sink or action").
+- Negatives carry `controls`, `control_status` and `residual_risk` as above.
+
+## Scoring changes made after seeing results
+
+2026-10-12: `matching.require_cwe` is now `false` on every harbor-tasks ground truth. Reason: the client spec defines detection by risk type and location, not CWE. A result now matches a finding on risk family and location alone, and CWE agreement still feeds the classification sub-score (`0.8 * rule + 0.2 * cwe_ok`). The grader code did not change for this, only the labels. Signed off by the lead on 2026-10-12.
 
 ## Task-level outcomes
 
@@ -198,8 +291,18 @@ Run it on every task at build time. It reports
   could be credited to either finding, so which finding it detected is not
   well defined. `task_781350`'s F1
   and F2 alternative at `_instrumentation.py:115` and `:107` are an example.
+  From v3.3 two findings that name each other in `shared_location_with` are
+  exempt: one fix there closes both (crewai-website-search-a F1 and F3 at
+  `webpage_loader.py:27`), and the one-to-one assignment still credits each
+  result to one finding only.
 
-`check_truth(truth)` in `grade.py` returns the same problems as a list.
+- from gt-0.2 on, the fields of "Ground truth gt-0.2" above: a missing snippet id or hash, a missing `affected_asset`, `violates`, `egress` on a sink or action step, `consequence` on an excessive-agency finding, a first `source` or `model_decision` step that is not required, and on a negative a missing `controls` entry or `residual_risk`,
+- whatever the version, a malformed new field: an `egress` kind other than external or internal, a `consequence` that is not text of the rationale, a negative control that is not complete or whose `at` is not one of `fixed_locations`,
+- with the repo (`--repo <dir>`, by default `../environment/repo` next to the truth's folder when it exists): a `snippet_sha256` that no longer matches the code, a location outside its file, and, from the repo's `security_manifest.json`, an `egress` boundary that is not a trust boundary id, an `affected_asset` fixture that does not exist or misses the fixtures carrying the finding's canary, a `data_class` that is not their asset class, and a `violates` or `affected_asset` `manifest_path` that does not resolve.
+
+A hash mismatch means the code or the label moved. Check that the label still points at the right lines before rerunning `tools/snippet_ids.py`.
+
+`check_truth(truth, repo=None, manifest=None)` in `grade.py` returns the same problems as a list.
 
 ## v2 fields (unchanged)
 
@@ -246,8 +349,17 @@ cannot, for example, see a fix-only name that both twins share). It
   appear in a text file under `environment/` (case and punctuation ignored),
 - checks that `environment/Dockerfile` copies only `repo/` into the image
   (`COPY --from` of another build stage is allowed),
-- checks that twin pairs differ only in the positive's `fix_changed_files` with
-  identical manifest and fixtures.
+- searches `task.toml` and `instruction.md` for the same words, since the
+  harness and the scanner can read them,
+- checks that twin pairs differ only in the original positive's
+  `fix_changed_files` with identical manifest and fixtures. With role-free ids
+  the pairs come from `VARIANTS.json`. The original positive is the twin whose
+  role is positive and whose ground truth lists `fix_changed_files`. When both
+  twins qualify (a twin with the upstream fix relabelled as a partial-control
+  positive), `former_name` decides, then `lineage.code_state` (`source_commit`)
+  in provenance, and a pair that is still open is reported,
+- checks that twin `task.toml` files differ only in `task_id`, `variant_id` and
+  `related_variant_ids`.
 
 It exits non-zero on any problem. `--write-qc` records "pass" or "fail" in
 `validation/provenance.json` under `qc.label_leak_scan`.
@@ -270,4 +382,4 @@ ground-truth check against the files inside the image. Limit it with
 | `smoke_eval_twin` | 0.00 (failed) | 1.00, `fp_outside_scope` 1 |
 
 `tests/test_grader_v3.py` builds a positive with two linked findings and its
-minimal-contrast negative and checks every v3 rule above.
+minimal-contrast negative and checks every v3 rule above. `tests/test_grader_v32.py` checks every v3.2 change, including the auditor's probes (spray, reversed all-sink path, confident false alarm away from the fix, complete-control result, no cross-family match, `trap_rule_ids`).

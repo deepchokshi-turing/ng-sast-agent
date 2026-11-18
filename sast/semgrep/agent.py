@@ -25,13 +25,19 @@ from typing import Any, ClassVar
 from harbor.environments.base import BaseEnvironment
 
 from ..base import REPO_DIR, ScannerAgent
-from ..errors import ScannerError
+from ..errors import ScannerError, ToolOutcome
 from ..findings import Finding
 from ..scope import ALWAYS_EXCLUDE, in_scope, task_scope
 from ..task_config import TaskSettings
 from . import pins
 from .normalise import normalise
 from .options import SemgrepOptions
+
+#: Semgrep exit codes that mean our own configuration is broken (4 unparseable
+#: pattern, 5 unparseable YAML, 7 missing config, 8 invalid language): an
+#: infrastructure failure. Any other non-zero exit (2 is Semgrep's generic fatal
+#: error) is Semgrep failing on this repository, a tool outcome.
+CONFIG_EXIT_CODES = (4, 5, 7, 8)
 
 _INSTALL_SCRIPT = Path(__file__).with_name("install.py")
 _MERGE_SCRIPT = Path(__file__).with_name("merge_rules.py")
@@ -150,7 +156,8 @@ class SemgrepAgent(ScannerAgent):
 
         started = time.monotonic()
         result = await self._exec(
-            environment, shell, timeout_sec=budget_sec, what="the Semgrep scan", cwd=REPO_DIR, env=env
+            environment, shell, timeout_sec=budget_sec, what="the Semgrep scan", cwd=REPO_DIR, env=env,
+            tool_step=True,
         )
         seconds = round(time.monotonic() - started, 1)
         self._write_log("command-1", shell, result, seconds)
@@ -160,9 +167,10 @@ class SemgrepAgent(ScannerAgent):
             # Without --error, findings exit 0; any other code is a failed scan
             # (2 missing target, 7 bad config, ...), even though Semgrep still
             # writes a JSON with "results": [] that would read as a clean scan.
-            raise ScannerError(
-                f"Semgrep exited {result.return_code}: {await self._semgrep_errors(environment, output_file)}"
-            )
+            message = f"Semgrep exited {result.return_code}: {await self._semgrep_errors(environment, output_file)}"
+            if result.return_code in CONFIG_EXIT_CODES:
+                raise ScannerError(message)
+            raise ToolOutcome("tool_crashed", message)
         raw = await self._download_bytes(environment, output_file)
         try:
             document = json.loads(raw)
@@ -176,9 +184,7 @@ class SemgrepAgent(ScannerAgent):
         meta.update(counts)
         # Belt and braces: Semgrep's include/exclude matching is gitignore-like;
         # anything it still reported outside the task's scope is dropped and counted.
-        kept = [f for f in findings if in_scope(f.file, roots, excludes)]
-        meta["findings_out_of_scope"] = len(findings) - len(kept)
-        return kept
+        return self._keep_in_scope(findings, roots, excludes, meta)
 
     def artifact_files(self) -> dict[str, str]:
         work = getattr(self, "_work_dir", None)

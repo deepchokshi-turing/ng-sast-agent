@@ -1,0 +1,60 @@
+2026-10-14T16:57:37.555Z	INFO	log/zap.go:50	Got 379 prompts from the Datadog API
+2026-10-14T16:57:37.557Z	INFO	log/zap.go:50	analyzing directory=/work, detection_model=openai-gpt5-mini, validation_model=openai-gpt5-mini
+2026-10-14T16:57:37.558Z	INFO	log/zap.go:50	File discovery: 13 files in 540.292µs
+2026-10-14T16:57:37.558Z	INFO	log/zap.go:50	Local Code Security config: no YAML file in /work (code-security.datadog.yaml|.yml or static-analysis.datadog.yaml|.yml); scan scope not narrowed from disk
+2026-10-14T16:57:37.559Z	INFO	log/zap.go:50	Processing 13 files (batch size: 50 files, 4 concurrent batches)
+2026-10-14T16:57:37.559Z	DEBUG	log/zap.go:46	Processing file batch 1/1 (13 files)
+2026-10-14T16:57:37.559Z	INFO	log/zap.go:50	Determined applicable rules for 13 files
+2026-10-14T16:57:37.559Z	INFO	log/zap.go:50	Rule matching phase: 13 files in 726.129µs
+2026-10-14T16:57:37.560Z	DEBUG	log/zap.go:46	Indexing 13 files using 8 workers
+2026-10-14T16:57:37.582Z	INFO	log/zap.go:50	Indexed 13 files in 22.006854ms
+2026-10-14T16:57:37.583Z	WARN	log/zap.go:54	Too many tokens in detection context, dropping some related files (analyzed file src/crewai_codeint_mini/__main__.py, included files: [], all files: [src/crewai_codeint_mini/printer.py src/crewai_codeint_mini/agent.py])
+2026-10-14T16:57:37.583Z	WARN	log/zap.go:54	Too many tokens in detection context, dropping some related files (analyzed file src/crewai_codeint_mini/agent.py, included files: [], all files: [src/crewai_codeint_mini/_compat/docker.py src/crewai_codeint_mini/tools/code_interpreter_tool/code_interpreter_tool.py src/crewai_codeint_mini/llm.py])
+2026-10-14T16:57:37.583Z	INFO	log/zap.go:28	querying llm for rule:datadog/python-excessiveagency and src/crewai_codeint_mini/__main__.py
+2026-10-14T16:57:37.583Z	INFO	log/zap.go:28	querying llm for rule:datadog/python-excessiveagency and src/crewai_codeint_mini/printer.py
+2026-10-14T16:57:37.583Z	INFO	log/zap.go:28	querying llm for rule:datadog/python-xss and src/crewai_codeint_mini/llm.py
+2026-10-14T16:57:37.584Z	WARN	log/zap.go:54	Too many tokens in detection context, dropping some related files (analyzed file src/crewai_codeint_mini/_compat/docker.py, included files: [src/crewai_codeint_mini/agent.py], all files: [src/crewai_codeint_mini/agent.py src/crewai_codeint_mini/tools/code_interpreter_tool/code_interpreter_tool.py])
+2026-10-14T16:57:37.585Z	WARN	log/zap.go:54	Too many tokens in detection context, dropping some related files (analyzed file src/crewai_codeint_mini/agent.py, included files: [src/crewai_codeint_mini/llm.py], all files: [src/crewai_codeint_mini/llm.py src/crewai_codeint_mini/tools/code_interpreter_tool/code_interpreter_tool.py src/crewai_codeint_mini/_compat/docker.py])
+2026-10-14T16:57:37.585Z	WARN	log/zap.go:54	Too many tokens in detection context, dropping some related files (analyzed file src/crewai_codeint_mini/tools/code_interpreter_tool/code_interpreter_tool.py, included files: [src/crewai_codeint_mini/agent.py src/crewai_codeint_mini/_compat/tools.py src/crewai_codeint_mini/_compat/pydantic.py], all files: [src/crewai_codeint_mini/agent.py src/crewai_codeint_mini/_compat/tools.py src/crewai_codeint_mini/_compat/pydantic.py src/crewai_codeint_mini/_compat/docker.py src/crewai_codeint_mini/printer.py])
+2026-10-14T16:57:37.586Z	INFO	log/zap.go:28	querying llm for rule:datadog/python-cmdi and src/crewai_codeint_mini/_compat/docker.py
+2026-10-14T16:57:37.586Z	WARN	log/zap.go:54	Too many tokens in detection context, dropping some related files (analyzed file src/crewai_codeint_mini/agent.py, included files: [], all files: [src/crewai_codeint_mini/_compat/docker.py src/crewai_codeint_mini/tools/code_interpreter_tool/code_interpreter_tool.py src/crewai_codeint_mini/llm.py])
+2026-10-14T16:57:37.587Z	WARN	log/zap.go:54	Too many tokens in detection context, dropping some related files (analyzed file src/crewai_codeint_mini/tools/code_interpreter_tool/code_interpreter_tool.py, included files: [], all files: [src/crewai_codeint_mini/agent.py src/crewai_codeint_mini/_compat/pydantic.py src/crewai_codeint_mini/_compat/docker.py src/crewai_codeint_mini/_compat/tools.py src/crewai_codeint_mini/printer.py])
+2026-10-14T16:57:37.587Z	INFO	log/zap.go:28	querying llm for rule:datadog/python-excessiveagency and src/crewai_codeint_mini/agent.py
+2026-10-14T16:57:37.588Z	WARN	log/zap.go:54	Too many tokens in detection context, dropping some related files (analyzed file src/crewai_codeint_mini/tools/code_interpreter_tool/code_interpreter_tool.py, included files: [src/crewai_codeint_mini/agent.py src/crewai_codeint_mini/printer.py], all files: [src/crewai_codeint_mini/agent.py src/crewai_codeint_mini/printer.py src/crewai_codeint_mini/_compat/pydantic.py src/crewai_codeint_mini/_compat/docker.py src/crewai_codeint_mini/_compat/tools.py])
+2026-10-14T16:57:37.589Z	WARN	log/zap.go:54	Too many tokens in detection context, dropping some related files (analyzed file src/crewai_codeint_mini/tools/code_interpreter_tool/code_interpreter_tool.py, included files: [src/crewai_codeint_mini/agent.py src/crewai_codeint_mini/_compat/docker.py], all files: [src/crewai_codeint_mini/agent.py src/crewai_codeint_mini/_compat/docker.py src/crewai_codeint_mini/_compat/pydantic.py src/crewai_codeint_mini/_compat/tools.py src/crewai_codeint_mini/printer.py])
+2026-10-14T16:57:37.590Z	INFO	log/zap.go:28	querying llm for rule:datadog/python-cmdi and src/crewai_codeint_mini/tools/code_interpreter_tool/code_interpreter_tool.py
+2026-10-14T16:57:37.950Z	WARN	log/zap.go:54	[debug] re-trying file src/crewai_codeint_mini/agent.py because of error: POST "https://api.openai.com/v1/chat/completions": 401 Unauthorized {
+    "message": "Incorrect API key provided: sk-proj-***. You can find your API key at https://platform.openai.com/account/api-keys.",
+    "type": "invalid_request_error",
+    "code": "invalid_api_key",
+    "param": null
+  }
+2026-10-14T16:57:37.950Z	WARN	log/zap.go:54	[re-trying] detected error: POST "https://api.openai.com/v1/chat/completions": 401 Unauthorized {
+    "message": "Incorrect API key provided: sk-proj-***. You can find your API key at https://platform.openai.com/account/api-keys.",
+    "type": "invalid_request_error",
+    "code": "invalid_api_key",
+    "param": null
+  }
+2026-10-14T16:57:37.951Z	INFO	log/zap.go:28	querying llm for rule:datadog/python-excessiveagency and src/crewai_codeint_mini/agent.py
+2026-10-14T16:57:37.970Z	WARN	log/zap.go:54	[debug] re-trying file src/crewai_codeint_mini/tools/code_interpreter_tool/code_interpreter_tool.py because of error: POST "https://api.openai.com/v1/chat/completions": 401 Unauthorized {
+    "message": "Incorrect API key provided: sk-proj-***. You can find your API key at https://platform.openai.com/account/api-keys.",
+    "type": "invalid_request_error",
+    "code": "invalid_api_key",
+    "param": null
+  }
+2026-10-14T16:57:37.970Z	WARN	log/zap.go:54	[re-trying] detected error: POST "https://api.openai.com/v1/chat/completions": 401 Unauthorized {
+    "message": "Incorrect API key provided: sk-proj-***. You can find your API key at https://platform.openai.com/account/api-keys.",
+    "type": "invalid_request_error",
+    "code": "invalid_api_key",
+    "param": null
+  }
+2026-10-14T16:57:37.970Z	INFO	log/zap.go:28	querying llm for rule:datadog/python-cmdi and src/crewai_codeint_mini/tools/code_interpreter_tool/code_interpreter_tool.py
+2026-10-14T16:57:38.055Z	WARN	log/zap.go:54	[debug] re-trying file src/crewai_codeint_mini/__main__.py because of error: POST "https://api.openai.com/v1/chat/completions": 401 Unauthorized {
+    "message": "Incorrect API key provided: sk-proj-***. You can find your API key at https://platform.openai.com/account/api-keys.",
+    "type": "invalid_request_error",
+    "code": "invalid_api_key",
+    "param": null
+  }
+2026-10-14T16:57:38.056Z	WARN	log/zap.go:54	[re-trying] detected error: POST "https://api.openai.com/v1/chat/completions": 401 Unauthorized {
+    "message": "Incorrect API key provided: sk-proj-***. You can find your API key at https://platform.openai.com/account/api-keys.",
+    "type": "invalid_request_error",

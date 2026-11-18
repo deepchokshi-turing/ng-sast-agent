@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import shutil
 from pathlib import Path
 
@@ -135,7 +136,7 @@ def test_happy_path_commands_logs_and_metadata(tmp_path):
     meta = context.metadata
     assert meta["status"] == "ok"
     assert meta["agent"] == "codeql-sast"
-    assert meta["agent_version"] == "0.4.0+codeql-2.27.1"
+    assert meta["agent_version"] == "0.5.0+codeql-2.27.1"
     assert meta["tool"] == "codeql" and meta["tool_version"] == "2.27.1"
     assert meta["scan"]["threads"] == 1 and meta["scan"]["ram_mb"] == 1536
     assert meta["scan"]["file_roots"] == ["pyproject.toml", "security_manifest.json"]
@@ -234,24 +235,33 @@ def test_install_failure_is_an_error_not_a_zero(tmp_path):
     assert "/app/output/findings.sarif" not in sandbox.files
 
 
-@pytest.mark.parametrize("sarif, create_exit, analyze_exit, message", [
-    (None, 0, 0, "could not read"),
-    (b"{not json", 0, 0, "unreadable"),
-    (b'{"runs": []}', 0, 0, "no runs"),
-    (b'{"runs": [{"tool": {}}]}', 0, 0, "no results list"),
-    (b'{"runs": [{"results": [], "invocations": [{"executionSuccessful": false}]}]}', 0, 0, "did not complete"),
-    (None, 32, 0, "database create exited 32: A fatal error occurred: boom"),
-    (SARIF_NO_PYTHON.read_bytes(), 0, 0, "extracted no Python code"),
-    (SARIF_7F3A91.read_bytes(), 0, 2, "database analyze exited 2"),
-    (SARIF_7F3A91.read_bytes(), 0, 124, "ran out of time"),
-    (SARIF_7F3A91.read_bytes(), 137, 0, "was killed"),
+@pytest.mark.parametrize("sarif, create_exit, analyze_exit, reason, message", [
+    (None, 0, 0, None, "could not read"),
+    (b"{not json", 0, 0, None, "unreadable"),
+    (b'{"runs": []}', 0, 0, None, "no runs"),
+    (b'{"runs": [{"tool": {}}]}', 0, 0, None, "no results list"),
+    # CodeQL failing on the repository or running out of budget: a tool outcome, scored 0.
+    (b'{"runs": [{"results": [], "invocations": [{"executionSuccessful": false}]}]}', 0, 0, "tool_crashed",
+     "did not complete"),
+    (None, 32, 0, "tool_crashed", "database create exited 32: A fatal error occurred: boom"),
+    (SARIF_NO_PYTHON.read_bytes(), 0, 0, "tool_saw_nothing", "extracted no Python code"),
+    (SARIF_7F3A91.read_bytes(), 0, 2, "tool_crashed", "database analyze exited 2"),
+    (SARIF_7F3A91.read_bytes(), 0, 124, "deadline", "ran out of time"),
+    (SARIF_7F3A91.read_bytes(), 137, 0, "tool_killed", "was killed"),
 ])
-def test_untrustworthy_scans_are_errors(tmp_path, sarif, create_exit, analyze_exit, message):
+def test_untrustworthy_scans_are_errors(tmp_path, sarif, create_exit, analyze_exit, reason, message):
+    """An infrastructure failure raises (errored, re-run); a tool outcome returns with no SARIF (scored 0)."""
     sandbox = FakeSandbox(sample_env(), sarif, create_exit=create_exit, analyze_exit=analyze_exit)
     _, context, go = run_agent(tmp_path, sandbox)
-    with pytest.raises(ScannerError, match=message):
+    if reason is None:
+        with pytest.raises(ScannerError, match=message):
+            asyncio.run(go())
+        assert context.metadata["status"] == "error"
+    else:
         asyncio.run(go())
-    assert context.metadata["status"] == "error"
+        assert context.metadata["status"] == "tool_outcome"
+        assert context.metadata["tool_outcome"]["reason"] == reason
+        assert re.search(message, context.metadata["tool_outcome"]["message"])
     assert "/app/output/findings.sarif" not in sandbox.files
     assert "/logs/artifacts/sast/metadata.json" in sandbox.files
     # The config, CodeQL's own output and its logs are kept after a failure too.
@@ -264,9 +274,9 @@ def test_untrustworthy_scans_are_errors(tmp_path, sarif, create_exit, analyze_ex
 
 def test_a_failed_create_never_runs_analyze(tmp_path):
     sandbox = FakeSandbox(sample_env(), SARIF_7F3A91.read_bytes(), create_exit=1)
-    _, _, go = run_agent(tmp_path, sandbox)
-    with pytest.raises(ScannerError):
-        asyncio.run(go())
+    _, context, go = run_agent(tmp_path, sandbox)
+    asyncio.run(go())
+    assert context.metadata["tool_outcome"]["reason"] == "tool_crashed"
     assert not any("database analyze" in c for c, _ in sandbox.commands)
 
 
@@ -310,8 +320,9 @@ def test_zero_lines_of_code_is_an_error(tmp_path):
     assert lines_of_code(json.loads(SARIF_NO_PYTHON.read_bytes())) == 0
     sandbox = FakeSandbox(sample_env(), SARIF_NO_PYTHON.read_bytes())
     _, context, go = run_agent(tmp_path, sandbox)
-    with pytest.raises(ScannerError, match="lines of code 0"):
-        asyncio.run(go())
+    asyncio.run(go())
+    assert context.metadata["tool_outcome"]["reason"] == "tool_saw_nothing"
+    assert "lines of code 0" in context.metadata["tool_outcome"]["message"]
     assert context.metadata["lines_of_code"] == 0
 
 
@@ -358,8 +369,10 @@ def test_an_error_level_extraction_failure_in_scope_is_an_error(tmp_path):
     sandbox = FakeSandbox(env_dir, json.dumps(document).encode(), kinds={"src": "DIR"},
                           python_files=("src/pkg/ok.py",))
     _, context, go = run_agent(tmp_path, sandbox)
-    with pytest.raises(ScannerError, match="error-level extraction problem.*src/pkg/bad_syntax.py"):
-        asyncio.run(go())
+    asyncio.run(go())
+    assert context.metadata["tool_outcome"]["reason"] == "tool_crashed"
+    assert re.search("error-level extraction problem.*src/pkg/bad_syntax.py",
+                     context.metadata["tool_outcome"]["message"])
     assert context.metadata["codeql_extraction"]["error_count"] == 1
 
 

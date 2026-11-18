@@ -8,11 +8,15 @@ ruleId by its CWE (``sast.cwe_map``) and writes /app/output/findings.sarif for
 the task's verifier. CodeQL path queries report a real dataflow path, and that
 path becomes the result's ``codeFlows``.
 
-A scan that cannot be trusted is a ScannerError: no Python in scope, a failed
-step, unusable SARIF, a lines-of-code metric that is 0 or missing, or an
-error-level extraction notification on an in-scope file. Warnings, such as a
-file CodeQL could not parse, are recorded in the metadata. The README's
-"Failure policy" gives the evidence for that line.
+A scan that cannot be trusted ends in one of two ways (``sast.errors``). CodeQL
+failing on this repository is a ``ToolOutcome``, scored 0 with no SARIF: a
+database step that ran out of the scan budget or exited non-zero, an analysis
+that reports it did not complete, a lines-of-code metric of 0, or an
+error-level extraction notification on an in-scope file. A broken setup is a
+``ScannerError`` (errored, re-run): no Python in scope, unreadable SARIF, a
+missing lines-of-code metric (wrong suite). Warnings, such as a file CodeQL
+could not parse, are recorded in the metadata. The README's "Failure policy"
+gives the evidence for that line.
 
 Local use::
 
@@ -33,7 +37,7 @@ from typing import Any, ClassVar
 from harbor.environments.base import BaseEnvironment
 
 from ..base import REPO_DIR, ScannerAgent
-from ..errors import ScannerError
+from ..errors import ScannerError, ToolOutcome
 from ..findings import Finding
 from ..scope import in_scope, task_scope
 from ..task_config import TaskSettings
@@ -341,6 +345,8 @@ class CodeQLAgent(ScannerAgent):
         try:
             findings, counts = normalise(document)
         except ValueError as exc:
+            if "did not complete" in str(exc):  # executionSuccessful: false
+                raise ToolOutcome("tool_crashed", str(exc)) from exc
             raise ScannerError(str(exc)) from exc
         meta.update(counts)
 
@@ -352,7 +358,8 @@ class CodeQLAgent(ScannerAgent):
                 "code was extracted (is the suite python-security-extended?)"
             )
         if loc == 0:
-            raise ScannerError(
+            raise ToolOutcome(
+                "tool_saw_nothing",
                 f"CodeQL extracted no Python code (lines of code 0) although the scope has "
                 f"{meta.get('python_files_in_scope')} Python files: the scan saw nothing"
             )
@@ -361,15 +368,14 @@ class CodeQLAgent(ScannerAgent):
         meta["codeql_extraction"] = report
         if report["errors_in_scope"]:
             first = report["errors_in_scope"][0]
-            raise ScannerError(
+            raise ToolOutcome(
+                "tool_crashed",
                 f"CodeQL reported {len(report['errors_in_scope'])} error-level extraction problem(s) in "
                 f"in-scope files, so they were not analysed: {first['id']} on {', '.join(first['files'][:3])}: "
                 f"{first['message']}"
             )
 
-        kept = [f for f in findings if in_scope(f.file, roots, excludes)]
-        meta["findings_out_of_scope"] = len(findings) - len(kept)
-        return kept
+        return self._keep_in_scope(findings, roots, excludes, meta)
 
     def artifact_files(self) -> dict[str, str]:
         work = getattr(self, "_work_dir", None)
@@ -401,16 +407,18 @@ class CodeQLAgent(ScannerAgent):
                         deadline: float, env: dict[str, str], meta: dict[str, Any]) -> None:
         remaining = deadline - time.monotonic()
         if remaining < 1:
-            raise ScannerError(f"no time left for {what}")
+            raise ToolOutcome("deadline", f"the scan budget ran out before {what}")
         started = time.monotonic()
-        result = await self._exec(environment, command, timeout_sec=remaining, what=what, cwd=REPO_DIR, env=env)
+        result = await self._exec(environment, command, timeout_sec=remaining, what=what, cwd=REPO_DIR, env=env,
+                                  tool_step=True)
         seconds = round(time.monotonic() - started, 1)
         self._write_log(log_name, command, result, seconds)
         meta["scan"][f"{log_name}_exit_code"] = result.return_code
         meta["scan"][f"{log_name}_seconds"] = seconds
         if result.return_code != 0:
             reason = failure_reason(f"{result.stdout or ''}\n{result.stderr or ''}")
-            raise ScannerError(f"{what} exited {result.return_code}: {reason} (full log: agent/{log_name}/stdout.txt)")
+            raise ToolOutcome("tool_crashed",
+                              f"{what} exited {result.return_code}: {reason} (full log: agent/{log_name}/stdout.txt)")
 
     async def _classify_roots(
         self, environment: BaseEnvironment, roots: list[str], meta: dict[str, Any]

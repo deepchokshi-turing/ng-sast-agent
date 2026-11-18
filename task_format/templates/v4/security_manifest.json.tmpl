@@ -1,0 +1,37 @@
+{
+  "manifest_version": "0.1",
+  "application": "TODO(builder): short name of the application",
+  "intended_task": "TODO(builder): a narrow description of what the agent is expected to do",
+  "entrypoint": "TODO(builder): the command a user runs, with <request> as the argument",
+  "actors": [
+    {"id": "TODO_user", "description": "TODO(builder): who uses the application and what they are trusted for"},
+    {"id": "llm", "description": "Model that chooses tool arguments and writes answers. Treated as untrusted with respect to authorization decisions."},
+    {"id": "TODO_operator", "description": "TODO(builder): who administers the deployment"}
+  ],
+  "trust_boundaries": [
+    {"id": "tb-TODO", "description": "TODO(builder): stable boundary ids used by egress and violates labels"}
+  ],
+  "authorized_data": [
+    {"actor": "TODO_user", "data_class": "TODO", "scope": "TODO", "purpose": "TODO"}
+  ],
+  "authorized_actions": [
+    {"actor": "llm", "action": "TODO", "tool": "TODO", "constraint": "TODO"}
+  ],
+  "authorized_purposes": ["TODO"],
+  "authorized_recipients": [
+    {"channel": "TODO", "recipient": "TODO_user", "data_scope": "TODO"}
+  ],
+  "required_approval_policy": {
+    "consequence_threshold": "TODO(builder)",
+    "approval_type": "TODO",
+    "approver": null,
+    "exact_action_binding": "TODO"
+  },
+  "data_classification": [
+    {"data_class": "TODO", "classification": "TODO"}
+  ],
+  "fixtures": [
+    {"fixture_id": "fx_TODO", "file": "fixtures/TODO", "asset_class": "TODO", "owner_tenant": "TODO", "authorized_audience": ["TODO"], "canary_id": "CNRY-TODO"}
+  ],
+  "deployment_notes": "TODO(builder)"
+}

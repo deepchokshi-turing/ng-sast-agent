@@ -75,10 +75,15 @@ def test_category_math_matches_hand_computation(report):
 def test_risk_type_tables(report):
     risks = report[0]["summary"]["risk_types"]
     s = risks["sensitive_information_disclosure"]
-    assert {k: s[k] for k in ("TP", "FN", "TN", "FP")} == {"TP": 1, "FN": 0, "TN": 2, "FP": 1}
-    assert s["FPR"] == pytest.approx(1 / 3) and s["precision"] == 0.5
+    # FPR is over the negatives only (t2, t3). t4 is a positive without SID: it can
+    # never predict SID under the strict rule, so it sits apart, not in TN.
+    assert {k: s[k] for k in ("TP", "FN", "TN", "FP")} == {"TP": 1, "FN": 0, "TN": 1, "FP": 1}
+    assert (s["FP_other_pos"], s["TN_other_pos"]) == (0, 1)
+    assert s["FPR"] == pytest.approx(1 / 2) and s["precision"] == 0.5
     e = risks["excessive_agency"]
     assert {k: e[k] for k in ("TP", "FN", "TN", "FP")} == {"TP": 1, "FN": 1, "TN": 2, "FP": 0}
+    assert risks["exact_by_role"] == {"positive": {"tasks": 2, "exact": 1, "exact_rate": 0.5},
+                                      "negative": {"tasks": 2, "exact": 1, "exact_rate": 0.5}}
     assert risks["by_truth_set"] == {
         "both": {"tasks": 1, "exact": 0, "exact_rate": 0.0},
         "neither": {"tasks": 2, "exact": 1, "exact_rate": 0.5},
@@ -89,8 +94,13 @@ def test_risk_type_tables(report):
 def test_measurements_and_fp_out(report):
     data, stdout, md = report
     m = data["summary"]["measurements_positive_tasks"]
-    assert m["tasks"] == 3 and m["path"] == pytest.approx(0.5)  # (0.5 + 1.0 + 0.0) / 3
-    assert data["summary"]["fp_outside_scope"] == 5
+    # t5 (SARIF missing) is not scored, so it is left out of the means and named apart.
+    assert m["tasks"] == 2 and m["path"] == pytest.approx(0.75)  # (0.5 + 1.0) / 2
+    assert m["supported"] == {"path": None, "controls": None, "recommendations": None}  # no SARIF to read
+    assert data["summary"]["fp_outside_scope"] == 4
+    det = data["summary"]["pooled_detection"]
+    assert (det["gt"], det["tasks_not_scored"], det["gt_not_scored"]) == (3, 1, 1)
+    assert "recall leaves out 1 finding on 1 positive that was not scored" in stdout
     assert "fp_out" in stdout and "youden" in stdout and "| category |" in md
 
 
@@ -114,7 +124,7 @@ def test_reward_is_reported_per_role_never_combined(tmp_path):
                           check=True, capture_output=True, text=True)
     summary = json.loads((out / "report.json").read_text())["summary"]
     roles = summary["reward_by_role"]
-    assert roles["positive"] == {"tasks": 1, "mean_reward": pytest.approx(0.2)}
+    assert roles["positive"] == {"tasks": 1, "mean_reward": pytest.approx(0.2), "not_scored": 0}
     assert roles["negative"]["tasks"] == 3 and roles["negative"]["mean_reward"] == pytest.approx(1 / 3)
     assert (roles["negative"]["failed"], roles["negative"]["failed_near_fix"], roles["negative"]["failed_trap"]) == (3 - 1, 1, 1)
     assert "mean_reward" not in summary  # no mean over positives and negatives together
@@ -155,7 +165,8 @@ def test_job_directory_mode_still_works(tmp_path):
             "agent_result": {"metadata": {"status": "ok"}}}))
     proc = subprocess.run([sys.executable, str(REPORT), str(tmp_path / "jobs")], check=True,
                           capture_output=True, text=True)
-    assert "trials 4, graded 4" in proc.stdout and "mean TPR 0.750" in proc.stdout
+    # Categories of one or two tasks per side: the category means are not printed (audit A6).
+    assert "trials 4, graded 4" in proc.stdout and "mean TPR too few tasks" in proc.stdout
     rows = json.loads(subprocess.run([sys.executable, str(REPORT), str(job), "--json"], check=True,
                                      capture_output=True, text=True).stdout)
     assert [r["fp_out"] for r in rows] == [1, 1, 1, 1]
@@ -322,7 +333,7 @@ def test_ground_truth_shingles(tmp_path, text, leaks):
 
 
 @pytest.mark.parametrize("dockerfile", [
-    "ARG IMG=sast-tools:0.4.0\nFROM ${IMG} AS tools\nFROM python:3.12-slim\nCOPY --from=tools /opt/sast /opt/sast\n"
+    "ARG IMG=sast-tools:0.5.0\nFROM ${IMG} AS tools\nFROM python:3.12-slim\nCOPY --from=tools /opt/sast /opt/sast\n"
     "COPY repo/ /app/repo/\n",
     "FROM python:3.12-slim\nCOPY ./repo /app/repo\n",
     'FROM python:3.12-slim\nCOPY ["repo", "/app/repo"]\n',
@@ -342,3 +353,116 @@ def test_missing_twin_is_reported(tmp_path):
     shutil.rmtree(tmp_path / "task_abc_negative")
     proc = leak(tmp_path)
     assert proc.returncode == 1 and "twin task_abc_negative not found" in proc.stdout
+
+
+def role_free(root: Path) -> None:
+    """Rename the twins to role-free ids and write VARIANTS.json, as harbor-tasks does."""
+    (root / "task_abc_positive").rename(root / "task_11111111")
+    (root / "task_abc_negative").rename(root / "task_22222222")
+    (root / "VARIANTS.json").write_text(json.dumps({
+        "task_11111111": {"family": "abc", "role": "positive", "twin": "task_22222222",
+                          "former_name": "task_abc_positive"},
+        "task_22222222": {"family": "abc", "role": "negative", "twin": "task_11111111",
+                          "former_name": "task_abc_negative"}}))
+
+
+def test_role_free_twins_are_paired_through_variants(tmp_path):
+    make_twin(tmp_path)
+    role_free(tmp_path)
+    assert leak(tmp_path).returncode == 0
+    (tmp_path / "task_22222222/environment/repo/src/mini/app.py").write_text("print('bye')\n")
+    proc = leak(tmp_path)
+    assert proc.returncode == 1 and "outside fix_changed_files" in proc.stdout
+    assert "task_11111111  FAIL" in proc.stdout and "task_22222222  FAIL" in proc.stdout
+
+
+def test_task_missing_from_variants_is_reported(tmp_path):
+    make_twin(tmp_path)
+    role_free(tmp_path)
+    variants = json.loads((tmp_path / "VARIANTS.json").read_text())
+    del variants["task_22222222"]
+    (tmp_path / "VARIANTS.json").write_text(json.dumps(variants))
+    proc = leak(tmp_path)
+    assert proc.returncode == 1 and "task missing from VARIANTS.json" in proc.stdout
+
+
+def drop_former_names(root: Path) -> dict:
+    variants = json.loads((root / "VARIANTS.json").read_text())
+    for v in variants.values():
+        v.pop("former_name", None)
+    (root / "VARIANTS.json").write_text(json.dumps(variants))
+    return variants
+
+
+def test_role_free_twins_pair_by_role_without_former_name(tmp_path):
+    make_twin(tmp_path)
+    role_free(tmp_path)
+    drop_former_names(tmp_path)
+    proc = leak(tmp_path)
+    assert proc.returncode == 0, proc.stdout
+    # The pair is checked once, against the positive's fix_changed_files.
+    (tmp_path / "task_22222222/environment/repo/src/mini/app.py").write_text("print('bye')\n")
+    proc = leak(tmp_path)
+    assert proc.returncode == 1 and proc.stdout.count("outside fix_changed_files") == 2  # one line per twin
+
+
+def partial_control(root: Path, *, former: bool, code_state: bool) -> None:
+    """Both twins positive, as when a twin with the upstream fix keeps a partial control."""
+    make_twin(root)
+    role_free(root)
+    variants = json.loads((root / "VARIANTS.json").read_text())
+    variants["task_22222222"]["role"] = "positive"
+    (root / "VARIANTS.json").write_text(json.dumps(variants))
+    if not former:
+        drop_former_names(root)
+    if code_state:
+        for name, state in (("task_11111111", "source_commit"), ("task_22222222", "upstream_fix_applied")):
+            prov = root / name / "validation" / "provenance.json"
+            data = json.loads(prov.read_text())
+            data["lineage"] = {"code_state": state}
+            prov.write_text(json.dumps(data))
+
+
+@pytest.mark.parametrize("former, code_state", [(True, False), (False, True)])
+def test_partial_control_pair_is_settled(tmp_path, former, code_state):
+    partial_control(tmp_path, former=former, code_state=code_state)
+    proc = leak(tmp_path)
+    assert proc.returncode == 0, proc.stdout
+
+
+def test_partial_control_pair_that_cannot_be_settled_is_reported(tmp_path):
+    partial_control(tmp_path, former=False, code_state=False)
+    proc = leak(tmp_path)
+    assert proc.returncode == 1 and "cannot tell which of task_11111111 and task_22222222" in proc.stdout
+    assert "task_11111111  FAIL" in proc.stdout and "task_22222222  FAIL" in proc.stdout
+
+
+def write_toml(task: Path, task_id: str, variant: str, related: str, pins: str) -> None:
+    (task / "task.toml").write_text(
+        'version = "1.0"\n\n[metadata]\n'
+        f'task_id = "{task_id}"\nvariant_id = "{variant}"\nrelated_variant_ids = ["{related}"]\n'
+        f'package_versions = {{ python = "3.12.15", mini = "{pins}" }}\n')
+
+
+def test_task_toml_may_differ_only_in_ids(tmp_path):
+    make_twin(tmp_path)
+    role_free(tmp_path)
+    write_toml(tmp_path / "task_11111111", "task_11111111", "var_a", "fam_1:var_b", "1.0.0")
+    write_toml(tmp_path / "task_22222222", "task_22222222", "var_b", "fam_1:var_a", "1.0.0")
+    assert leak(tmp_path).returncode == 0
+    write_toml(tmp_path / "task_22222222", "task_22222222", "var_b", "fam_1:var_a", "1.0.1")
+    proc = leak(tmp_path)
+    assert proc.returncode == 1 and "task.toml differs between twins in metadata.package_versions.mini" in proc.stdout
+    assert "task_11111111  FAIL" in proc.stdout and "task_22222222  FAIL" in proc.stdout
+
+
+@pytest.mark.parametrize("name, text", [
+    ("task.toml", 'version = "1.0"\n# fixed in 1.0.1\n'),
+    ("instruction.md", "Scan the repo for path traversal.\n"),
+])
+def test_banned_words_in_task_toml_and_instruction(tmp_path, name, text):
+    make_twin(tmp_path)
+    for role in ("positive", "negative"):
+        (tmp_path / f"task_abc_{role}" / name).write_text(text)
+    proc = leak(tmp_path)
+    assert proc.returncode == 1 and f"at {name}:" in proc.stdout

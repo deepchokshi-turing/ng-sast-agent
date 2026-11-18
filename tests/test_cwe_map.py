@@ -54,15 +54,17 @@ def test_llm02_is_medium_unless_a_boundary_is_shown():
     assert cwe_map.task_rule(("CWE-862",)) == cwe_map.SID_MEDIUM
     for cwe in ("CWE-201", "CWE-532", "CWE-359"):
         assert cwe_map.task_rule((cwe,)) == cwe_map.SID_HIGH, cwe
-    # 918 and 319 raise an LLM02 result as secondary CWEs, but never make one.
+    # 918 raises an LLM02 result as a secondary CWE, but never makes one.
     assert cwe_map.task_rule(("CWE-200", "CWE-918")) == cwe_map.SID_HIGH
-    assert cwe_map.task_rule(("CWE-200", "CWE-319")) == cwe_map.SID_HIGH
+    # cwe-map-5: 319 (clear-text transport) neither raises nor carries one.
+    assert cwe_map.task_rule(("CWE-209", "CWE-319")) == cwe_map.SID_MEDIUM
+    assert cwe_map.task_rule(("CWE-200", "CWE-319")) is None
     assert cwe_map.task_rule(("CWE-918",)) == cwe_map.EA_FUNCTIONALITY
     assert cwe_map.task_rule(("CWE-319",)) is None
     # Other families ignore the boundary.
     assert cwe_map.task_rule(("CWE-95", "CWE-532")) == cwe_map.EA_FUNCTIONALITY
     assert cwe_map.task_rule(("CWE-250",)) == cwe_map.EA_PERMISSIONS
-    assert cwe_map.VERSION == "cwe-map-4"
+    assert cwe_map.VERSION == "cwe-map-5"
     assert cwe_map.SID_MEDIUM in cwe_map.RULE_DESCRIPTIONS
 
 
@@ -87,10 +89,19 @@ import pytest
      ("CWE-22", "CWE-23", "CWE-73", "CWE-36", "CWE-99")),
     # py/code-injection
     (("CWE-94", "CWE-95", "CWE-116"), "mapped", cwe_map.EA_FUNCTIONALITY, ("CWE-94", "CWE-95", "CWE-116")),
-    # python:S5332: 319 is unmapped, so 200 decides.
-    (("CWE-319", "CWE-200"), "mapped", cwe_map.SID_HIGH, ("CWE-200", "CWE-319")),
-    # Two families.
-    (("CWE-200", "CWE-22"), "ambiguous", None, ("CWE-22", "CWE-200")),
+    # python:S5332 (cwe-map-5): the generic 200 cannot carry clear-text transport.
+    (("CWE-319", "CWE-200"), "unmapped", None, ("CWE-319", "CWE-200")),
+    (("CWE-200", "CWE-312"), "unmapped", None, ("CWE-312", "CWE-200")),
+    (("CWE-798", "CWE-284"), "unmapped", None, ("CWE-798", "CWE-284")),
+    # A specific mapped CWE keeps its family next to a NOT_DISCLOSURE CWE.
+    (("CWE-319", "CWE-532"), "mapped", cwe_map.SID_HIGH, ("CWE-532", "CWE-319")),
+    # Generic CWEs alone still decide.
+    (("CWE-668", "CWE-284"), "mapped", cwe_map.SID_HIGH, ("CWE-284", "CWE-668")),
+    # docker:S6471 (cwe-map-5): the specific 250 outranks the pillar 284.
+    (("CWE-284", "CWE-250"), "mapped", cwe_map.EA_PERMISSIONS, ("CWE-250", "CWE-284")),
+    (("CWE-200", "CWE-22"), "mapped", cwe_map.EA_FUNCTIONALITY, ("CWE-22", "CWE-200")),
+    # Two specific families.
+    (("CWE-532", "CWE-22"), "ambiguous", None, ("CWE-22", "CWE-532")),
     (("CWE-250", "CWE-78", "CWE-1"), "ambiguous", None, ("CWE-1", "CWE-78", "CWE-250")),
     # Duplicates collapse.
     (("CWE-95", "CWE-95"), "mapped", cwe_map.EA_FUNCTIONALITY, ("CWE-95",)),
@@ -105,7 +116,10 @@ def test_decide_unordered_reordered_tuple_gives_the_decided_rule():
     assert cwe_map.rule_for(ordered) == family
     assert cwe_map.task_rule(ordered) == cwe_map.SID_HIGH
     _, _, ordered = cwe_map.decide_unordered(("CWE-319", "CWE-200"))
-    assert cwe_map.task_rule(ordered) == cwe_map.SID_HIGH  # S5332: 319 is a boundary CWE
+    assert cwe_map.rule_for(ordered) is None  # S5332: dropped, counted under CWE-319
+    assert ordered[0] == "CWE-319"
+    _, _, ordered = cwe_map.decide_unordered(("CWE-284", "CWE-250"))
+    assert cwe_map.task_rule(ordered) == cwe_map.EA_PERMISSIONS  # docker:S6471
     _, _, ordered = cwe_map.decide_unordered(("CWE-209", "CWE-497"))  # py/stack-trace-exposure
     assert cwe_map.task_rule(ordered) == cwe_map.SID_MEDIUM
     for cwes in [("CWE-327", "CWE-20"), ("CWE-1",)]:
@@ -136,3 +150,29 @@ def test_decide_unordered_accepts_any_iterable():
     assert cwe_map.decide_unordered(iter(["CWE-95"]))[0] == "mapped"
     assert cwe_map.decide_unordered(None) == ("none", None, ())
     assert cwe_map.decide_unordered({"CWE-532", "CWE-312"})[1] == cwe_map.SID_HIGH
+
+
+# --- cwe-map-5: transport is not disclosure, generic CWEs yield ---------------
+
+def test_generic_primary_cannot_carry_a_not_disclosure_cwe():
+    # Holds for tools with a primary CWE (Semgrep) as well.
+    assert cwe_map.rule_for(("CWE-200", "CWE-319")) is None
+    assert cwe_map.rule_for(("CWE-284", "CWE-798")) is None
+    assert cwe_map.rule_for(("CWE-200",)) == cwe_map.SID_HIGH
+    # A primary specific CWE is untouched, and with a primary the primary decides.
+    assert cwe_map.rule_for(("CWE-532", "CWE-319")) == cwe_map.SID_HIGH
+    assert cwe_map.rule_for(("CWE-284", "CWE-250")) == cwe_map.SID_HIGH
+
+
+def test_not_disclosure_and_generic_sets_are_consistent():
+    assert cwe_map.GENERIC_CWES <= set(cwe_map.CWE_MAP)
+    assert not cwe_map.NOT_DISCLOSURE_CWES & set(cwe_map.CWE_MAP)
+    assert "CWE-319" not in cwe_map.BOUNDARY_CWES
+    assert {cwe_map.CWE_MAP[c][0] for c in cwe_map.GENERIC_CWES} == {cwe_map.SID_HIGH}
+
+
+def test_cwe_939_stays_unmapped():
+    # Semgrep dynamic-urllib-use-detected. CWE-939 is about custom URL scheme
+    # handlers, not URL fetching, so the table does not map it (see the docstring).
+    assert cwe_map.rule_for(("CWE-939",)) is None
+    assert cwe_map.decide_unordered(("CWE-939",))[0] == "unmapped"
