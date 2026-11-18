@@ -63,7 +63,31 @@ def _update_json(path: Path, extra: dict) -> None:
     path.write_text(json.dumps(data, indent=2))
 
 
+GRADER_UID = GRADER_GID = 10001
+
+
+def _drop_to_grader() -> None:
+    """Run as the non-root ``grader`` user, whatever started us.
+
+    The image starts as root (see the Dockerfile: Harbor's Daytona backend needs
+    that for its own setup), so the wrapper sheds it before grade.py runs. The
+    output directory is handed to ``grader`` first, so it can write its results.
+    """
+    if os.geteuid() != 0:
+        return
+    out = _out_dir(sys.argv[1:])
+    if "--check-truth" not in sys.argv[1:]:
+        out.mkdir(parents=True, exist_ok=True)
+        os.chown(out, GRADER_UID, GRADER_GID)
+    os.setgroups([])
+    os.setgid(GRADER_GID)
+    os.setuid(GRADER_UID)
+    os.environ["HOME"] = "/home/grader"
+    os.environ["USER"] = os.environ["LOGNAME"] = "grader"
+
+
 def main() -> int:
+    _drop_to_grader()
     argv = sys.argv[1:]
     sys.argv = [str(GRADE_PY), *argv]
     code = 0

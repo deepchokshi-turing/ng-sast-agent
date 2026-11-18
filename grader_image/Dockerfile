@@ -35,4 +35,9 @@ RUN groupadd --gid 10001 grader \
  && python3 /opt/grader/grade --help > /dev/null
 
 WORKDIR /tests
-USER grader
+# 3.3.1: no USER here. The image starts as root and /opt/grader/grade drops to
+# the non-root `grader` user itself before grading. Harbor's Daytona backend
+# runs its own setup in the verifier sandbox as `su root ...`, which waits for a
+# password forever when the image's default user is not root, so a non-root
+# USER made every separate verifier time out on Daytona (Docker uses
+# `docker exec -u root` and never noticed). Grading still never runs as root.
