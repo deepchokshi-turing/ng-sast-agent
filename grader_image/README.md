@@ -68,4 +68,4 @@ harbor job regrade jobs/<job> -p path/to/tasks -e docker
 harbor trial regrade jobs/<job>/<trial> -p path/to/task -e docker
 ```
 
-Each regraded trial records the grader that scored it (`grader_version_*` in `reward.json`, `grader_image_version` in `grading_detail.json`). Harbor 0.25 constructs the agent environment object even for a regrade, so variables templated in `[environment.env]` (e.g. `PROMPTFOO_TOKEN`) must exist on the host, even if empty. A trial whose agent produced no SARIF cannot be regraded when the artifact is declared as the file; see `pilot_v4/README.md`.
+Each regraded trial records the grader that scored it (`grader_version_*` in `reward.json`, `grader_image_version` in `grading_detail.json`). A trial whose agent produced no SARIF cannot be regraded when the artifact is declared as the file; see `pilot_v4/README.md`.

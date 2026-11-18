@@ -44,8 +44,7 @@
 # of qc.md, and if one fails the three files are restored. Rerunning on an unchanged pair
 # changes nothing but the date. --no-write-provenance leaves the task files untouched.
 #
-# Docker must be running unless --skip-docker is given (checked first). The local Harbor run gets
-# PROMPTFOO_TOKEN exported (empty unless already set), which Harbor 0.26 needs to start the trial.
+# Docker must be running unless --skip-docker is given (checked first).
 set -uo pipefail
 
 usage() { awk 'NR > 1 && !/^#/ { exit } NR > 1' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
@@ -106,8 +105,6 @@ if [ "$SKIP_DOCKER" = 0 ] && ! docker info >/dev/null 2>&1; then
   echo "'Engine running', then rerun. To run only the checks that need no Docker, add --skip-docker." >&2
   exit 2
 fi
-# Harbor 0.26 fails the trial when PROMPTFOO_TOKEN is unset on the host; these runs use no Promptfoo agent.
-export PROMPTFOO_TOKEN="${PROMPTFOO_TOKEN-}"
 PY="$AG/.venv/Scripts/python.exe"; [ -x "$PY" ] || PY="$AG/.venv/bin/python"
 [ -x "$PY" ] || { echo "no tooling venv: run 'uv sync' in $AG" >&2; exit 2; }
 export PYTHONUTF8=1 PYTHONDONTWRITEBYTECODE=1

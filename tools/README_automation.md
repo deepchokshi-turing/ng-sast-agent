@@ -102,7 +102,7 @@ This is lead mode: the script picks it when `<batch>/<family>/_work/slot.json` e
 | instruction | Twins byte-identical; identical to the v4 template except the scope sentence, which must match task.toml (WARN otherwise) |
 | harbor-lint | `harbor lint` on both, no findings |
 | repro | `validation/repro_test.py` of each twin passes on its own code and fails on the twin's, `--network none`, in `python:3.12-slim` (Python) or in the twin's own environment image (other languages) |
-| harbor-run | Harbor 0.26 local run: oracle 1.0 on both, nop 0.0 on both (no SARIF is no answer). The script exports `PROMPTFOO_TOKEN` (empty unless already set), which Harbor needs to start a trial |
+| harbor-run | Harbor 0.26 local run: oracle 1.0 on both, nop 0.0 on both (no SARIF is no answer). |
 | clean-build | Optional: `tools/check_clean_build.py` (build, test, entrypoint in fresh no-network containers) |
 
 The Harbor run uses scratch copies whose task.toml drops the `[agent]` allowlist and sets `[verifier.environment] network_mode = "public"`: this machine's Docker Desktop WSL2 kernel lacks `CONFIG_NFT_FIB_INET`, so Harbor's docker environment cannot enforce `no-network` / `allowlist` and rejects the tasks as written. Network isolation is not verified locally; qc.md says so.
