@@ -11,7 +11,7 @@ The task grader (`task_format/grade.py`, v3.3) baked into a small image that v4 
 | `/opt/grader/VERSION` | Image version, e.g. `3.3.0`. Major and minor must match grade.py's `GRADER_VERSION` (`v3.3`); `build.sh` refuses to build otherwise |
 | env `GRADER_IMAGE` | The image reference baked in at build time (`.../sast-grader:3`) |
 
-Base is `python:3.12-slim` pinned by digest (the same base as the task images). The grader uses only the standard library, needs no network at runtime, and runs as the non-root user `grader` (uid 10001). `/opt/grader` is root-owned and read-only to that user; `/logs/verifier` is owned by it.
+Base is `python:3.12-slim` pinned by digest (the same base as the task images). The grader uses only the standard library, needs no network at runtime, and grades as the non-root user `grader` (uid 10001). Since 3.3.1 the image itself starts as root and `/opt/grader/grade` drops to `grader` before running `grade.py`: Harbor's Daytona backend runs its own verifier setup as `su root …`, which waits forever for a password when the image's default user is not root, so a `USER grader` image timed out every separate verifier on Daytona (Docker's `docker exec -u root` never hit it). `/opt/grader` is root-owned and read-only to that user; `/logs/verifier` is owned by it.
 
 Usage, as in a task's `tests/test.sh`:
 
